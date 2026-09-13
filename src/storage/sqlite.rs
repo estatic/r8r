@@ -39,14 +39,40 @@ impl SqliteStorage {
 
 #[async_trait]
 impl Storage for SqliteStorage {
-    async fn create_workflow(&self, _workflow: &Workflow) -> anyhow::Result<()> {
-        unimplemented!("added in Task 4")
+    async fn create_workflow(&self, workflow: &Workflow) -> anyhow::Result<()> {
+        let definition = serde_json::json!({
+            "nodes": workflow.nodes,
+            "connections": workflow.connections,
+        });
+        sqlx::query(
+            "INSERT INTO workflows (id, name, active, definition, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)"
+        )
+        .bind(workflow.id.to_string())
+        .bind(&workflow.name)
+        .bind(workflow.active as i64)
+        .bind(definition.to_string())
+        .bind(workflow.created_at.to_rfc3339())
+        .bind(workflow.updated_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
-    async fn get_workflow(&self, _id: Uuid) -> anyhow::Result<Option<Workflow>> {
-        unimplemented!("added in Task 4")
+    async fn get_workflow(&self, id: Uuid) -> anyhow::Result<Option<Workflow>> {
+        let row = sqlx::query_as::<_, (String, String, i64, String, String, String)>(
+            "SELECT id, name, active, definition, created_at, updated_at FROM workflows WHERE id = ?"
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        Ok(row.map(row_to_workflow).transpose()?)
     }
     async fn list_workflows(&self) -> anyhow::Result<Vec<Workflow>> {
-        Ok(vec![])
+        let rows = sqlx::query_as::<_, (String, String, i64, String, String, String)>(
+            "SELECT id, name, active, definition, created_at, updated_at FROM workflows"
+        )
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_workflow).collect()
     }
     async fn create_execution(&self, _execution: &Execution) -> anyhow::Result<()> {
         unimplemented!("added in Task 5")
@@ -65,9 +91,74 @@ impl Storage for SqliteStorage {
     }
 }
 
+fn row_to_workflow(
+    row: (String, String, i64, String, String, String),
+) -> anyhow::Result<Workflow> {
+    let (id, name, active, definition, created_at, updated_at) = row;
+    let def: serde_json::Value = serde_json::from_str(&definition)?;
+    Ok(Workflow {
+        id: Uuid::parse_str(&id)?,
+        name,
+        active: active != 0,
+        nodes: serde_json::from_value(def["nodes"].clone())?,
+        connections: serde_json::from_value(def["connections"].clone())?,
+        created_at: chrono::DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&chrono::Utc),
+        updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&chrono::Utc),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::domain::NodeInstance;
+    use chrono::Utc;
+
+    fn sample_workflow() -> Workflow {
+        Workflow {
+            id: Uuid::new_v4(),
+            name: "sample".into(),
+            active: false,
+            nodes: vec![NodeInstance {
+                id: "n1".into(),
+                node_type: "core.manualTrigger".into(),
+                position: (0.0, 0.0),
+                parameters: serde_json::json!({}),
+                disabled: false,
+            }],
+            connections: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_and_get_workflow_round_trips() {
+        let storage = SqliteStorage::new("sqlite::memory:").await.unwrap();
+        let wf = sample_workflow();
+        storage.create_workflow(&wf).await.unwrap();
+
+        let fetched = storage.get_workflow(wf.id).await.unwrap().unwrap();
+        assert_eq!(fetched.id, wf.id);
+        assert_eq!(fetched.name, wf.name);
+        assert_eq!(fetched.nodes, wf.nodes);
+    }
+
+    #[tokio::test]
+    async fn list_workflows_returns_created_ones() {
+        let storage = SqliteStorage::new("sqlite::memory:").await.unwrap();
+        storage.create_workflow(&sample_workflow()).await.unwrap();
+        storage.create_workflow(&sample_workflow()).await.unwrap();
+
+        let all = storage.list_workflows().await.unwrap();
+        assert_eq!(all.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn get_workflow_returns_none_when_missing() {
+        let storage = SqliteStorage::new("sqlite::memory:").await.unwrap();
+        let result = storage.get_workflow(Uuid::new_v4()).await.unwrap();
+        assert!(result.is_none());
+    }
 
     #[tokio::test]
     async fn new_connects_and_migrates() {
