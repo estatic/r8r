@@ -1,4 +1,5 @@
 pub mod domain;
+pub mod storage;
 
 use axum::{routing::get, Router};
 

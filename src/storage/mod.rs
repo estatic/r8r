@@ -1,0 +1,19 @@
+pub mod sqlite;
+
+use crate::domain::{Execution, User, Workflow};
+use async_trait::async_trait;
+use uuid::Uuid;
+
+#[async_trait]
+pub trait Storage: Send + Sync {
+    async fn create_workflow(&self, workflow: &Workflow) -> anyhow::Result<()>;
+    async fn get_workflow(&self, id: Uuid) -> anyhow::Result<Option<Workflow>>;
+    async fn list_workflows(&self) -> anyhow::Result<Vec<Workflow>>;
+
+    async fn create_execution(&self, execution: &Execution) -> anyhow::Result<()>;
+    async fn update_execution(&self, execution: &Execution) -> anyhow::Result<()>;
+    async fn get_execution(&self, id: Uuid) -> anyhow::Result<Option<Execution>>;
+
+    async fn create_user(&self, user: &User) -> anyhow::Result<()>;
+    async fn get_user_by_email(&self, email: &str) -> anyhow::Result<Option<User>>;
+}
