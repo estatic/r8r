@@ -194,3 +194,66 @@ async fn create_then_get_then_list_workflow() {
     let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(list.as_array().unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn create_execute_and_fetch_execution_end_to_end() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "exec@example.com").await;
+
+    let workflow_body = serde_json::json!({
+        "name": "exec-wf",
+        "nodes": [
+            {"id": "trigger", "node_type": "core.manualTrigger", "position": [0.0, 0.0], "parameters": {}, "disabled": false},
+            {"id": "set1", "node_type": "core.set", "position": [1.0, 0.0], "parameters": {"fields": {"greeting": "hi"}}, "disabled": false}
+        ],
+        "connections": [
+            {"from_node": "trigger", "from_output": 0, "to_node": "set1", "to_input": 0}
+        ]
+    });
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/workflows")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(workflow_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let workflow: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let workflow_id = workflow["id"].as_str().unwrap();
+
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(execution["status"], "Success");
+    assert_eq!(execution["node_outputs"]["set1"][0]["json"]["greeting"], "hi");
+    let execution_id = execution["id"].as_str().unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/rest/executions/{execution_id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+}

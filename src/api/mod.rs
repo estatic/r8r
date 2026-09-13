@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod executions;
 pub mod workflows;
 
 use crate::state::AppState;
@@ -11,6 +12,8 @@ pub fn build_router(state: AppState) -> Router {
         .route("/rest/auth/login", post(auth::login))
         .route("/rest/workflows", post(workflows::create_workflow).get(workflows::list_workflows))
         .route("/rest/workflows/:id", get(workflows::get_workflow))
+        .route("/rest/workflows/:id/execute", post(workflows::execute_workflow))
+        .route("/rest/executions/:id", get(executions::get_execution))
         .route("/health", get(|| async { "ok" }))
         .with_state(state)
 }

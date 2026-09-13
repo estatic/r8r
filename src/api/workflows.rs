@@ -1,4 +1,4 @@
-use crate::domain::{Connection, NodeInstance, Workflow};
+use crate::domain::{Connection, Execution, ExecutionMode, ExecutionStatus, NodeInstance, Workflow};
 use crate::state::AppState;
 use axum::async_trait;
 use axum::extract::{FromRequestParts, Path, State};
@@ -76,4 +76,45 @@ pub async fn list_workflows(
         Ok(workflows) => Json(workflows).into_response(),
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
     }
+}
+
+pub async fn execute_workflow(
+    State(state): State<AppState>,
+    AuthUser(_user_id): AuthUser,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let workflow = match state.storage.get_workflow(id).await {
+        Ok(Some(wf)) => wf,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+    };
+
+    let mut execution = Execution {
+        id: Uuid::new_v4(),
+        workflow_id: workflow.id,
+        status: ExecutionStatus::Running,
+        mode: ExecutionMode::Manual,
+        node_outputs: Default::default(),
+        started_at: chrono::Utc::now(),
+        finished_at: None,
+    };
+    if state.storage.create_execution(&execution).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    match crate::engine::execute_workflow(&workflow, &state.registry).await {
+        Ok(outputs) => {
+            execution.status = ExecutionStatus::Success;
+            execution.node_outputs = outputs;
+        }
+        Err(_) => {
+            execution.status = ExecutionStatus::Error;
+        }
+    }
+    execution.finished_at = Some(chrono::Utc::now());
+    if state.storage.update_execution(&execution).await.is_err() {
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    Json(execution).into_response()
 }
