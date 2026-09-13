@@ -81,3 +81,26 @@ async fn login_with_wrong_password_returns_401() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
 }
+
+#[tokio::test]
+async fn login_with_unregistered_email_returns_401() {
+    // Structural check for the login timing/user-enumeration fix: an email
+    // that was never registered must take the same "401, no distinguishing
+    // body" branch as a wrong password for a registered email (see
+    // login_with_wrong_password_returns_401 above and the dummy-hash verify
+    // in src/api/auth.rs::login).
+    let app = test_app().await;
+    let login_body = serde_json::json!({"email": "nobody@nowhere.com", "password": "whatever"});
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from(login_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
