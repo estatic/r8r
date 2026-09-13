@@ -32,11 +32,33 @@ fn linear_order(workflow: &Workflow) -> anyhow::Result<Vec<NodeInstance>> {
     if workflow.nodes.is_empty() {
         return Ok(Vec::new());
     }
+
+    let mut outgoing_counts: HashMap<&str, usize> = HashMap::new();
+    for conn in &workflow.connections {
+        *outgoing_counts.entry(conn.from_node.as_str()).or_insert(0) += 1;
+    }
+    if let Some((node_id, _)) = outgoing_counts.iter().find(|(_, count)| **count > 1) {
+        return Err(anyhow::anyhow!(
+            "node {} has more than one outgoing connection (branching is not supported)",
+            node_id
+        ));
+    }
+
     let targets: HashSet<&str> = workflow.connections.iter().map(|c| c.to_node.as_str()).collect();
-    let start = workflow
+    let start_candidates: Vec<&NodeInstance> = workflow
         .nodes
         .iter()
-        .find(|n| !targets.contains(n.id.as_str()))
+        .filter(|n| !targets.contains(n.id.as_str()))
+        .collect();
+    if workflow.nodes.len() > 1 && start_candidates.len() > 1 {
+        return Err(anyhow::anyhow!(
+            "found {} disconnected start candidates (disconnected components are not supported)",
+            start_candidates.len()
+        ));
+    }
+    let start = start_candidates
+        .into_iter()
+        .next()
         .ok_or_else(|| anyhow::anyhow!("no start node found (cycle or empty graph)"))?;
 
     let mut order = vec![start.clone()];
@@ -120,6 +142,55 @@ mod tests {
     async fn unknown_node_type_returns_error() {
         let mut wf = linear_workflow();
         wf.nodes[1].node_type = "core.doesNotExist".into();
+        let result = execute_workflow(&wf, &registry()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn node_with_two_outgoing_connections_returns_error() {
+        let mut wf = linear_workflow();
+        wf.nodes.push(NodeInstance {
+            id: "set2".into(),
+            node_type: "core.set".into(),
+            position: (2.0, 0.0),
+            parameters: serde_json::json!({"fields": {"other": "value"}}),
+            disabled: false,
+        });
+        // "trigger" now has two outgoing connections: -> set1 and -> set2.
+        wf.connections.push(Connection {
+            from_node: "trigger".into(),
+            from_output: 0,
+            to_node: "set2".into(),
+            to_input: 0,
+        });
+        let result = execute_workflow(&wf, &registry()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn disconnected_components_return_error() {
+        let mut wf = linear_workflow();
+        // Add a second, disjoint linear chain: "trigger2" -> "set2".
+        wf.nodes.push(NodeInstance {
+            id: "trigger2".into(),
+            node_type: "core.manualTrigger".into(),
+            position: (0.0, 1.0),
+            parameters: serde_json::json!({}),
+            disabled: false,
+        });
+        wf.nodes.push(NodeInstance {
+            id: "set2".into(),
+            node_type: "core.set".into(),
+            position: (1.0, 1.0),
+            parameters: serde_json::json!({"fields": {"other": "value"}}),
+            disabled: false,
+        });
+        wf.connections.push(Connection {
+            from_node: "trigger2".into(),
+            from_output: 0,
+            to_node: "set2".into(),
+            to_input: 0,
+        });
         let result = execute_workflow(&wf, &registry()).await;
         assert!(result.is_err());
     }
