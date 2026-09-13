@@ -74,14 +74,41 @@ impl Storage for SqliteStorage {
         .await?;
         rows.into_iter().map(row_to_workflow).collect()
     }
-    async fn create_execution(&self, _execution: &Execution) -> anyhow::Result<()> {
-        unimplemented!("added in Task 5")
+    async fn create_execution(&self, execution: &Execution) -> anyhow::Result<()> {
+        let data = serde_json::to_string(&execution.node_outputs)?;
+        sqlx::query(
+            "INSERT INTO executions (id, workflow_id, status, mode, data, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+        )
+        .bind(execution.id.to_string())
+        .bind(execution.workflow_id.to_string())
+        .bind(serde_json::to_string(&execution.status)?)
+        .bind(serde_json::to_string(&execution.mode)?)
+        .bind(data)
+        .bind(execution.started_at.to_rfc3339())
+        .bind(execution.finished_at.map(|t| t.to_rfc3339()))
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
-    async fn update_execution(&self, _execution: &Execution) -> anyhow::Result<()> {
-        unimplemented!("added in Task 5")
+    async fn update_execution(&self, execution: &Execution) -> anyhow::Result<()> {
+        let data = serde_json::to_string(&execution.node_outputs)?;
+        sqlx::query("UPDATE executions SET status = ?, data = ?, finished_at = ? WHERE id = ?")
+            .bind(serde_json::to_string(&execution.status)?)
+            .bind(data)
+            .bind(execution.finished_at.map(|t| t.to_rfc3339()))
+            .bind(execution.id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
     }
-    async fn get_execution(&self, _id: Uuid) -> anyhow::Result<Option<Execution>> {
-        unimplemented!("added in Task 5")
+    async fn get_execution(&self, id: Uuid) -> anyhow::Result<Option<Execution>> {
+        let row = sqlx::query_as::<_, (String, String, String, String, String, String, Option<String>)>(
+            "SELECT id, workflow_id, status, mode, data, started_at, finished_at FROM executions WHERE id = ?"
+        )
+        .bind(id.to_string())
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(row_to_execution).transpose()
     }
     async fn create_user(&self, _user: &User) -> anyhow::Result<()> {
         unimplemented!("added in Task 6")
@@ -107,11 +134,29 @@ fn row_to_workflow(
     })
 }
 
+fn row_to_execution(
+    row: (String, String, String, String, String, String, Option<String>),
+) -> anyhow::Result<Execution> {
+    let (id, workflow_id, status, mode, data, started_at, finished_at) = row;
+    Ok(Execution {
+        id: Uuid::parse_str(&id)?,
+        workflow_id: Uuid::parse_str(&workflow_id)?,
+        status: serde_json::from_str(&status)?,
+        mode: serde_json::from_str(&mode)?,
+        node_outputs: serde_json::from_str(&data)?,
+        started_at: chrono::DateTime::parse_from_rfc3339(&started_at)?.with_timezone(&chrono::Utc),
+        finished_at: finished_at
+            .map(|t| chrono::DateTime::parse_from_rfc3339(&t).map(|d| d.with_timezone(&chrono::Utc)))
+            .transpose()?,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::NodeInstance;
+    use crate::domain::{Execution, ExecutionMode, ExecutionStatus, Item, NodeInstance};
     use chrono::Utc;
+    use std::collections::HashMap;
 
     fn sample_workflow() -> Workflow {
         Workflow {
@@ -158,6 +203,59 @@ mod tests {
         let storage = SqliteStorage::new("sqlite::memory:").await.unwrap();
         let result = storage.get_workflow(Uuid::new_v4()).await.unwrap();
         assert!(result.is_none());
+    }
+
+    fn sample_execution(workflow_id: Uuid) -> Execution {
+        Execution {
+            id: Uuid::new_v4(),
+            workflow_id,
+            status: ExecutionStatus::Running,
+            mode: ExecutionMode::Manual,
+            node_outputs: HashMap::new(),
+            started_at: Utc::now(),
+            finished_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn create_and_get_execution_round_trips() {
+        let storage = SqliteStorage::new("sqlite::memory:").await.unwrap();
+        let wf = sample_workflow();
+        storage.create_workflow(&wf).await.unwrap();
+        let exec = sample_execution(wf.id);
+        storage.create_execution(&exec).await.unwrap();
+
+        let fetched = storage.get_execution(exec.id).await.unwrap().unwrap();
+        assert_eq!(fetched.id, exec.id);
+        assert_eq!(fetched.status, ExecutionStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn update_execution_persists_new_status_and_outputs() {
+        let storage = SqliteStorage::new("sqlite::memory:").await.unwrap();
+        let wf = sample_workflow();
+        storage.create_workflow(&wf).await.unwrap();
+        let mut exec = sample_execution(wf.id);
+        storage.create_execution(&exec).await.unwrap();
+
+        exec.status = ExecutionStatus::Success;
+        exec.finished_at = Some(Utc::now());
+        exec.node_outputs.insert(
+            "n1".into(),
+            vec![Item {
+                json: serde_json::json!({"a": 1}),
+                binary: serde_json::json!({}),
+            }],
+        );
+        storage.update_execution(&exec).await.unwrap();
+
+        let fetched = storage.get_execution(exec.id).await.unwrap().unwrap();
+        assert_eq!(fetched.status, ExecutionStatus::Success);
+        assert!(fetched.finished_at.is_some());
+        assert_eq!(
+            fetched.node_outputs["n1"][0].json,
+            serde_json::json!({"a": 1})
+        );
     }
 
     #[tokio::test]
