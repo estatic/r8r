@@ -3,6 +3,10 @@ name = "r8r"
 version = "0.1.0"
 edition = "2021"
 
+[lib]
+name = "r8r"
+path = "src/lib.rs"
+
 [dependencies]
 axum = "0.7"
 tokio = { version = "1", features = ["full"] }
