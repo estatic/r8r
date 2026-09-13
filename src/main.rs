@@ -15,8 +15,11 @@ async fn main() {
     let storage = SqliteStorage::new(&db_url)
         .await
         .expect("failed to initialize storage");
+    let mut registry = r8r::node::NodeRegistry::new();
+    r8r::nodes::register_all(&mut registry);
     let state = AppState {
         storage: Arc::new(storage),
+        registry: Arc::new(registry),
         jwt_secret,
     };
 

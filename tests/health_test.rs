@@ -7,8 +7,11 @@ use tower::ServiceExt;
 
 async fn test_app() -> axum::Router {
     let storage = SqliteStorage::new("sqlite::memory:").await.unwrap();
+    let mut registry = r8r::node::NodeRegistry::new();
+    r8r::nodes::register_all(&mut registry);
     let state = AppState {
         storage: Arc::new(storage),
+        registry: Arc::new(registry),
         jwt_secret: "test-secret".into(),
     };
     r8r::api::build_router(state)
