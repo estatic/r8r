@@ -110,11 +110,37 @@ impl Storage for SqliteStorage {
         .await?;
         row.map(row_to_execution).transpose()
     }
-    async fn create_user(&self, _user: &User) -> anyhow::Result<()> {
-        unimplemented!("added in Task 6")
+    async fn create_user(&self, user: &User) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO users (id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)"
+        )
+        .bind(user.id.to_string())
+        .bind(&user.email)
+        .bind(&user.password_hash)
+        .bind(serde_json::to_string(&user.role)?)
+        .bind(user.created_at.to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
     }
-    async fn get_user_by_email(&self, _email: &str) -> anyhow::Result<Option<User>> {
-        unimplemented!("added in Task 6")
+
+    async fn get_user_by_email(&self, email: &str) -> anyhow::Result<Option<User>> {
+        let row = sqlx::query_as::<_, (String, String, String, String, String)>(
+            "SELECT id, email, password_hash, role, created_at FROM users WHERE email = ?"
+        )
+        .bind(email)
+        .fetch_optional(&self.pool)
+        .await?;
+        row.map(|(id, email, password_hash, role, created_at)| {
+            Ok::<_, anyhow::Error>(User {
+                id: Uuid::parse_str(&id)?,
+                email,
+                password_hash,
+                role: serde_json::from_str(&role)?,
+                created_at: chrono::DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&chrono::Utc),
+            })
+        })
+        .transpose()
     }
 }
 
@@ -154,7 +180,7 @@ fn row_to_execution(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::domain::{Execution, ExecutionMode, ExecutionStatus, Item, NodeInstance};
+    use crate::domain::{Execution, ExecutionMode, ExecutionStatus, Item, NodeInstance, User, UserRole};
     use chrono::Utc;
     use std::collections::HashMap;
 
@@ -292,5 +318,32 @@ mod tests {
 
         drop(storage);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn sample_user() -> User {
+        User {
+            id: Uuid::new_v4(),
+            email: "user@example.com".into(),
+            password_hash: "irrelevant-for-storage-test".into(),
+            role: UserRole::Owner,
+            created_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn create_and_get_user_by_email_round_trips() {
+        let storage = SqliteStorage::new("sqlite::memory:").await.unwrap();
+        let user = sample_user();
+        storage.create_user(&user).await.unwrap();
+
+        let fetched = storage.get_user_by_email(&user.email).await.unwrap().unwrap();
+        assert_eq!(fetched.id, user.id);
+        assert_eq!(fetched.role, UserRole::Owner);
+    }
+
+    #[tokio::test]
+    async fn get_user_by_email_returns_none_when_missing() {
+        let storage = SqliteStorage::new("sqlite::memory:").await.unwrap();
+        assert!(storage.get_user_by_email("nobody@example.com").await.unwrap().is_none());
     }
 }
