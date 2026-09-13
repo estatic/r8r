@@ -1,10 +1,22 @@
 use axum::body::Body;
 use http_body_util::BodyExt;
+use r8r::state::AppState;
+use r8r::storage::sqlite::SqliteStorage;
+use std::sync::Arc;
 use tower::ServiceExt;
+
+async fn test_app() -> axum::Router {
+    let storage = SqliteStorage::new("sqlite::memory:").await.unwrap();
+    let state = AppState {
+        storage: Arc::new(storage),
+        jwt_secret: "test-secret".into(),
+    };
+    r8r::api::build_router(state)
+}
 
 #[tokio::test]
 async fn health_returns_ok() {
-    let app = r8r::health_router();
+    let app = test_app().await;
     let response = app
         .oneshot(axum::http::Request::builder().uri("/health").body(Body::empty()).unwrap())
         .await
