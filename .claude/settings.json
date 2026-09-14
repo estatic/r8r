@@ -1,0 +1,16 @@
+{
+  "hooks": {
+    "PostCompact": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 .claude/hooks/post_compact_to_wiki.py",
+            "timeout": 15,
+            "statusMessage": "Filing compaction summary into wiki/log.md..."
+          }
+        ]
+      }
+    ]
+  }
+}
