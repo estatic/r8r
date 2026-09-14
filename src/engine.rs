@@ -11,6 +11,15 @@ pub async fn execute_workflow(
     let mut current_items: Vec<Item> = Vec::new();
 
     for node_instance in order {
+        if node_instance.disabled {
+            // A disabled node is a no-op passthrough: it still occupies a slot
+            // in the chain (already validated by `linear_order`), but its
+            // input items flow through to the next node unchanged, and it is
+            // never handed to the registry or executed.
+            outputs.insert(node_instance.id.clone(), current_items.clone());
+            continue;
+        }
+
         let node = registry
             .get(&node_instance.node_type)
             .ok_or_else(|| anyhow::anyhow!("unknown node type: {}", node_instance.node_type))?;
@@ -63,14 +72,25 @@ fn linear_order(workflow: &Workflow) -> anyhow::Result<Vec<NodeInstance>> {
 
     let mut order = vec![start.clone()];
     let mut current_id = start.id.clone();
+    let mut seen: HashSet<String> = HashSet::from([start.id.clone()]);
     while let Some(conn) = workflow.connections.iter().find(|c| c.from_node == current_id) {
         let next = workflow
             .nodes
             .iter()
             .find(|n| n.id == conn.to_node)
             .ok_or_else(|| anyhow::anyhow!("dangling connection to {}", conn.to_node))?;
+        if !seen.insert(next.id.clone()) {
+            return Err(anyhow::anyhow!("cycle detected at node {}", next.id));
+        }
         order.push(next.clone());
         current_id = next.id.clone();
+    }
+    if order.len() != workflow.nodes.len() {
+        return Err(anyhow::anyhow!(
+            "workflow is not a single linear chain: {} of {} nodes reachable from start",
+            order.len(),
+            workflow.nodes.len()
+        ));
     }
     Ok(order)
 }
@@ -193,5 +213,107 @@ mod tests {
         });
         let result = execute_workflow(&wf, &registry()).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn cycle_downstream_of_valid_start_returns_error_and_terminates() {
+        // a -> b -> c -> b: "a" is the unique, valid start node (never a
+        // to_node), and every node has exactly one outgoing connection, so
+        // neither the branching check nor the disconnected-start check fires.
+        // Without cycle tracking the b -> c -> b walk loops forever.
+        let mut wf = linear_workflow();
+        wf.nodes[1].id = "b".into(); // was "set1"
+        wf.nodes.push(NodeInstance {
+            id: "c".into(),
+            node_type: "core.set".into(),
+            position: (2.0, 0.0),
+            parameters: serde_json::json!({}),
+            disabled: false,
+        });
+        wf.connections.clear();
+        wf.connections.push(Connection {
+            from_node: "trigger".into(),
+            from_output: 0,
+            to_node: "b".into(),
+            to_input: 0,
+        });
+        wf.connections.push(Connection {
+            from_node: "b".into(),
+            from_output: 0,
+            to_node: "c".into(),
+            to_input: 0,
+        });
+        wf.connections.push(Connection {
+            from_node: "c".into(),
+            from_output: 0,
+            to_node: "b".into(),
+            to_input: 0,
+        });
+
+        // Race the call against a short timeout: a regression that reintroduces
+        // the infinite loop must fail this test instead of hanging the suite.
+        let result = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            execute_workflow(&wf, &registry()),
+        )
+        .await
+        .expect("execute_workflow must terminate promptly, not hang on a cycle");
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn dangling_from_node_returns_error() {
+        // Connection "ghost" -> "b": "ghost" is not a node in the workflow, so
+        // it's never walked as current_id, and "b" (the only real to_node)
+        // makes "a" look like the unique valid start. Without the
+        // order.len() != nodes.len() reachability check, this would silently
+        // return Ok([a]) and "b" would never execute.
+        let mut wf = linear_workflow();
+        wf.nodes[1].id = "b".into();
+        wf.connections.clear();
+        wf.connections.push(Connection {
+            from_node: "ghost".into(),
+            from_output: 0,
+            to_node: "b".into(),
+            to_input: 0,
+        });
+
+        let result = execute_workflow(&wf, &registry()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn disabled_node_is_skipped_as_passthrough() {
+        // trigger -> disabled "set_disabled" (would add {"skipped": "yes"} if
+        // it ran) -> "set_final" (adds {"final": "yes"}). The disabled node's
+        // field must NOT appear in the final output, while both the trigger's
+        // (empty) output and the final node's field must.
+        let mut wf = linear_workflow();
+        wf.nodes[1].id = "set_disabled".into();
+        wf.nodes[1].parameters = serde_json::json!({"fields": {"skipped": "yes"}});
+        wf.nodes[1].disabled = true;
+        wf.connections[0].to_node = "set_disabled".into();
+        wf.nodes.push(NodeInstance {
+            id: "set_final".into(),
+            node_type: "core.set".into(),
+            position: (2.0, 0.0),
+            parameters: serde_json::json!({"fields": {"final": "yes"}}),
+            disabled: false,
+        });
+        wf.connections.push(Connection {
+            from_node: "set_disabled".into(),
+            from_output: 0,
+            to_node: "set_final".into(),
+            to_input: 0,
+        });
+
+        let outputs = execute_workflow(&wf, &registry()).await.unwrap();
+
+        // The disabled node passed its (empty-object) input through unchanged.
+        assert_eq!(outputs["set_disabled"][0].json, serde_json::json!({}));
+        // The final node's own field is present...
+        assert_eq!(outputs["set_final"][0].json, serde_json::json!({"final": "yes"}));
+        // ...and critically, the disabled node's field never made it downstream.
+        assert!(outputs["set_final"][0].json.get("skipped").is_none());
     }
 }
