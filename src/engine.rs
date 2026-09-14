@@ -1,6 +1,6 @@
 use crate::domain::{Item, NodeInstance, Workflow};
 use crate::node::{NodeExecutionContext, NodeRegistry};
-use std::collections::{HashMap, HashSet};
+use std::collections::{HashMap, HashSet, VecDeque};
 
 pub async fn execute_workflow(
     workflow: &Workflow,
@@ -37,62 +37,81 @@ pub async fn execute_workflow(
     Ok(outputs)
 }
 
-fn linear_order(workflow: &Workflow) -> anyhow::Result<Vec<NodeInstance>> {
+fn topological_order(workflow: &Workflow) -> anyhow::Result<Vec<NodeInstance>> {
     if workflow.nodes.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut outgoing_counts: HashMap<&str, usize> = HashMap::new();
     for conn in &workflow.connections {
-        *outgoing_counts.entry(conn.from_node.as_str()).or_insert(0) += 1;
-    }
-    if let Some((node_id, _)) = outgoing_counts.iter().find(|(_, count)| **count > 1) {
-        return Err(anyhow::anyhow!(
-            "node {} has more than one outgoing connection (branching is not supported)",
-            node_id
-        ));
+        if !workflow.nodes.iter().any(|n| n.id == conn.from_node) {
+            return Err(anyhow::anyhow!("connection references unknown from_node {}", conn.from_node));
+        }
+        if !workflow.nodes.iter().any(|n| n.id == conn.to_node) {
+            return Err(anyhow::anyhow!("connection references unknown to_node {}", conn.to_node));
+        }
     }
 
     let targets: HashSet<&str> = workflow.connections.iter().map(|c| c.to_node.as_str()).collect();
-    let start_candidates: Vec<&NodeInstance> = workflow
+    let start_candidates: Vec<&str> = workflow
         .nodes
         .iter()
-        .filter(|n| !targets.contains(n.id.as_str()))
+        .map(|n| n.id.as_str())
+        .filter(|id| !targets.contains(id))
         .collect();
-    if workflow.nodes.len() > 1 && start_candidates.len() > 1 {
+    if workflow.nodes.len() > 1 && start_candidates.len() != 1 {
         return Err(anyhow::anyhow!(
-            "found {} disconnected start candidates (disconnected components are not supported)",
+            "expected exactly one start node, found {}",
             start_candidates.len()
         ));
     }
-    let start = start_candidates
-        .into_iter()
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("no start node found (cycle or empty graph)"))?;
 
-    let mut order = vec![start.clone()];
-    let mut current_id = start.id.clone();
-    let mut seen: HashSet<String> = HashSet::from([start.id.clone()]);
-    while let Some(conn) = workflow.connections.iter().find(|c| c.from_node == current_id) {
-        let next = workflow
-            .nodes
-            .iter()
-            .find(|n| n.id == conn.to_node)
-            .ok_or_else(|| anyhow::anyhow!("dangling connection to {}", conn.to_node))?;
-        if !seen.insert(next.id.clone()) {
-            return Err(anyhow::anyhow!("cycle detected at node {}", next.id));
+    let position_of = |id: &str| workflow.nodes.iter().position(|n| n.id == id).unwrap();
+
+    let mut in_degree: HashMap<&str, usize> = workflow.nodes.iter().map(|n| (n.id.as_str(), 0)).collect();
+    let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
+    let mut seen_edges: HashSet<(&str, &str)> = HashSet::new();
+    for conn in &workflow.connections {
+        if seen_edges.insert((conn.from_node.as_str(), conn.to_node.as_str())) {
+            adjacency.entry(conn.from_node.as_str()).or_default().push(conn.to_node.as_str());
+            *in_degree.entry(conn.to_node.as_str()).or_insert(0) += 1;
         }
-        order.push(next.clone());
-        current_id = next.id.clone();
     }
-    if order.len() != workflow.nodes.len() {
+
+    let mut ready: Vec<&str> = in_degree.iter().filter(|(_, d)| **d == 0).map(|(id, _)| *id).collect();
+    ready.sort_by_key(|id| position_of(id));
+    let mut queue: VecDeque<&str> = ready.into();
+
+    let mut order_ids: Vec<String> = Vec::new();
+    while let Some(id) = queue.pop_front() {
+        order_ids.push(id.to_string());
+        if let Some(next_ids) = adjacency.get(id) {
+            let mut newly_ready: Vec<&str> = Vec::new();
+            for &next in next_ids {
+                let degree = in_degree.get_mut(next).unwrap();
+                *degree -= 1;
+                if *degree == 0 {
+                    newly_ready.push(next);
+                }
+            }
+            newly_ready.sort_by_key(|id| position_of(id));
+            for id in newly_ready {
+                queue.push_back(id);
+            }
+        }
+    }
+
+    if order_ids.len() != workflow.nodes.len() {
         return Err(anyhow::anyhow!(
-            "workflow is not a single linear chain: {} of {} nodes reachable from start",
-            order.len(),
+            "cycle detected: only {} of {} nodes are reachable via a valid topological order",
+            order_ids.len(),
             workflow.nodes.len()
         ));
     }
-    Ok(order)
+
+    Ok(order_ids
+        .into_iter()
+        .map(|id| workflow.nodes.iter().find(|n| n.id == id).unwrap().clone())
+        .collect())
 }
 
 #[cfg(test)]
@@ -138,6 +157,86 @@ mod tests {
         let mut r = NodeRegistry::new();
         crate::nodes::register_all(&mut r);
         r
+    }
+
+    #[test]
+    fn topological_order_handles_simple_linear_chain() {
+        let wf = linear_workflow();
+        let order = topological_order(&wf).unwrap();
+        assert_eq!(order.iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), vec!["trigger", "set1"]);
+    }
+
+    #[test]
+    fn topological_order_allows_branching() {
+        let mut wf = linear_workflow();
+        wf.nodes.push(NodeInstance {
+            id: "set2".into(),
+            node_type: "core.set".into(),
+            position: (2.0, 0.0),
+            parameters: serde_json::json!({}),
+            disabled: false,
+        });
+        wf.connections.push(Connection {
+            from_node: "trigger".into(),
+            from_output: 0,
+            to_node: "set2".into(),
+            to_input: 0,
+        });
+        let order = topological_order(&wf).unwrap();
+        assert_eq!(order[0].id, "trigger");
+        let rest: std::collections::HashSet<&str> = order[1..].iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(rest, std::collections::HashSet::from(["set1", "set2"]));
+    }
+
+    #[test]
+    fn topological_order_detects_cycle_downstream_of_valid_start() {
+        let mut wf = linear_workflow();
+        wf.nodes[1].id = "b".into();
+        wf.nodes.push(NodeInstance {
+            id: "c".into(),
+            node_type: "core.set".into(),
+            position: (2.0, 0.0),
+            parameters: serde_json::json!({}),
+            disabled: false,
+        });
+        wf.connections.clear();
+        wf.connections.push(Connection { from_node: "trigger".into(), from_output: 0, to_node: "b".into(), to_input: 0 });
+        wf.connections.push(Connection { from_node: "b".into(), from_output: 0, to_node: "c".into(), to_input: 0 });
+        wf.connections.push(Connection { from_node: "c".into(), from_output: 0, to_node: "b".into(), to_input: 0 });
+
+        let result = topological_order(&wf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn topological_order_rejects_dangling_connection_endpoints() {
+        let mut wf = linear_workflow();
+        wf.connections.push(Connection { from_node: "ghost".into(), from_output: 0, to_node: "set1".into(), to_input: 0 });
+        let result = topological_order(&wf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn topological_order_rejects_multiple_start_candidates() {
+        let mut wf = linear_workflow();
+        wf.nodes.push(NodeInstance {
+            id: "trigger2".into(),
+            node_type: "core.manualTrigger".into(),
+            position: (0.0, 1.0),
+            parameters: serde_json::json!({}),
+            disabled: false,
+        });
+        let result = topological_order(&wf);
+        assert!(result.is_err());
+    }
+
+    #[test]
+    fn topological_order_handles_empty_workflow() {
+        let mut wf = linear_workflow();
+        wf.nodes.clear();
+        wf.connections.clear();
+        let order = topological_order(&wf).unwrap();
+        assert!(order.is_empty());
     }
 
     #[tokio::test]
