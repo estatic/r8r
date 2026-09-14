@@ -6,35 +6,82 @@ pub async fn execute_workflow(
     workflow: &Workflow,
     registry: &NodeRegistry,
 ) -> anyhow::Result<HashMap<String, Vec<Item>>> {
-    let order = linear_order(workflow)?;
-    let mut outputs: HashMap<String, Vec<Item>> = HashMap::new();
-    let mut current_items: Vec<Item> = Vec::new();
+    let order = topological_order(workflow)?;
+    let mut produced: HashMap<String, crate::node::NodeOutput> = HashMap::new();
 
-    for node_instance in order {
+    for node_instance in &order {
+        // Aggregate this node's input items from every incoming connection,
+        // pulling each upstream node's items from the SPECIFIC from_output
+        // port index that connection names (not just port 0).
+        let mut input_items: Vec<Item> = Vec::new();
+        for conn in &workflow.connections {
+            if conn.to_node != node_instance.id {
+                continue;
+            }
+            if let Some(outputs) = produced.get(&conn.from_node) {
+                if let Some(port_items) = outputs.get(conn.from_output) {
+                    input_items.extend(port_items.iter().cloned());
+                }
+            }
+        }
+
         if node_instance.disabled {
-            // A disabled node is a no-op passthrough: it still occupies a slot
-            // in the chain (already validated by `linear_order`), but its
-            // input items flow through to the next node unchanged, and it is
-            // never handed to the registry or executed.
-            outputs.insert(node_instance.id.clone(), current_items.clone());
+            // A disabled node is a no-op passthrough: its input items flow
+            // through unchanged as its (single-port) output, and it is never
+            // handed to the registry, executed, or given resolved parameters.
+            produced.insert(node_instance.id.clone(), vec![input_items]);
             continue;
         }
 
         let node = registry
             .get(&node_instance.node_type)
             .ok_or_else(|| anyhow::anyhow!("unknown node type: {}", node_instance.node_type))?;
-        let ctx = NodeExecutionContext {
-            parameters: node_instance.parameters.clone(),
-            input_items: current_items.clone(),
+
+        // Resolve this node's parameters via the expression engine before
+        // execute(), with $node built from every already-executed node's
+        // PRIMARY (port 0) output's first item only.
+        let items_json: Vec<serde_json::Value> = input_items.iter().map(|i| i.json.clone()).collect();
+        let node_json: HashMap<String, serde_json::Value> = produced
+            .iter()
+            .filter_map(|(id, ports)| {
+                let first_item_json = ports.first().and_then(|p| p.first()).map(|item| item.json.clone());
+                first_item_json.map(|j| (id.clone(), j))
+            })
+            .collect();
+        let eval_ctx = crate::expr::EvalContext {
+            json: input_items.first().map(|i| i.json.clone()).unwrap_or_else(|| serde_json::json!({})),
+            items: &items_json,
+            node_json: &node_json,
+            workflow_name: &workflow.name,
         };
-        let result = node
+        let resolved_parameters = crate::expr::resolve_parameters(&node_instance.parameters, &eval_ctx)
+            .map_err(|e| anyhow::anyhow!("node {} parameter resolution failed: {e}", node_instance.id))?;
+
+        let ctx = NodeExecutionContext {
+            parameters: resolved_parameters,
+            input_items,
+        };
+        let output = node
             .execute(&ctx)
             .await
             .map_err(|e| anyhow::anyhow!("node {} failed: {e}", node_instance.id))?;
-        outputs.insert(node_instance.id.clone(), result.clone());
-        current_items = result;
+        produced.insert(node_instance.id.clone(), output);
     }
-    Ok(outputs)
+
+    // Persist/return only each node's primary (port 0) output, flattened
+    // into the pre-existing HashMap<String, Vec<Item>> shape.
+    let flattened = order
+        .into_iter()
+        .map(|n| {
+            let items = produced
+                .get(&n.id)
+                .and_then(|ports| ports.first())
+                .cloned()
+                .unwrap_or_default();
+            (n.id, items)
+        })
+        .collect();
+    Ok(flattened)
 }
 
 fn topological_order(workflow: &Workflow) -> anyhow::Result<Vec<NodeInstance>> {
@@ -266,7 +313,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn node_with_two_outgoing_connections_returns_error() {
+    async fn branching_workflow_executes_both_downstream_nodes() {
         let mut wf = linear_workflow();
         wf.nodes.push(NodeInstance {
             id: "set2".into(),
@@ -275,15 +322,52 @@ mod tests {
             parameters: serde_json::json!({"fields": {"other": "value"}}),
             disabled: false,
         });
-        // "trigger" now has two outgoing connections: -> set1 and -> set2.
         wf.connections.push(Connection {
             from_node: "trigger".into(),
             from_output: 0,
             to_node: "set2".into(),
             to_input: 0,
         });
-        let result = execute_workflow(&wf, &registry()).await;
-        assert!(result.is_err());
+        let outputs = execute_workflow(&wf, &registry()).await.unwrap();
+        assert_eq!(outputs["set1"][0].json, serde_json::json!({"greeting": "hi"}));
+        assert_eq!(outputs["set2"][0].json, serde_json::json!({"other": "value"}));
+    }
+
+    #[tokio::test]
+    async fn node_with_two_incoming_connections_receives_both_upstream_outputs() {
+        // trigger -> set1 (adds greeting), trigger -> set2 (adds other),
+        // set1 -> set3, set2 -> set3: set3 should see items carrying BOTH fields
+        // aggregated from its two incoming connections.
+        let mut wf = linear_workflow();
+        wf.nodes.push(NodeInstance {
+            id: "set2".into(),
+            node_type: "core.set".into(),
+            position: (2.0, 0.0),
+            parameters: serde_json::json!({"fields": {"other": "value"}}),
+            disabled: false,
+        });
+        wf.nodes.push(NodeInstance {
+            id: "set3".into(),
+            node_type: "core.set".into(),
+            position: (3.0, 0.0),
+            parameters: serde_json::json!({}),
+            disabled: false,
+        });
+        wf.connections.push(Connection { from_node: "trigger".into(), from_output: 0, to_node: "set2".into(), to_input: 0 });
+        wf.connections.push(Connection { from_node: "set1".into(), from_output: 0, to_node: "set3".into(), to_input: 0 });
+        wf.connections.push(Connection { from_node: "set2".into(), from_output: 0, to_node: "set3".into(), to_input: 0 });
+
+        let outputs = execute_workflow(&wf, &registry()).await.unwrap();
+        // set3 received one item from each upstream branch.
+        assert_eq!(outputs["set3"].len(), 2);
+    }
+
+    #[tokio::test]
+    async fn expression_in_parameters_is_resolved_before_node_execution() {
+        let mut wf = linear_workflow();
+        wf.nodes[1].parameters = serde_json::json!({"fields": {"doubled": "{{ 21 * 2 }}"}});
+        let outputs = execute_workflow(&wf, &registry()).await.unwrap();
+        assert_eq!(outputs["set1"][0].json, serde_json::json!({"doubled": 42}));
     }
 
     #[tokio::test]
