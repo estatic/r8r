@@ -1,5 +1,6 @@
 pub mod if_node;
 pub mod manual_trigger;
+pub mod merge;
 pub mod set;
 pub mod switch;
 
@@ -10,4 +11,5 @@ pub fn register_all(registry: &mut NodeRegistry) {
     registry.register(Box::new(set::SetNode));
     registry.register(Box::new(if_node::IfNode));
     registry.register(Box::new(switch::SwitchNode));
+    registry.register(Box::new(merge::MergeNode));
 }
