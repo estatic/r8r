@@ -8,17 +8,25 @@ pub async fn execute_workflow(
 ) -> anyhow::Result<HashMap<String, Vec<Item>>> {
     let order = topological_order(workflow)?;
     let mut produced: HashMap<String, crate::node::NodeOutput> = HashMap::new();
+    let mut error_produced: HashMap<String, Vec<Item>> = HashMap::new();
 
     for node_instance in &order {
         // Aggregate this node's input items from every incoming connection,
         // pulling each upstream node's items from the SPECIFIC from_output
-        // port index that connection names (not just port 0).
+        // port index that connection names (not just port 0). A connection
+        // whose from_output is ERROR_OUTPUT is routed via the separate
+        // error_produced side-map instead, since ERROR_OUTPUT (usize::MAX)
+        // can never be a valid Vec index into a NodeOutput.
         let mut input_items: Vec<Item> = Vec::new();
         for conn in &workflow.connections {
             if conn.to_node != node_instance.id {
                 continue;
             }
-            if let Some(outputs) = produced.get(&conn.from_node) {
+            if conn.from_output == crate::node::ERROR_OUTPUT {
+                if let Some(items) = error_produced.get(&conn.from_node) {
+                    input_items.extend(items.iter().cloned());
+                }
+            } else if let Some(outputs) = produced.get(&conn.from_node) {
                 if let Some(port_items) = outputs.get(conn.from_output) {
                     input_items.extend(port_items.iter().cloned());
                 }
@@ -61,11 +69,28 @@ pub async fn execute_workflow(
             parameters: resolved_parameters,
             input_items,
         };
-        let output = node
-            .execute(&ctx)
-            .await
-            .map_err(|e| anyhow::anyhow!("node {} failed: {e}", node_instance.id))?;
-        produced.insert(node_instance.id.clone(), output);
+        match node.execute(&ctx).await {
+            Ok(output) => {
+                produced.insert(node_instance.id.clone(), output);
+            }
+            Err(e) => {
+                let has_error_route = workflow.connections.iter().any(|c| {
+                    c.from_node == node_instance.id && c.from_output == crate::node::ERROR_OUTPUT
+                });
+                if has_error_route {
+                    error_produced.insert(
+                        node_instance.id.clone(),
+                        vec![Item {
+                            json: serde_json::json!({ "error": e.to_string() }),
+                            binary: serde_json::json!({}),
+                        }],
+                    );
+                    produced.insert(node_instance.id.clone(), vec![]);
+                } else {
+                    return Err(anyhow::anyhow!("node {} failed: {e}", node_instance.id));
+                }
+            }
+        }
     }
 
     // Persist/return only each node's primary (port 0) output, flattened
@@ -498,5 +523,55 @@ mod tests {
         assert_eq!(outputs["set_final"][0].json, serde_json::json!({"final": "yes"}));
         // ...and critically, the disabled node's field never made it downstream.
         assert!(outputs["set_final"][0].json.get("skipped").is_none());
+    }
+
+    struct AlwaysFailsNode;
+
+    #[async_trait::async_trait]
+    impl crate::node::Node for AlwaysFailsNode {
+        fn type_name(&self) -> &'static str {
+            "test.alwaysFails"
+        }
+        async fn execute(&self, _ctx: &crate::node::NodeExecutionContext) -> Result<crate::node::NodeOutput, crate::node::NodeError> {
+            Err(crate::node::NodeError::ExecutionFailed("boom".into()))
+        }
+    }
+
+    fn registry_with_failing_node() -> NodeRegistry {
+        let mut r = registry();
+        r.register(Box::new(AlwaysFailsNode));
+        r
+    }
+
+    #[tokio::test]
+    async fn error_without_connected_error_route_aborts_the_run() {
+        let mut wf = linear_workflow();
+        wf.nodes[1].node_type = "test.alwaysFails".into();
+        let result = execute_workflow(&wf, &registry_with_failing_node()).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn error_with_connected_error_route_continues_and_routes_error_item() {
+        let mut wf = linear_workflow();
+        wf.nodes[1].node_type = "test.alwaysFails".into();
+        wf.nodes.push(NodeInstance {
+            id: "error_handler".into(),
+            node_type: "core.set".into(),
+            position: (2.0, 0.0),
+            parameters: serde_json::json!({"fields": {"handled": true}}),
+            disabled: false,
+        });
+        wf.connections.push(Connection {
+            from_node: "set1".into(),
+            from_output: crate::node::ERROR_OUTPUT,
+            to_node: "error_handler".into(),
+            to_input: 0,
+        });
+
+        let outputs = execute_workflow(&wf, &registry_with_failing_node()).await.unwrap();
+        assert_eq!(outputs["error_handler"][0].json["handled"], serde_json::json!(true));
+        // set1 itself produced no primary-output items (it errored).
+        assert!(outputs["set1"].is_empty());
     }
 }
