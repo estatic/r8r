@@ -14,10 +14,17 @@ pub enum NodeError {
     ExecutionFailed(String),
 }
 
+pub type NodeOutput = Vec<Vec<Item>>;
+
+/// Sentinel `Connection.from_output` value identifying a node's error output.
+/// Never a valid index into a `NodeOutput`'s ports — routed separately by the
+/// engine (see Task 6), not looked up via `NodeOutput`'s `Vec` indexing.
+pub const ERROR_OUTPUT: usize = usize::MAX;
+
 #[async_trait]
 pub trait Node: Send + Sync {
     fn type_name(&self) -> &'static str;
-    async fn execute(&self, ctx: &NodeExecutionContext) -> Result<Vec<Item>, NodeError>;
+    async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError>;
 }
 
 #[derive(Default)]
@@ -52,8 +59,8 @@ mod tests {
         fn type_name(&self) -> &'static str {
             "test.echo"
         }
-        async fn execute(&self, ctx: &NodeExecutionContext) -> Result<Vec<Item>, NodeError> {
-            Ok(ctx.input_items.clone())
+        async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
+            Ok(vec![ctx.input_items.clone()])
         }
     }
 
@@ -68,12 +75,20 @@ mod tests {
             input_items: vec![Item { json: serde_json::json!({"x": 1}), binary: serde_json::json!({}) }],
         };
         let result = node.execute(&ctx).await.unwrap();
-        assert_eq!(result[0].json, serde_json::json!({"x": 1}));
+        assert_eq!(result.len(), 1); // one output port
+        assert_eq!(result[0][0].json, serde_json::json!({"x": 1}));
     }
 
     #[test]
     fn registry_returns_none_for_unknown_type() {
         let registry = NodeRegistry::new();
         assert!(registry.get("does.not.exist").is_none());
+    }
+
+    #[test]
+    fn error_output_is_distinct_from_any_real_port_index() {
+        // ERROR_OUTPUT must never collide with a legitimate small port index like 0, 1, 2.
+        assert_ne!(ERROR_OUTPUT, 0);
+        assert_ne!(ERROR_OUTPUT, 1);
     }
 }

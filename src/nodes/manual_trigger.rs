@@ -1,5 +1,5 @@
 use crate::domain::Item;
-use crate::node::{Node, NodeError, NodeExecutionContext};
+use crate::node::{Node, NodeError, NodeExecutionContext, NodeOutput};
 use async_trait::async_trait;
 
 pub struct ManualTriggerNode;
@@ -10,8 +10,8 @@ impl Node for ManualTriggerNode {
         "core.manualTrigger"
     }
 
-    async fn execute(&self, _ctx: &NodeExecutionContext) -> Result<Vec<Item>, NodeError> {
-        Ok(vec![Item { json: serde_json::json!({}), binary: serde_json::json!({}) }])
+    async fn execute(&self, _ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
+        Ok(vec![vec![Item { json: serde_json::json!({}), binary: serde_json::json!({}) }]])
     }
 }
 
@@ -25,6 +25,7 @@ mod tests {
         let ctx = NodeExecutionContext { parameters: serde_json::json!({}), input_items: vec![] };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].json, serde_json::json!({}));
+        assert_eq!(result[0].len(), 1);
+        assert_eq!(result[0][0].json, serde_json::json!({}));
     }
 }

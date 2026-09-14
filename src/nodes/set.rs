@@ -1,5 +1,5 @@
 use crate::domain::Item;
-use crate::node::{Node, NodeError, NodeExecutionContext};
+use crate::node::{Node, NodeError, NodeExecutionContext, NodeOutput};
 use async_trait::async_trait;
 
 pub struct SetNode;
@@ -10,7 +10,7 @@ impl Node for SetNode {
         "core.set"
     }
 
-    async fn execute(&self, ctx: &NodeExecutionContext) -> Result<Vec<Item>, NodeError> {
+    async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
         let fields = ctx.parameters.get("fields").cloned().unwrap_or(serde_json::json!({}));
         let fields_obj = fields.as_object().cloned().unwrap_or_default();
 
@@ -37,7 +37,7 @@ impl Node for SetNode {
             })
             .collect::<Result<Vec<_>, NodeError>>()?;
 
-        Ok(items)
+        Ok(vec![items])
     }
 }
 
@@ -53,7 +53,7 @@ mod tests {
             input_items: vec![Item { json: serde_json::json!({"existing": true}), binary: serde_json::json!({}) }],
         };
         let result = node.execute(&ctx).await.unwrap();
-        assert_eq!(result[0].json, serde_json::json!({"existing": true, "greeting": "hi"}));
+        assert_eq!(result[0][0].json, serde_json::json!({"existing": true, "greeting": "hi"}));
     }
 
     #[tokio::test]
@@ -65,7 +65,8 @@ mod tests {
         };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result.len(), 1);
-        assert_eq!(result[0].json, serde_json::json!({"greeting": "hi"}));
+        assert_eq!(result[0].len(), 1);
+        assert_eq!(result[0][0].json, serde_json::json!({"greeting": "hi"}));
     }
 
     #[tokio::test]
