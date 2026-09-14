@@ -23,13 +23,19 @@ impl Node for SetNode {
         let items = base_items
             .into_iter()
             .map(|mut item| {
-                let obj = item.json.as_object_mut().expect("item.json must be an object");
+                let json_for_error = item.json.clone();
+                let obj = item.json.as_object_mut().ok_or_else(|| {
+                    NodeError::ExecutionFailed(format!(
+                        "core.set expects object items, got {}",
+                        json_for_error
+                    ))
+                })?;
                 for (k, v) in fields_obj.iter() {
                     obj.insert(k.clone(), v.clone());
                 }
-                item
+                Ok(item)
             })
-            .collect();
+            .collect::<Result<Vec<_>, NodeError>>()?;
 
         Ok(items)
     }
@@ -60,5 +66,16 @@ mod tests {
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].json, serde_json::json!({"greeting": "hi"}));
+    }
+
+    #[tokio::test]
+    async fn non_object_item_json_returns_error_instead_of_panicking() {
+        let node = SetNode;
+        let ctx = NodeExecutionContext {
+            parameters: serde_json::json!({"fields": {"greeting": "hi"}}),
+            input_items: vec![Item { json: serde_json::json!([1, 2, 3]), binary: serde_json::json!({}) }],
+        };
+        let result = node.execute(&ctx).await;
+        assert!(matches!(result, Err(NodeError::ExecutionFailed(_))));
     }
 }
