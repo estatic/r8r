@@ -150,6 +150,83 @@ fn js_to_json<'js>(
     }
 }
 
+/// Recursively resolves `{{ ... }}` expressions embedded in a JSON parameter
+/// tree. A string that is *entirely* a single `{{ ... }}` expression
+/// (surrounding whitespace allowed) is replaced by that expression's raw
+/// evaluated value, preserving its JSON type. A string containing `{{ ... }}`
+/// mixed with other text has each expression evaluated, stringified, and
+/// spliced back into the surrounding text. Strings with no `{{ }}` pass
+/// through unchanged. Non-string values recurse structurally.
+pub fn resolve_parameters(
+    params: &serde_json::Value,
+    ctx: &EvalContext,
+) -> Result<serde_json::Value, ExprError> {
+    match params {
+        serde_json::Value::String(s) => resolve_string(s, ctx),
+        serde_json::Value::Array(items) => {
+            let resolved = items
+                .iter()
+                .map(|v| resolve_parameters(v, ctx))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(serde_json::Value::Array(resolved))
+        }
+        serde_json::Value::Object(map) => {
+            let mut out = serde_json::Map::new();
+            for (k, v) in map.iter() {
+                out.insert(k.clone(), resolve_parameters(v, ctx)?);
+            }
+            Ok(serde_json::Value::Object(out))
+        }
+        other => Ok(other.clone()),
+    }
+}
+
+/// Resolves `{{ }}` expressions within a single string leaf. See
+/// [`resolve_parameters`] for the whole-string-vs-mixed-text distinction.
+fn resolve_string(s: &str, ctx: &EvalContext) -> Result<serde_json::Value, ExprError> {
+    let trimmed = s.trim();
+    if let Some(inner) = trimmed.strip_prefix("{{").and_then(|r| r.strip_suffix("}}")) {
+        if !inner.contains("}}") {
+            // The whole string is exactly one expression: return its raw value.
+            return eval_js(inner.trim(), ctx);
+        }
+    }
+
+    if !s.contains("{{") {
+        return Ok(serde_json::Value::String(s.to_string()));
+    }
+
+    // Mixed text: splice each {{ ... }} expression's stringified result back in.
+    let mut result = String::new();
+    let mut rest = s;
+    while let Some(start) = rest.find("{{") {
+        result.push_str(&rest[..start]);
+        let after_open = &rest[start + 2..];
+        let end = after_open
+            .find("}}")
+            .ok_or_else(|| ExprError::Runtime(format!("unterminated expression in: {s}")))?;
+        let expr_src = after_open[..end].trim();
+        let value = eval_js(expr_src, ctx)?;
+        result.push_str(&stringify_for_splice(&value));
+        rest = &after_open[end + 2..];
+    }
+    result.push_str(rest);
+    Ok(serde_json::Value::String(result))
+}
+
+/// Stringifies an evaluated expression's result for splicing into
+/// surrounding text: numbers/bools render as their literal text,
+/// objects/arrays as compact JSON, and `null` as an empty string.
+fn stringify_for_splice(value: &serde_json::Value) -> String {
+    match value {
+        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::Null => String::new(),
+        serde_json::Value::Number(n) => n.to_string(),
+        serde_json::Value::Bool(b) => b.to_string(),
+        other => other.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -190,5 +267,75 @@ mod tests {
     fn malformed_script_returns_err_not_panic() {
         let result = eval_js("this is not valid js (((", &empty_ctx());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn reads_node_json_global() {
+        let mut node_json = HashMap::new();
+        node_json.insert("Trigger".to_string(), serde_json::json!({"x": 42}));
+        let ctx = EvalContext {
+            node_json: Box::leak(Box::new(node_json)),
+            ..empty_ctx()
+        };
+        let result = eval_js(r#"$node["Trigger"].json.x"#, &ctx).unwrap();
+        assert_eq!(result, serde_json::json!(42));
+    }
+
+    #[test]
+    fn items_function_returns_current_items_wrapped_in_json_key() {
+        let items = vec![serde_json::json!({"a": 1}), serde_json::json!({"a": 2})];
+        let ctx = EvalContext { items: &items, ..empty_ctx() };
+        let result = eval_js("$items().length", &ctx).unwrap();
+        assert_eq!(result, serde_json::json!(2));
+        let result = eval_js("$items()[1].json.a", &ctx).unwrap();
+        assert_eq!(result, serde_json::json!(2));
+    }
+
+    #[test]
+    fn now_is_an_rfc3339_string() {
+        let result = eval_js("typeof $now", &empty_ctx()).unwrap();
+        assert_eq!(result, serde_json::json!("string"));
+        let result = eval_js("$now.length > 10", &empty_ctx()).unwrap();
+        assert_eq!(result, serde_json::json!(true));
+    }
+
+    #[test]
+    fn workflow_name_is_accessible() {
+        let ctx = EvalContext { workflow_name: "my-workflow", ..empty_ctx() };
+        let result = eval_js("$workflow.name", &ctx).unwrap();
+        assert_eq!(result, serde_json::json!("my-workflow"));
+    }
+
+    #[test]
+    fn resolve_parameters_passes_through_plain_strings() {
+        let params = serde_json::json!({"greeting": "hello"});
+        let result = resolve_parameters(&params, &empty_ctx()).unwrap();
+        assert_eq!(result, serde_json::json!({"greeting": "hello"}));
+    }
+
+    #[test]
+    fn resolve_parameters_substitutes_whole_string_expression_with_raw_type() {
+        let ctx = EvalContext { json: serde_json::json!({"count": 5}), ..empty_ctx() };
+        let params = serde_json::json!({"n": "{{ $json.count }}"});
+        let result = resolve_parameters(&params, &ctx).unwrap();
+        assert_eq!(result, serde_json::json!({"n": 5}));
+    }
+
+    #[test]
+    fn resolve_parameters_splices_mixed_text_expressions_as_strings() {
+        let ctx = EvalContext { json: serde_json::json!({"name": "Ada"}), ..empty_ctx() };
+        let params = serde_json::json!({"greeting": "Hello, {{ $json.name }}!"});
+        let result = resolve_parameters(&params, &ctx).unwrap();
+        assert_eq!(result, serde_json::json!({"greeting": "Hello, Ada!"}));
+    }
+
+    #[test]
+    fn resolve_parameters_recurses_into_nested_objects_and_arrays() {
+        let ctx = EvalContext { json: serde_json::json!({"x": 1}), ..empty_ctx() };
+        let params = serde_json::json!({
+            "list": ["{{ $json.x }}", "plain", {"nested": "{{ $json.x + 1 }}"}]
+        });
+        let result = resolve_parameters(&params, &ctx).unwrap();
+        assert_eq!(result, serde_json::json!({"list": [1, "plain", {"nested": 2}]}));
     }
 }
