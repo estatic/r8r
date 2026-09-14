@@ -24,6 +24,7 @@ anyhow = "1"
 tower = { version = "0.4", features = ["util"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+rquickjs = "0.6"
 
 [dev-dependencies]
 http-body-util = "0.1"
