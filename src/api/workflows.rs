@@ -52,7 +52,10 @@ pub async fn create_workflow(
     };
     match state.storage.create_workflow(&workflow).await {
         Ok(()) => (StatusCode::CREATED, Json(workflow)).into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to create workflow");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 
@@ -64,7 +67,10 @@ pub async fn get_workflow(
     match state.storage.get_workflow(id).await {
         Ok(Some(wf)) => Json(wf).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to fetch workflow");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 
@@ -74,7 +80,10 @@ pub async fn list_workflows(
 ) -> impl IntoResponse {
     match state.storage.list_workflows().await {
         Ok(workflows) => Json(workflows).into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to list workflows");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
 
@@ -86,7 +95,10 @@ pub async fn execute_workflow(
     let workflow = match state.storage.get_workflow(id).await {
         Ok(Some(wf)) => wf,
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
-        Err(_) => return StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to fetch workflow for execution");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
     };
 
     let mut execution = Execution {
@@ -98,7 +110,8 @@ pub async fn execute_workflow(
         started_at: chrono::Utc::now(),
         finished_at: None,
     };
-    if state.storage.create_execution(&execution).await.is_err() {
+    if let Err(e) = state.storage.create_execution(&execution).await {
+        tracing::error!(error = %e, "failed to persist new execution");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
@@ -107,12 +120,18 @@ pub async fn execute_workflow(
             execution.status = ExecutionStatus::Success;
             execution.node_outputs = outputs;
         }
-        Err(_) => {
+        Err(e) => {
+            // Workflow execution failures here are almost always due to the
+            // shape of the user-authored workflow (unknown node type, cycle,
+            // disconnected components, a node's own validation) rather than a
+            // server-side bug, so this is a warning, not an error.
+            tracing::warn!(error = %e, workflow_id = %workflow.id, "workflow execution failed");
             execution.status = ExecutionStatus::Error;
         }
     }
     execution.finished_at = Some(chrono::Utc::now());
-    if state.storage.update_execution(&execution).await.is_err() {
+    if let Err(e) = state.storage.update_execution(&execution).await {
+        tracing::error!(error = %e, "failed to persist execution result");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 

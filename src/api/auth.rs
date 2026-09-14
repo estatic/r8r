@@ -40,7 +40,10 @@ pub async fn register(
 ) -> impl IntoResponse {
     let password_hash = match crate::auth::hash_password(&payload.password) {
         Ok(h) => h,
-        Err(_) => return (StatusCode::INTERNAL_SERVER_ERROR, "hash failed").into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to hash password during registration");
+            return (StatusCode::INTERNAL_SERVER_ERROR, "hash failed").into_response();
+        }
     };
     let user = User {
         id: Uuid::new_v4(),
@@ -49,7 +52,12 @@ pub async fn register(
         role: UserRole::Owner,
         created_at: chrono::Utc::now(),
     };
-    if state.storage.create_user(&user).await.is_err() {
+    if let Err(e) = state.storage.create_user(&user).await {
+        // Most commonly a unique-email constraint violation (user already
+        // exists), which is an expected, user-caused outcome rather than a
+        // server bug -- but still worth a warning so a genuine storage error
+        // masquerading as "already exists" is visible in the logs.
+        tracing::warn!(error = %e, "failed to create user during registration");
         return (StatusCode::CONFLICT, "user already exists").into_response();
     }
     let token = crate::auth::issue_token(user.id, &state.jwt_secret).unwrap();

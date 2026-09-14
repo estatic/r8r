@@ -13,6 +13,9 @@ pub async fn get_execution(
     match state.storage.get_execution(id).await {
         Ok(Some(exec)) => Json(exec).into_response(),
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
-        Err(_) => StatusCode::INTERNAL_SERVER_ERROR.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to fetch execution");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
     }
 }
