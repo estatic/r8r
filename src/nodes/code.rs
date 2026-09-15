@@ -28,22 +28,45 @@ impl Node for CodeNode {
         // scripts would see a double-wrapped `{json: {json: ...}}` shape.
         let items_json: Vec<serde_json::Value> =
             ctx.input_items.iter().map(|i| i.json.clone()).collect();
-        let empty_node_json: HashMap<String, serde_json::Value> = HashMap::new();
-        let eval_ctx = EvalContext {
-            json: ctx.input_items.first().map(|i| i.json.clone()).unwrap_or_else(|| serde_json::json!({})),
-            items: &items_json,
-            node_json: &empty_node_json,
-            workflow_name: "",
-        };
+        let first_json = ctx.input_items.first().map(|i| i.json.clone()).unwrap_or_else(|| serde_json::json!({}));
         let wrapped_script = format!("(function(items) {{ {script} }})($items())");
 
-        let result = tokio::time::timeout(
-            std::time::Duration::from_secs(CODE_TIMEOUT_SECS),
-            async { eval_js(&wrapped_script, &eval_ctx) },
-        )
-        .await
-        .map_err(|_| NodeError::ExecutionFailed(format!("core.code timed out after {CODE_TIMEOUT_SECS}s")))?
-        .map_err(|e| NodeError::ExecutionFailed(e.to_string()))?;
+        // `eval_js` is purely synchronous (no internal `.await` points), so
+        // wrapping it directly in `tokio::time::timeout(..., async { eval_js(...) })`
+        // does NOT work: `timeout` can only re-check its deadline at an `.await`
+        // suspension point, and a future that runs to completion inside a single
+        // `poll()` call never yields one. A runaway script would hang forever.
+        //
+        // Instead, run `eval_js` on tokio's blocking thread pool via
+        // `spawn_blocking`, and race the resulting `JoinHandle` (a genuine
+        // `.await` point backed by a separate OS thread) against the timeout.
+        // Everything the closure needs (`items_json`, `empty_node_json`,
+        // `first_json`, `wrapped_script`) is already owned data local to this
+        // function, so it can move into the `'static` closure without
+        // borrowing from `ctx`; `EvalContext` is constructed entirely inside
+        // the closure so its borrowed fields reference only closure-local data.
+        //
+        // Known limitation: if the blocking thread is still running when the
+        // timeout fires, there is no safe way in Rust to forcibly kill it — the
+        // thread is abandoned (orphaned) and keeps running to completion in the
+        // background, consuming a blocking-pool slot until it finishes. This is
+        // an accepted limitation, not something this fix attempts to solve.
+        let handle = tokio::task::spawn_blocking(move || {
+            let empty_node_json: HashMap<String, serde_json::Value> = HashMap::new();
+            let eval_ctx = EvalContext {
+                json: first_json,
+                items: &items_json,
+                node_json: &empty_node_json,
+                workflow_name: "",
+            };
+            eval_js(&wrapped_script, &eval_ctx)
+        });
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(CODE_TIMEOUT_SECS), handle)
+            .await
+            .map_err(|_| NodeError::ExecutionFailed(format!("core.code timed out after {CODE_TIMEOUT_SECS}s")))?
+            .map_err(|e| NodeError::ExecutionFailed(format!("core.code script execution panicked: {e}")))?
+            .map_err(|e| NodeError::ExecutionFailed(e.to_string()))?;
 
         let result_array = result
             .as_array()
@@ -99,6 +122,50 @@ mod tests {
         };
         let result = node.execute(&ctx).await;
         assert!(matches!(result, Err(NodeError::ExecutionFailed(_))));
+    }
+
+    // Deliberately NOT `#[tokio::test]`: that macro drops its runtime at the
+    // end of the test function, and `Runtime`'s default `Drop` blocks the
+    // *current thread* until every outstanding `spawn_blocking` task
+    // completes — including the never-ending `while (true) {}` this test
+    // spawns. That would hang the test (and the whole suite) even though
+    // `execute()`'s own `tokio::time::timeout` correctly returns at ~2s. So
+    // this test builds its own runtime and explicitly calls
+    // `shutdown_timeout` afterwards, which abandons the still-running
+    // blocking thread after a short grace period instead of waiting on it
+    // forever — the same orphaned-thread limitation documented in
+    // `execute()`, just made non-fatal for the test process too.
+    #[test]
+    fn runaway_script_is_preempted_by_timeout() {
+        let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+
+        let node = CodeNode;
+        let ctx = NodeExecutionContext {
+            parameters: serde_json::json!({
+                "script": "while (true) {}"
+            }),
+            input_items: vec![],
+        };
+
+        let start = std::time::Instant::now();
+        let result = rt.block_on(node.execute(&ctx));
+        let elapsed = start.elapsed();
+
+        match &result {
+            Err(NodeError::ExecutionFailed(msg)) => {
+                assert!(msg.contains("timed out"), "expected a timeout error, got: {msg}");
+            }
+            other => panic!("expected a timeout ExecutionFailed error, got: {other:?}"),
+        }
+        // Bounded by the 2s timeout, not by the infinite loop — a generous
+        // upper bound proves the timeout actually preempted execution rather
+        // than waiting for the (never-ending) script to finish on its own.
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "expected the timeout to cut execution short (~2s), but took {elapsed:?}"
+        );
+
+        rt.shutdown_timeout(std::time::Duration::from_millis(100));
     }
 
     #[tokio::test]
