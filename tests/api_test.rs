@@ -3,11 +3,89 @@ use axum::http::{Request, StatusCode};
 use http_body_util::BodyExt;
 use r8r::state::AppState;
 use r8r::storage::sqlite::SqliteStorage;
+use r8r::storage::Storage;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tower::ServiceExt;
 
-async fn test_app() -> axum::Router {
+async fn test_state() -> AppState {
     let storage = SqliteStorage::new("sqlite::memory:").await.unwrap();
+    let mut registry = r8r::node::NodeRegistry::new();
+    r8r::nodes::register_all(&mut registry);
+    AppState {
+        storage: Arc::new(storage),
+        registry: Arc::new(registry),
+        jwt_secret: "test-secret".into(),
+        scheduler: Arc::new(r8r::scheduler::Scheduler::new().await.unwrap()),
+        trigger_registry: Arc::new(r8r::trigger_registry::TriggerRegistry::new()),
+    }
+}
+
+async fn test_app() -> axum::Router {
+    r8r::api::build_router(test_state().await)
+}
+
+/// Same as `test_app()`, but also hands back the `AppState` so a test can
+/// inspect `trigger_registry` directly (e.g. to confirm a cron job is or
+/// isn't registered after a request).
+async fn test_app_with_state() -> (axum::Router, AppState) {
+    let state = test_state().await;
+    (r8r::api::build_router(state.clone()), state)
+}
+
+/// A `Storage` wrapper that delegates every method to a real, in-memory
+/// `SqliteStorage`, except `update_workflow`, which fails on demand — used to
+/// simulate the DB write in `set_workflow_active` failing after trigger state
+/// has already been changed, so we can prove the handler's compensating
+/// action actually runs.
+struct FailingUpdateStorage {
+    inner: SqliteStorage,
+    fail_update: Arc<AtomicBool>,
+}
+
+#[async_trait::async_trait]
+impl Storage for FailingUpdateStorage {
+    async fn create_workflow(&self, workflow: &r8r::domain::Workflow) -> anyhow::Result<()> {
+        self.inner.create_workflow(workflow).await
+    }
+    async fn update_workflow(&self, workflow: &r8r::domain::Workflow) -> anyhow::Result<()> {
+        if self.fail_update.load(Ordering::SeqCst) {
+            anyhow::bail!("simulated storage failure");
+        }
+        self.inner.update_workflow(workflow).await
+    }
+    async fn get_workflow(&self, id: uuid::Uuid) -> anyhow::Result<Option<r8r::domain::Workflow>> {
+        self.inner.get_workflow(id).await
+    }
+    async fn list_workflows(&self) -> anyhow::Result<Vec<r8r::domain::Workflow>> {
+        self.inner.list_workflows().await
+    }
+    async fn create_execution(&self, execution: &r8r::domain::Execution) -> anyhow::Result<()> {
+        self.inner.create_execution(execution).await
+    }
+    async fn update_execution(&self, execution: &r8r::domain::Execution) -> anyhow::Result<()> {
+        self.inner.update_execution(execution).await
+    }
+    async fn get_execution(&self, id: uuid::Uuid) -> anyhow::Result<Option<r8r::domain::Execution>> {
+        self.inner.get_execution(id).await
+    }
+    async fn create_user(&self, user: &r8r::domain::User) -> anyhow::Result<()> {
+        self.inner.create_user(user).await
+    }
+    async fn get_user_by_email(&self, email: &str) -> anyhow::Result<Option<r8r::domain::User>> {
+        self.inner.get_user_by_email(email).await
+    }
+}
+
+/// Builds a router backed by `FailingUpdateStorage`, plus the `AppState` (to
+/// inspect `trigger_registry`) and the flag that toggles whether
+/// `update_workflow` fails — starts `false` so setup calls (e.g. an initial
+/// successful activation) succeed; flip it to `true` right before the call
+/// under test.
+async fn test_app_with_failing_update() -> (axum::Router, AppState, Arc<AtomicBool>) {
+    let inner = SqliteStorage::new("sqlite::memory:").await.unwrap();
+    let fail_update = Arc::new(AtomicBool::new(false));
+    let storage = FailingUpdateStorage { inner, fail_update: fail_update.clone() };
     let mut registry = r8r::node::NodeRegistry::new();
     r8r::nodes::register_all(&mut registry);
     let state = AppState {
@@ -17,7 +95,7 @@ async fn test_app() -> axum::Router {
         scheduler: Arc::new(r8r::scheduler::Scheduler::new().await.unwrap()),
         trigger_registry: Arc::new(r8r::trigger_registry::TriggerRegistry::new()),
     };
-    r8r::api::build_router(state)
+    (r8r::api::build_router(state.clone()), state, fail_update)
 }
 
 #[tokio::test]
@@ -450,4 +528,152 @@ async fn webhook_trigger_executes_workflow_end_to_end_then_404s_after_deactivati
             .body(Body::from(serde_json::json!({"name": "Ada"}).to_string())).unwrap())
         .await.unwrap();
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+fn scheduled_workflow_body() -> serde_json::Value {
+    serde_json::json!({
+        "name": "scheduled-wf",
+        "nodes": [
+            {"id": "trigger", "node_type": "core.schedule", "position": [0.0, 0.0], "parameters": {"cron": "0 0 * * * *"}, "disabled": false}
+        ],
+        "connections": []
+    })
+}
+
+// Happy-path regression check: a successful activate leaves a cron job
+// registered, and a successful deactivate removes it. This must keep working
+// once the compensating-action logic below is added to set_workflow_active.
+#[tokio::test]
+async fn activate_then_deactivate_updates_trigger_registry_correctly() {
+    let (app, state) = test_app_with_state().await;
+    let token = register_and_get_token(&app, "registry-happy-path@example.com").await;
+
+    let response = app.clone()
+        .oneshot(Request::builder().method("POST").uri("/rest/workflows")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(scheduled_workflow_body().to_string())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let workflow: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let workflow_id = workflow["id"].as_str().unwrap();
+    let workflow_uuid: uuid::Uuid = workflow_id.parse().unwrap();
+
+    let response = app.clone()
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(serde_json::json!({"active": true}).to_string())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // A successful activation must leave a cron job registered. `take_cron_job`
+    // removes it as a side effect, so put it straight back — the deactivate
+    // step below needs something registered to unregister.
+    let job_id = state.trigger_registry.take_cron_job(workflow_uuid);
+    assert!(job_id.is_some(), "expected a cron job to be registered after a successful activation");
+    state.trigger_registry.record_cron_job(workflow_uuid, job_id.unwrap());
+
+    let response = app
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(serde_json::json!({"active": false}).to_string())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    assert!(
+        state.trigger_registry.take_cron_job(workflow_uuid).is_none(),
+        "expected no cron job to remain registered after a successful deactivation"
+    );
+}
+
+// Regression test for the finding: if activate_workflow_triggers succeeds but
+// the subsequent update_workflow persist fails, the handler must compensate
+// by unregistering the cron job it just registered — otherwise the job leaks
+// and keeps firing forever, unreachable via the API (because the later
+// idempotency short-circuit reads active=false from storage and never calls
+// deactivate again).
+#[tokio::test]
+async fn activation_persist_failure_unregisters_the_cron_job() {
+    let (app, state, fail_update) = test_app_with_failing_update().await;
+    let token = register_and_get_token(&app, "compensate-activate@example.com").await;
+
+    let response = app.clone()
+        .oneshot(Request::builder().method("POST").uri("/rest/workflows")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(scheduled_workflow_body().to_string())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let workflow: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let workflow_id = workflow["id"].as_str().unwrap();
+    let workflow_uuid: uuid::Uuid = workflow_id.parse().unwrap();
+
+    fail_update.store(true, Ordering::SeqCst);
+
+    let response = app
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(serde_json::json!({"active": true}).to_string())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    assert!(
+        state.trigger_registry.take_cron_job(workflow_uuid).is_none(),
+        "activate_workflow_triggers succeeded but update_workflow failed — the handler must have \
+         compensated by unregistering the cron job, but it's still registered"
+    );
+}
+
+// Symmetric regression test: if deactivate_workflow_triggers already
+// unregistered the cron job but the subsequent update_workflow persist fails,
+// the handler must compensate by re-registering it — otherwise the workflow
+// silently stops running its schedule until a process restart.
+#[tokio::test]
+async fn deactivation_persist_failure_reregisters_the_cron_job() {
+    let (app, state, fail_update) = test_app_with_failing_update().await;
+    let token = register_and_get_token(&app, "compensate-deactivate@example.com").await;
+
+    let response = app.clone()
+        .oneshot(Request::builder().method("POST").uri("/rest/workflows")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(scheduled_workflow_body().to_string())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let workflow: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let workflow_id = workflow["id"].as_str().unwrap();
+    let workflow_uuid: uuid::Uuid = workflow_id.parse().unwrap();
+
+    // Activate normally first, while update_workflow still succeeds, so the
+    // workflow is genuinely persisted active=true with a registered cron job.
+    let response = app.clone()
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(serde_json::json!({"active": true}).to_string())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Now make the persist step fail for the deactivation attempt.
+    fail_update.store(true, Ordering::SeqCst);
+
+    let response = app
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(serde_json::json!({"active": false}).to_string())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+
+    assert!(
+        state.trigger_registry.take_cron_job(workflow_uuid).is_some(),
+        "deactivate_workflow_triggers ran but update_workflow failed — the handler must have \
+         compensated by re-registering the cron job, but it's missing"
+    );
 }

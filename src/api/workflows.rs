@@ -111,7 +111,9 @@ pub async fn set_workflow_active(
         return Json(workflow).into_response();
     }
 
-    if payload.active {
+    let activating = payload.active;
+
+    if activating {
         if let Err(e) = crate::triggers::activate_workflow_triggers(&state, &workflow).await {
             return (StatusCode::BAD_REQUEST, format!("failed to activate workflow: {e}")).into_response();
         }
@@ -123,6 +125,27 @@ pub async fn set_workflow_active(
     workflow.updated_at = chrono::Utc::now();
     if let Err(e) = state.storage.update_workflow(&workflow).await {
         tracing::error!(error = %e, "failed to persist workflow activation state");
+
+        // The DB write failed, so `workflow.active` in storage still holds the
+        // OLD value, but we've already mutated in-memory trigger state above.
+        // Run the compensating action so trigger-registry state never diverges
+        // from what's actually persisted, once this request is done.
+        if activating {
+            // We just registered a cron job; unregister it since the flip to
+            // active=true never actually took effect in storage.
+            crate::triggers::deactivate_workflow_triggers(&state, workflow.id).await;
+        } else if let Err(e2) = crate::triggers::activate_workflow_triggers(&state, &workflow).await {
+            // We just unregistered the cron job; re-register it, best-effort,
+            // since the flip to active=false never actually took effect in
+            // storage. If this also fails, there's nothing more we can safely
+            // retry here — log it and still return the original 500.
+            tracing::error!(
+                error = %e2,
+                workflow_id = %workflow.id,
+                "failed to re-activate workflow triggers while compensating for a storage failure"
+            );
+        }
+
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
