@@ -10,7 +10,15 @@ impl Node for FilterNode {
     }
 
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
-        let condition = ctx.parameters.get("condition").and_then(|v| v.as_bool()).unwrap_or(false);
+        let condition = match ctx.parameters.get("condition") {
+            None => false,
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(other) => {
+                return Err(NodeError::ExecutionFailed(format!(
+                    "core.filter \"condition\" must be a boolean, got: {other}"
+                )));
+            }
+        };
         if condition {
             Ok(vec![ctx.input_items.clone()])
         } else {
@@ -42,5 +50,28 @@ mod tests {
         let ctx = NodeExecutionContext { parameters: serde_json::json!({"condition": false}), input_items: items() };
         let result = node.execute(&ctx).await.unwrap();
         assert!(result[0].is_empty());
+    }
+
+    #[tokio::test]
+    async fn missing_condition_defaults_to_false() {
+        // Mirrors if_node.rs's test of the same name: an ABSENT "condition"
+        // key is sanctioned to default to `false` (drop all items), distinct
+        // from a PRESENT non-boolean value, which must error instead (see
+        // present_non_boolean_condition_returns_error below).
+        let node = FilterNode;
+        let ctx = NodeExecutionContext { parameters: serde_json::json!({}), input_items: items() };
+        let result = node.execute(&ctx).await.unwrap();
+        assert!(result[0].is_empty());
+    }
+
+    #[tokio::test]
+    async fn present_non_boolean_condition_returns_error() {
+        let node = FilterNode;
+        let ctx = NodeExecutionContext {
+            parameters: serde_json::json!({"condition": 5}),
+            input_items: items(),
+        };
+        let result = node.execute(&ctx).await;
+        assert!(matches!(result, Err(NodeError::ExecutionFailed(_))));
     }
 }

@@ -10,11 +10,15 @@ impl Node for IfNode {
     }
 
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
-        let condition = ctx
-            .parameters
-            .get("condition")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
+        let condition = match ctx.parameters.get("condition") {
+            None => false,
+            Some(serde_json::Value::Bool(b)) => *b,
+            Some(other) => {
+                return Err(NodeError::ExecutionFailed(format!(
+                    "core.if \"condition\" must be a boolean, got: {other}"
+                )));
+            }
+        };
 
         if condition {
             Ok(vec![ctx.input_items.clone(), vec![]])
@@ -64,5 +68,20 @@ mod tests {
         let result = node.execute(&ctx).await.unwrap();
         assert!(result[0].is_empty());
         assert_eq!(result[1], items());
+    }
+
+    #[tokio::test]
+    async fn present_non_boolean_condition_returns_error() {
+        // A present-but-non-boolean condition (e.g. `{{ $json.count }}`
+        // resolving to the number 5) must be a loud error, not a silent
+        // fall-through to the `false` branch — see missing_condition_defaults_to_false
+        // above for the (unrelated, still-correct) absent-key case.
+        let node = IfNode;
+        let ctx = NodeExecutionContext {
+            parameters: serde_json::json!({"condition": 5}),
+            input_items: items(),
+        };
+        let result = node.execute(&ctx).await;
+        assert!(matches!(result, Err(NodeError::ExecutionFailed(_))));
     }
 }
