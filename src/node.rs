@@ -2,10 +2,11 @@ use crate::domain::Item;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Default)]
 pub struct NodeExecutionContext {
     pub parameters: serde_json::Value,
     pub input_items: Vec<Item>,
+    pub credentials: std::collections::HashMap<uuid::Uuid, serde_json::Value>,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -88,6 +89,7 @@ mod tests {
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({}),
             input_items: vec![Item { json: serde_json::json!({"x": 1}), binary: serde_json::json!({}) }],
+            ..Default::default()
         };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result.len(), 1); // one output port
@@ -105,5 +107,15 @@ mod tests {
         // ERROR_OUTPUT must never collide with a legitimate small port index like 0, 1, 2.
         assert_ne!(ERROR_OUTPUT, 0);
         assert_ne!(ERROR_OUTPUT, 1);
+    }
+
+    #[test]
+    fn node_execution_context_default_has_empty_credentials() {
+        let ctx = NodeExecutionContext {
+            parameters: serde_json::json!({}),
+            input_items: vec![],
+            ..Default::default()
+        };
+        assert!(ctx.credentials.is_empty());
     }
 }
