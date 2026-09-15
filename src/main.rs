@@ -7,6 +7,11 @@ use std::sync::Arc;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    // Load .env if present; real process env vars still take precedence and
+    // this is a no-op (not an error) when no .env file exists, e.g. in
+    // production where vars are set directly.
+    dotenvy::dotenv().ok();
+
     tracing_subscriber::fmt::init();
 
     let database_url =

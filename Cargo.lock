@@ -1272,6 +1272,7 @@ dependencies = [
  "async-trait",
  "axum",
  "chrono",
+ "dotenvy",
  "http-body-util",
  "jsonwebtoken",
  "password-hash",
