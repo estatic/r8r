@@ -24,6 +24,21 @@ pub const ERROR_OUTPUT: usize = usize::MAX;
 #[async_trait]
 pub trait Node: Send + Sync {
     fn type_name(&self) -> &'static str;
+
+    /// Whether this node's parameters should be run through the expression
+    /// engine (`expr::resolve_parameters`) before `execute()` is called.
+    ///
+    /// Defaults to `true`, which is correct for nearly every node: its
+    /// parameters are values that may contain `{{ }}` expressions to
+    /// interpolate. A node should override this to return `false` only when
+    /// its "parameters" include something that is not itself a value to
+    /// interpolate but must be passed through verbatim — e.g. `core.code`'s
+    /// `script`, which is source code that may legitimately contain literal
+    /// `{{ }}` text with no relation to r8r's expression syntax.
+    fn resolves_parameters(&self) -> bool {
+        true
+    }
+
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError>;
 }
 

@@ -63,26 +63,33 @@ pub async fn execute_workflow(
 
         // Resolve this node's parameters via the expression engine before
         // execute(), with $node built from every already-executed node's
-        // PRIMARY (port 0) output's first item only.
-        let items_json: Vec<serde_json::Value> = input_items.iter().map(|i| i.json.clone()).collect();
-        let node_json: HashMap<String, serde_json::Value> = produced
-            .iter()
-            .filter_map(|(id, ports)| {
-                let first_item_json = ports.first().and_then(|p| p.first()).map(|item| item.json.clone());
-                first_item_json.map(|j| (id.clone(), j))
-            })
-            .collect();
-        let eval_ctx = crate::expr::EvalContext {
-            json: input_items.first().map(|i| i.json.clone()).unwrap_or_else(|| serde_json::json!({})),
-            items: &items_json,
-            node_json: &node_json,
-            workflow_name: &workflow.name,
+        // PRIMARY (port 0) output's first item only — unless the node opts
+        // out via `resolves_parameters() == false` (e.g. core.code, whose
+        // "parameter" is a script to run verbatim, not a value to
+        // interpolate).
+        let parameters = if node.resolves_parameters() {
+            let items_json: Vec<serde_json::Value> = input_items.iter().map(|i| i.json.clone()).collect();
+            let node_json: HashMap<String, serde_json::Value> = produced
+                .iter()
+                .filter_map(|(id, ports)| {
+                    let first_item_json = ports.first().and_then(|p| p.first()).map(|item| item.json.clone());
+                    first_item_json.map(|j| (id.clone(), j))
+                })
+                .collect();
+            let eval_ctx = crate::expr::EvalContext {
+                json: input_items.first().map(|i| i.json.clone()).unwrap_or_else(|| serde_json::json!({})),
+                items: &items_json,
+                node_json: &node_json,
+                workflow_name: &workflow.name,
+            };
+            crate::expr::resolve_parameters(&node_instance.parameters, &eval_ctx)
+                .map_err(|e| anyhow::anyhow!("node {} parameter resolution failed: {e}", node_instance.id))?
+        } else {
+            node_instance.parameters.clone()
         };
-        let resolved_parameters = crate::expr::resolve_parameters(&node_instance.parameters, &eval_ctx)
-            .map_err(|e| anyhow::anyhow!("node {} parameter resolution failed: {e}", node_instance.id))?;
 
         let ctx = NodeExecutionContext {
-            parameters: resolved_parameters,
+            parameters,
             input_items,
         };
         match node.execute(&ctx).await {
@@ -565,6 +572,27 @@ mod tests {
         wf.nodes[1].node_type = "test.alwaysFails".into();
         let result = execute_workflow(&wf, &registry_with_failing_node()).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn code_node_script_bypasses_parameter_resolution() {
+        // A core.code script containing literal `{{ }}` text (e.g. building a
+        // template string for a downstream node) must reach CodeNode::execute
+        // verbatim, NOT be run through expr::resolve_parameters first. If it
+        // were resolved, `{{ not an expression }}` would be evaluated as an
+        // r8r expression and either throw (ReferenceError: not is not
+        // defined) or otherwise corrupt the literal text before the script's
+        // own logic ever runs.
+        let mut wf = linear_workflow();
+        wf.nodes[1].node_type = "core.code".into();
+        wf.nodes[1].parameters = serde_json::json!({
+            "script": "return [{json: {text: \"literal {{ not an expression }}\"}}];"
+        });
+        let outputs = execute_workflow(&wf, &registry()).await.unwrap();
+        assert_eq!(
+            outputs["set1"][0].json,
+            serde_json::json!({"text": "literal {{ not an expression }}"})
+        );
     }
 
     #[tokio::test]

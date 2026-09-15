@@ -14,6 +14,15 @@ impl Node for CodeNode {
         "core.code"
     }
 
+    // core.code's "parameter" IS the script to run, not a value to
+    // interpolate. Running it through `expr::resolve_parameters` would
+    // corrupt (or throw on) any script that happens to contain literal
+    // `{{ }}` text, e.g. when building a template string for a downstream
+    // node. See `src/engine.rs`'s `execute_workflow`, which checks this.
+    fn resolves_parameters(&self) -> bool {
+        false
+    }
+
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
         let script = ctx
             .parameters
@@ -87,6 +96,30 @@ impl Node for CodeNode {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn code_node_opts_out_of_parameter_resolution() {
+        assert!(!CodeNode.resolves_parameters());
+    }
+
+    #[test]
+    fn trait_default_resolves_parameters_is_true() {
+        // Any node that does NOT override `resolves_parameters` must keep the
+        // trait's default (`true`), so its existing resolve-then-execute
+        // behavior is unaffected by adding this method. Use a minimal local
+        // node here rather than reaching into another `src/nodes/*` module.
+        struct DefaultNode;
+        #[async_trait]
+        impl Node for DefaultNode {
+            fn type_name(&self) -> &'static str {
+                "test.default"
+            }
+            async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
+                Ok(vec![ctx.input_items.clone()])
+            }
+        }
+        assert!(DefaultNode.resolves_parameters());
+    }
 
     #[tokio::test]
     async fn script_transforms_items() {
