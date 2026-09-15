@@ -57,6 +57,23 @@ impl Storage for SqliteStorage {
         .await?;
         Ok(())
     }
+    async fn update_workflow(&self, workflow: &Workflow) -> anyhow::Result<()> {
+        let definition = serde_json::json!({
+            "nodes": workflow.nodes,
+            "connections": workflow.connections,
+        });
+        sqlx::query(
+            "UPDATE workflows SET name = ?, active = ?, definition = ?, updated_at = ? WHERE id = ?"
+        )
+        .bind(&workflow.name)
+        .bind(workflow.active as i64)
+        .bind(definition.to_string())
+        .bind(workflow.updated_at.to_rfc3339())
+        .bind(workflow.id.to_string())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
     async fn get_workflow(&self, id: Uuid) -> anyhow::Result<Option<Workflow>> {
         let row = sqlx::query_as::<_, (String, String, i64, String, String, String)>(
             "SELECT id, name, active, definition, created_at, updated_at FROM workflows WHERE id = ?"
@@ -345,5 +362,30 @@ mod tests {
     async fn get_user_by_email_returns_none_when_missing() {
         let storage = SqliteStorage::new("sqlite::memory:").await.unwrap();
         assert!(storage.get_user_by_email("nobody@example.com").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn update_workflow_persists_active_flag_and_name() {
+        let storage = SqliteStorage::new("sqlite::memory:").await.unwrap();
+        let mut wf = sample_workflow();
+        storage.create_workflow(&wf).await.unwrap();
+
+        wf.active = true;
+        wf.name = "renamed".into();
+        wf.updated_at = Utc::now();
+        storage.update_workflow(&wf).await.unwrap();
+
+        let fetched = storage.get_workflow(wf.id).await.unwrap().unwrap();
+        assert!(fetched.active);
+        assert_eq!(fetched.name, "renamed");
+    }
+
+    #[tokio::test]
+    async fn update_workflow_on_unknown_id_does_not_error() {
+        // Matches sqlx's own UPDATE-affecting-zero-rows behavior: no error, just a no-op.
+        let storage = SqliteStorage::new("sqlite::memory:").await.unwrap();
+        let wf = sample_workflow();
+        let result = storage.update_workflow(&wf).await;
+        assert!(result.is_ok());
     }
 }

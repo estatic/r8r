@@ -7,6 +7,7 @@ use uuid::Uuid;
 #[async_trait]
 pub trait Storage: Send + Sync {
     async fn create_workflow(&self, workflow: &Workflow) -> anyhow::Result<()>;
+    async fn update_workflow(&self, workflow: &Workflow) -> anyhow::Result<()>;
     async fn get_workflow(&self, id: Uuid) -> anyhow::Result<Option<Workflow>>;
     async fn list_workflows(&self) -> anyhow::Result<Vec<Workflow>>;
 
