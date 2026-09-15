@@ -14,6 +14,8 @@ async fn test_app() -> axum::Router {
         storage: Arc::new(storage),
         registry: Arc::new(registry),
         jwt_secret: "test-secret".into(),
+        scheduler: Arc::new(r8r::scheduler::Scheduler::new().await.unwrap()),
+        trigger_registry: Arc::new(r8r::trigger_registry::TriggerRegistry::new()),
     };
     r8r::api::build_router(state)
 }
@@ -320,4 +322,69 @@ async fn branching_workflow_with_if_and_merge_executes_end_to_end() {
     assert_eq!(merged_output[0]["json"]["path"], "true");
     // The false branch produced no items (If routed nothing to output 1).
     assert_eq!(execution["node_outputs"]["false_branch"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn activate_workflow_with_valid_schedule_succeeds() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "activate1@example.com").await;
+
+    let workflow_body = serde_json::json!({
+        "name": "scheduled-wf",
+        "nodes": [
+            {"id": "trigger", "node_type": "core.schedule", "position": [0.0, 0.0], "parameters": {"cron": "0 0 * * * *"}, "disabled": false}
+        ],
+        "connections": []
+    });
+    let response = app.clone()
+        .oneshot(Request::builder().method("POST").uri("/rest/workflows")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(workflow_body.to_string())).unwrap())
+        .await.unwrap();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let workflow: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let workflow_id = workflow["id"].as_str().unwrap();
+
+    let response = app
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(serde_json::json!({"active": true}).to_string())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let updated: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(updated["active"], true);
+}
+
+#[tokio::test]
+async fn activate_workflow_with_invalid_cron_param_returns_400() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "activate2@example.com").await;
+
+    let workflow_body = serde_json::json!({
+        "name": "broken-schedule",
+        "nodes": [
+            {"id": "trigger", "node_type": "core.schedule", "position": [0.0, 0.0], "parameters": {}, "disabled": false}
+        ],
+        "connections": []
+    });
+    let response = app.clone()
+        .oneshot(Request::builder().method("POST").uri("/rest/workflows")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(workflow_body.to_string())).unwrap())
+        .await.unwrap();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let workflow: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let workflow_id = workflow["id"].as_str().unwrap();
+
+    let response = app
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(serde_json::json!({"active": true}).to_string())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }

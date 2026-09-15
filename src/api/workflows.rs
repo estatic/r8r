@@ -87,6 +87,48 @@ pub async fn list_workflows(
     }
 }
 
+#[derive(Deserialize)]
+pub struct SetActiveRequest {
+    pub active: bool,
+}
+
+pub async fn set_workflow_active(
+    State(state): State<AppState>,
+    AuthUser(_user_id): AuthUser,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<SetActiveRequest>,
+) -> impl IntoResponse {
+    let mut workflow = match state.storage.get_workflow(id).await {
+        Ok(Some(wf)) => wf,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to fetch workflow for activation");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+
+    if payload.active == workflow.active {
+        return Json(workflow).into_response();
+    }
+
+    if payload.active {
+        if let Err(e) = crate::triggers::activate_workflow_triggers(&state, &workflow).await {
+            return (StatusCode::BAD_REQUEST, format!("failed to activate workflow: {e}")).into_response();
+        }
+    } else {
+        crate::triggers::deactivate_workflow_triggers(&state, workflow.id).await;
+    }
+
+    workflow.active = payload.active;
+    workflow.updated_at = chrono::Utc::now();
+    if let Err(e) = state.storage.update_workflow(&workflow).await {
+        tracing::error!(error = %e, "failed to persist workflow activation state");
+        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+    }
+
+    Json(workflow).into_response()
+}
+
 pub async fn execute_workflow(
     State(state): State<AppState>,
     AuthUser(_user_id): AuthUser,
