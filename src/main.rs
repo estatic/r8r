@@ -1,6 +1,8 @@
 use r8r::node::NodeRegistry;
+use r8r::scheduler::Scheduler;
 use r8r::state::AppState;
 use r8r::storage::sqlite::SqliteStorage;
+use r8r::trigger_registry::TriggerRegistry;
 use std::sync::Arc;
 
 #[tokio::main]
@@ -20,12 +22,19 @@ async fn main() -> anyhow::Result<()> {
     let storage = SqliteStorage::new(&database_url).await?;
     let mut registry = NodeRegistry::new();
     r8r::nodes::register_all(&mut registry);
+    let scheduler = Scheduler::new().await?;
 
     let state = AppState {
         storage: Arc::new(storage),
         registry: Arc::new(registry),
         jwt_secret,
+        scheduler: Arc::new(scheduler),
+        trigger_registry: Arc::new(TriggerRegistry::new()),
     };
+
+    if let Err(e) = r8r::triggers::reactivate_all(&state).await {
+        tracing::warn!(error = %e, "failed to reactivate workflow triggers on startup");
+    }
 
     let app = r8r::api::build_router(state);
     let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
