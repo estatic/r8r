@@ -257,3 +257,67 @@ async fn create_execute_and_fetch_execution_end_to_end() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn branching_workflow_with_if_and_merge_executes_end_to_end() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "branch@example.com").await;
+
+    let workflow_body = serde_json::json!({
+        "name": "branch-wf",
+        "nodes": [
+            {"id": "trigger", "node_type": "core.manualTrigger", "position": [0.0, 0.0], "parameters": {}, "disabled": false},
+            {"id": "branch", "node_type": "core.if", "position": [1.0, 0.0], "parameters": {"condition": "{{ 1 == 1 }}"}, "disabled": false},
+            {"id": "true_branch", "node_type": "core.set", "position": [2.0, 0.0], "parameters": {"fields": {"path": "true"}}, "disabled": false},
+            {"id": "false_branch", "node_type": "core.set", "position": [2.0, 1.0], "parameters": {"fields": {"path": "false"}}, "disabled": false},
+            {"id": "merged", "node_type": "core.merge", "position": [3.0, 0.0], "parameters": {"mode": "append"}, "disabled": false}
+        ],
+        "connections": [
+            {"from_node": "trigger", "from_output": 0, "to_node": "branch", "to_input": 0},
+            {"from_node": "branch", "from_output": 0, "to_node": "true_branch", "to_input": 0},
+            {"from_node": "branch", "from_output": 1, "to_node": "false_branch", "to_input": 0},
+            {"from_node": "true_branch", "from_output": 0, "to_node": "merged", "to_input": 0},
+            {"from_node": "false_branch", "from_output": 0, "to_node": "merged", "to_input": 0}
+        ]
+    });
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/workflows")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(workflow_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let workflow: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let workflow_id = workflow["id"].as_str().unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(execution["status"], "Success");
+
+    // Only the true branch ran (condition is always true), so the merge node's
+    // output should show exactly one item, from true_branch.
+    let merged_output = &execution["node_outputs"]["merged"];
+    assert_eq!(merged_output.as_array().unwrap().len(), 1);
+    assert_eq!(merged_output[0]["json"]["path"], "true");
+    // The false branch produced no items (If routed nothing to output 1).
+    assert_eq!(execution["node_outputs"]["false_branch"].as_array().unwrap().len(), 0);
+}

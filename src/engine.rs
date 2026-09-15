@@ -45,6 +45,22 @@ pub async fn execute_workflow(
             .get(&node_instance.node_type)
             .ok_or_else(|| anyhow::anyhow!("unknown node type: {}", node_instance.node_type))?;
 
+        // A node with at least one incoming connection that nonetheless
+        // received zero items (e.g. it sits on the untaken branch of an
+        // upstream If/Switch) must NOT execute: several nodes (e.g. core.set)
+        // synthesize a default item when given empty input, which is correct
+        // only for a genuine start node (one with no incoming connections at
+        // all). Without this check, branching semantics break: the untaken
+        // branch would still "run" and fabricate output. The topological
+        // order guarantees at most one node (the start node) has zero
+        // incoming connections, so this can't accidentally skip a real start
+        // node.
+        let has_incoming_connection = workflow.connections.iter().any(|c| c.to_node == node_instance.id);
+        if has_incoming_connection && input_items.is_empty() {
+            produced.insert(node_instance.id.clone(), vec![]);
+            continue;
+        }
+
         // Resolve this node's parameters via the expression engine before
         // execute(), with $node built from every already-executed node's
         // PRIMARY (port 0) output's first item only.
