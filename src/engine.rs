@@ -6,7 +6,27 @@ pub async fn execute_workflow(
     workflow: &Workflow,
     registry: &NodeRegistry,
 ) -> anyhow::Result<HashMap<String, Vec<Item>>> {
+    execute_workflow_seeded(workflow, registry, None).await
+}
+
+pub fn start_node_id(workflow: &Workflow) -> anyhow::Result<String> {
+    if workflow.nodes.is_empty() {
+        return Err(anyhow::anyhow!("workflow has no nodes"));
+    }
     let order = topological_order(workflow)?;
+    order
+        .first()
+        .map(|n| n.id.clone())
+        .ok_or_else(|| anyhow::anyhow!("workflow has no nodes"))
+}
+
+pub async fn execute_workflow_seeded(
+    workflow: &Workflow,
+    registry: &NodeRegistry,
+    trigger_items: Option<Vec<Item>>,
+) -> anyhow::Result<HashMap<String, Vec<Item>>> {
+    let order = topological_order(workflow)?;
+    let start_id = order.first().map(|n| n.id.clone());
     let mut produced: HashMap<String, crate::node::NodeOutput> = HashMap::new();
     let mut error_produced: HashMap<String, Vec<Item>> = HashMap::new();
 
@@ -39,6 +59,20 @@ pub async fn execute_workflow(
             // handed to the registry, executed, or given resolved parameters.
             produced.insert(node_instance.id.clone(), vec![input_items]);
             continue;
+        }
+
+        // Seeded start node — inject trigger_items and skip execute() entirely
+        // for this node only. Must come after the disabled check (a disabled start
+        // node keeps its existing passthrough semantics, not the seed) and before
+        // the registry lookup / empty-input skip (the seed always "counts" as
+        // having produced real output, regardless of what input_items ended up
+        // being — a start node has no incoming connections, so input_items is
+        // always empty anyway; the seed replaces it, not merges with it).
+        if let (Some(items), Some(start)) = (&trigger_items, &start_id) {
+            if &node_instance.id == start {
+                produced.insert(node_instance.id.clone(), vec![items.clone()]);
+                continue;
+            }
         }
 
         let node = registry
@@ -252,6 +286,42 @@ mod tests {
         let mut r = NodeRegistry::new();
         crate::nodes::register_all(&mut r);
         r
+    }
+
+    #[test]
+    fn start_node_id_returns_the_unique_start_node() {
+        let wf = linear_workflow();
+        assert_eq!(start_node_id(&wf).unwrap(), "trigger");
+    }
+
+    #[test]
+    fn start_node_id_errors_on_empty_workflow() {
+        let mut wf = linear_workflow();
+        wf.nodes.clear();
+        wf.connections.clear();
+        assert!(start_node_id(&wf).is_err());
+    }
+
+    #[tokio::test]
+    async fn execute_workflow_seeded_injects_trigger_items_as_start_node_output() {
+        let wf = linear_workflow(); // trigger -> set1
+        let seeded_items = vec![Item { json: serde_json::json!({"from": "webhook"}), binary: serde_json::json!({}) }];
+        let outputs = execute_workflow_seeded(&wf, &registry(), Some(seeded_items.clone())).await.unwrap();
+        // trigger's own execute() was never called — its output IS the seeded item, verbatim.
+        assert_eq!(outputs["trigger"], seeded_items);
+        // set1 (which merges a static "greeting" field into its input item, per
+        // core.set's actual merge semantics in src/nodes/set.rs) still ran normally
+        // downstream, on the seeded item — this just proves seeding didn't break
+        // normal downstream execution.
+        assert_eq!(outputs["set1"][0].json, serde_json::json!({"from": "webhook", "greeting": "hi"}));
+    }
+
+    #[tokio::test]
+    async fn execute_workflow_with_none_seed_behaves_exactly_as_before() {
+        let wf = linear_workflow();
+        let outputs = execute_workflow(&wf, &registry()).await.unwrap();
+        assert_eq!(outputs["trigger"][0].json, serde_json::json!({}));
+        assert_eq!(outputs["set1"][0].json, serde_json::json!({"greeting": "hi"}));
     }
 
     #[test]
