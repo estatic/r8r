@@ -27,6 +27,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 rquickjs = "0.6"
 tokio-cron-scheduler = "0.10"
 dotenvy = "0.15"
+aes-gcm = "0.10"
+base64 = "0.22"
+rand = "0.8"
 
 [dev-dependencies]
 http-body-util = "0.1"
