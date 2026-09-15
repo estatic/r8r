@@ -9,3 +9,4 @@ pub mod scheduler;
 pub mod state;
 pub mod storage;
 pub mod trigger_registry;
+pub mod triggers;
