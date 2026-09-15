@@ -6,7 +6,7 @@ pub async fn execute_workflow(
     workflow: &Workflow,
     registry: &NodeRegistry,
 ) -> anyhow::Result<HashMap<String, Vec<Item>>> {
-    execute_workflow_seeded(workflow, registry, None).await
+    execute_workflow_seeded(workflow, registry, None, &HashMap::new()).await
 }
 
 pub fn start_node_id(workflow: &Workflow) -> anyhow::Result<String> {
@@ -24,6 +24,7 @@ pub async fn execute_workflow_seeded(
     workflow: &Workflow,
     registry: &NodeRegistry,
     trigger_items: Option<Vec<Item>>,
+    credentials: &HashMap<uuid::Uuid, serde_json::Value>,
 ) -> anyhow::Result<HashMap<String, Vec<Item>>> {
     let order = topological_order(workflow)?;
     let start_id = order.first().map(|n| n.id.clone());
@@ -125,6 +126,7 @@ pub async fn execute_workflow_seeded(
         let ctx = NodeExecutionContext {
             parameters,
             input_items,
+            credentials: credentials.clone(),
         };
         match node.execute(&ctx).await {
             Ok(output) => {
@@ -306,7 +308,7 @@ mod tests {
     async fn execute_workflow_seeded_injects_trigger_items_as_start_node_output() {
         let wf = linear_workflow(); // trigger -> set1
         let seeded_items = vec![Item { json: serde_json::json!({"from": "webhook"}), binary: serde_json::json!({}) }];
-        let outputs = execute_workflow_seeded(&wf, &registry(), Some(seeded_items.clone())).await.unwrap();
+        let outputs = execute_workflow_seeded(&wf, &registry(), Some(seeded_items.clone()), &HashMap::new()).await.unwrap();
         // trigger's own execute() was never called — its output IS the seeded item, verbatim.
         assert_eq!(outputs["trigger"], seeded_items);
         // set1 (which merges a static "greeting" field into its input item, per

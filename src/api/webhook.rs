@@ -57,6 +57,7 @@ pub async fn handle_webhook(
         &workflow,
         &state.registry,
         Some(vec![trigger_item]),
+        &std::collections::HashMap::new(),
     )
     .await
     {
