@@ -49,6 +49,8 @@ pub enum ExecutionStatus {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum ExecutionMode {
     Manual,
+    Webhook,
+    Schedule,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -101,5 +103,13 @@ mod tests {
         let json = serde_json::to_string(&wf).unwrap();
         let parsed: Workflow = serde_json::from_str(&json).unwrap();
         assert_eq!(wf, parsed);
+    }
+
+    #[test]
+    fn execution_mode_serializes_new_variants() {
+        assert_eq!(serde_json::to_string(&ExecutionMode::Webhook).unwrap(), "\"Webhook\"");
+        assert_eq!(serde_json::to_string(&ExecutionMode::Schedule).unwrap(), "\"Schedule\"");
+        let parsed: ExecutionMode = serde_json::from_str("\"Webhook\"").unwrap();
+        assert_eq!(parsed, ExecutionMode::Webhook);
     }
 }
