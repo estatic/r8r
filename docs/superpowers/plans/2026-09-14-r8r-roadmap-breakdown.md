@@ -268,6 +268,15 @@ self-registration).
 - 7.5.3 Pagination on workflow/execution listing endpoints
 - 7.5.4 Index on `executions.workflow_id`
 
+### 7.6 Plan 2 Deferred Items
+*(carried over from Plan 2's execution — deliberate v1 simplifications and one findings the final whole-branch review explicitly flagged as worth fixing before untrusted input reaches it)*
+- 7.6.1 Concurrent branch execution
+  - 7.6.1.1 Replace the sequential topological walk in `execute_workflow` with `tokio::spawn`/`JoinSet` for independent branches (Plan 2's engine already computes each node's inputs from a `produced` map before running it, independent of iteration order beyond dependency order, so nothing blocks this later)
+- 7.6.2 Per-item expression evaluation
+  - 7.6.2.1 Let `$json` (and per-item evaluation generally) see each item's own data within one node's execution, instead of only the first input item — needed for a genuinely per-item Filter condition and a richer Set node
+- 7.6.3 Code node sandbox hardening
+  - 7.6.3.1 Add `rquickjs::Runtime::set_memory_limit` and a deadline-based `set_interrupt_handler` in `eval_js`, superseding the current `spawn_blocking`-based timeout (which leaves a script's thread running/allocating in the background after a 2s timeout — bounded by tokio's blocking-pool cap, but unbounded in wall-clock/RAM until then)
+
 ---
 
 ## Sequencing Notes
