@@ -7,3 +7,4 @@ pub mod node;
 pub mod nodes;
 pub mod state;
 pub mod storage;
+pub mod trigger_registry;
