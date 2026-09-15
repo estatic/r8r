@@ -115,7 +115,7 @@ mod tests {
     use std::sync::Arc;
 
     async fn test_state() -> AppState {
-        let storage = SqliteStorage::new("sqlite::memory:").await.unwrap();
+        let storage = SqliteStorage::new("sqlite::memory:", [0u8; 32]).await.unwrap();
         let mut registry = NodeRegistry::new();
         crate::nodes::register_all(&mut registry);
         AppState {

@@ -9,7 +9,7 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 async fn test_state() -> AppState {
-    let storage = SqliteStorage::new("sqlite::memory:").await.unwrap();
+    let storage = SqliteStorage::new("sqlite::memory:", [0u8; 32]).await.unwrap();
     let mut registry = r8r::node::NodeRegistry::new();
     r8r::nodes::register_all(&mut registry);
     AppState {
@@ -75,6 +75,15 @@ impl Storage for FailingUpdateStorage {
     async fn get_user_by_email(&self, email: &str) -> anyhow::Result<Option<r8r::domain::User>> {
         self.inner.get_user_by_email(email).await
     }
+    async fn create_credential(&self, credential: &r8r::domain::Credential) -> anyhow::Result<()> {
+        self.inner.create_credential(credential).await
+    }
+    async fn get_credential(&self, id: uuid::Uuid) -> anyhow::Result<Option<r8r::domain::Credential>> {
+        self.inner.get_credential(id).await
+    }
+    async fn list_credentials(&self) -> anyhow::Result<Vec<r8r::domain::CredentialSummary>> {
+        self.inner.list_credentials().await
+    }
 }
 
 /// Builds a router backed by `FailingUpdateStorage`, plus the `AppState` (to
@@ -83,7 +92,7 @@ impl Storage for FailingUpdateStorage {
 /// successful activation) succeed; flip it to `true` right before the call
 /// under test.
 async fn test_app_with_failing_update() -> (axum::Router, AppState, Arc<AtomicBool>) {
-    let inner = SqliteStorage::new("sqlite::memory:").await.unwrap();
+    let inner = SqliteStorage::new("sqlite::memory:", [0u8; 32]).await.unwrap();
     let fail_update = Arc::new(AtomicBool::new(false));
     let storage = FailingUpdateStorage { inner, fail_update: fail_update.clone() };
     let mut registry = r8r::node::NodeRegistry::new();

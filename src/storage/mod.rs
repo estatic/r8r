@@ -1,6 +1,6 @@
 pub mod sqlite;
 
-use crate::domain::{Execution, User, Workflow};
+use crate::domain::{Credential, CredentialSummary, Execution, User, Workflow};
 use async_trait::async_trait;
 use uuid::Uuid;
 
@@ -17,4 +17,8 @@ pub trait Storage: Send + Sync {
 
     async fn create_user(&self, user: &User) -> anyhow::Result<()>;
     async fn get_user_by_email(&self, email: &str) -> anyhow::Result<Option<User>>;
+
+    async fn create_credential(&self, credential: &Credential) -> anyhow::Result<()>;
+    async fn get_credential(&self, id: Uuid) -> anyhow::Result<Option<Credential>>;
+    async fn list_credentials(&self) -> anyhow::Result<Vec<CredentialSummary>>;
 }

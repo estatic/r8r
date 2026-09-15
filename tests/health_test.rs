@@ -6,7 +6,7 @@ use std::sync::Arc;
 use tower::ServiceExt;
 
 async fn test_app() -> axum::Router {
-    let storage = SqliteStorage::new("sqlite::memory:").await.unwrap();
+    let storage = SqliteStorage::new("sqlite::memory:", [0u8; 32]).await.unwrap();
     let mut registry = r8r::node::NodeRegistry::new();
     r8r::nodes::register_all(&mut registry);
     let state = AppState {

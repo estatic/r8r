@@ -19,12 +19,13 @@ async fn main() -> anyhow::Result<()> {
     let jwt_secret = std::env::var("JWT_SECRET").map_err(|_| {
         anyhow::anyhow!("JWT_SECRET environment variable must be set (see .env.example)")
     })?;
+    let credentials_key = r8r::crypto::load_key_from_env("CREDENTIALS_KEY")?;
     let port: u16 = std::env::var("PORT")
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3000);
 
-    let storage = SqliteStorage::new(&database_url).await?;
+    let storage = SqliteStorage::new(&database_url, credentials_key).await?;
     let mut registry = NodeRegistry::new();
     r8r::nodes::register_all(&mut registry);
     let scheduler = Scheduler::new().await?;
