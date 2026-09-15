@@ -388,3 +388,66 @@ async fn activate_workflow_with_invalid_cron_param_returns_400() {
         .await.unwrap();
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 }
+
+#[tokio::test]
+async fn webhook_trigger_executes_workflow_end_to_end_then_404s_after_deactivation() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "webhook-e2e@example.com").await;
+
+    let workflow_body = serde_json::json!({
+        "name": "webhook-wf",
+        "nodes": [
+            {"id": "hook", "node_type": "core.webhook", "position": [0.0, 0.0], "parameters": {"path": "my-test-hook", "method": "POST"}, "disabled": false},
+            {"id": "set1", "node_type": "core.set", "position": [1.0, 0.0], "parameters": {"fields": {"received": "{{ $json.body.name }}"}}, "disabled": false}
+        ],
+        "connections": [
+            {"from_node": "hook", "from_output": 0, "to_node": "set1", "to_input": 0}
+        ]
+    });
+    let response = app.clone()
+        .oneshot(Request::builder().method("POST").uri("/rest/workflows")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(workflow_body.to_string())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let workflow: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let workflow_id = workflow["id"].as_str().unwrap();
+
+    let response = app.clone()
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(serde_json::json!({"active": true}).to_string())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // Fire the webhook — no authorization header, matching real external callers.
+    let response = app.clone()
+        .oneshot(Request::builder().method("POST").uri(format!("/webhook/{workflow_id}/my-test-hook"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({"name": "Ada"}).to_string())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(execution["status"], "Success");
+    assert_eq!(execution["node_outputs"]["set1"][0]["json"]["received"], "Ada");
+
+    // Deactivate, then confirm the webhook path is dark.
+    let response = app.clone()
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(serde_json::json!({"active": false}).to_string())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let response = app
+        .oneshot(Request::builder().method("POST").uri(format!("/webhook/{workflow_id}/my-test-hook"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({"name": "Ada"}).to_string())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
