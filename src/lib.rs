@@ -1,5 +1,6 @@
 pub mod api;
 pub mod auth;
+pub mod credentials;
 pub mod crypto;
 pub mod domain;
 pub mod engine;
