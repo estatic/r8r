@@ -79,6 +79,40 @@ pub struct User {
     pub created_at: DateTime<Utc>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Credential {
+    pub id: Uuid,
+    pub name: String,
+    pub credential_type: String,
+    pub data: serde_json::Value,
+    pub owner_id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct CredentialSummary {
+    pub id: Uuid,
+    pub name: String,
+    pub credential_type: String,
+    pub owner_id: Uuid,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
+impl From<&Credential> for CredentialSummary {
+    fn from(c: &Credential) -> Self {
+        Self {
+            id: c.id,
+            name: c.name.clone(),
+            credential_type: c.credential_type.clone(),
+            owner_id: c.owner_id,
+            created_at: c.created_at,
+            updated_at: c.updated_at,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -111,5 +145,25 @@ mod tests {
         assert_eq!(serde_json::to_string(&ExecutionMode::Schedule).unwrap(), "\"Schedule\"");
         let parsed: ExecutionMode = serde_json::from_str("\"Webhook\"").unwrap();
         assert_eq!(parsed, ExecutionMode::Webhook);
+    }
+
+    #[test]
+    fn credential_summary_never_serializes_a_data_field() {
+        let cred = Credential {
+            id: Uuid::new_v4(),
+            name: "my-api".into(),
+            credential_type: "bearer".into(),
+            data: serde_json::json!({"token": "super-secret-value"}),
+            owner_id: Uuid::new_v4(),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        let summary = CredentialSummary::from(&cred);
+        let json = serde_json::to_value(&summary).unwrap();
+        assert!(json.get("data").is_none());
+        assert_eq!(json["name"], "my-api");
+        // The actual secret value must never appear anywhere in the serialized summary.
+        let serialized = serde_json::to_string(&summary).unwrap();
+        assert!(!serialized.contains("super-secret-value"));
     }
 }
