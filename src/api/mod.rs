@@ -1,4 +1,5 @@
 pub mod auth;
+pub mod credentials;
 pub mod executions;
 pub mod webhook;
 pub mod workflows;
@@ -16,6 +17,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/rest/workflows/:id/execute", post(workflows::execute_workflow))
         .route("/rest/workflows/:id/active", axum::routing::patch(workflows::set_workflow_active))
         .route("/rest/executions/:id", get(executions::get_execution))
+        .route("/rest/credentials", post(credentials::create_credential).get(credentials::list_credentials))
         .route(
             "/webhook/:workflow_id/:path",
             axum::routing::get(webhook::handle_webhook).post(webhook::handle_webhook),

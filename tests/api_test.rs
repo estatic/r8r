@@ -686,3 +686,94 @@ async fn deactivation_persist_failure_reregisters_the_cron_job() {
          compensated by re-registering the cron job, but it's missing"
     );
 }
+
+#[tokio::test]
+async fn create_credential_never_returns_data_field() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "cred1@example.com").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/credentials")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "name": "my-bearer-cred",
+                        "credential_type": "bearer",
+                        "data": {"token": "super-secret-123"}
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(body["name"], "my-bearer-cred");
+    assert!(body.get("data").is_none());
+    let raw = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(!raw.contains("super-secret-123"));
+}
+
+#[tokio::test]
+async fn list_credentials_returns_created_ones_without_data() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "cred2@example.com").await;
+
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/credentials")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({"name": "cred-a", "credential_type": "bearer", "data": {"token": "x"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/rest/credentials")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let list: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(list.as_array().unwrap().len(), 1);
+    assert_eq!(list[0]["name"], "cred-a");
+    assert!(list[0].get("data").is_none());
+}
+
+#[tokio::test]
+async fn create_credential_requires_auth() {
+    let app = test_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/credentials")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::json!({"name": "x", "credential_type": "bearer", "data": {}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
