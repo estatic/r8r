@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod executions;
+pub mod webhook;
 pub mod workflows;
 
 use crate::state::AppState;
@@ -15,6 +16,10 @@ pub fn build_router(state: AppState) -> Router {
         .route("/rest/workflows/:id/execute", post(workflows::execute_workflow))
         .route("/rest/workflows/:id/active", axum::routing::patch(workflows::set_workflow_active))
         .route("/rest/executions/:id", get(executions::get_execution))
+        .route(
+            "/webhook/:workflow_id/:path",
+            axum::routing::get(webhook::handle_webhook).post(webhook::handle_webhook),
+        )
         .route("/health", get(|| async { "ok" }))
         .with_state(state)
 }
