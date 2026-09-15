@@ -22,7 +22,7 @@ mod tests {
     #[tokio::test]
     async fn produces_exactly_one_empty_item() {
         let node = ManualTriggerNode;
-        let ctx = NodeExecutionContext { parameters: serde_json::json!({}), input_items: vec![] };
+        let ctx = NodeExecutionContext { parameters: serde_json::json!({}), input_items: vec![], ..Default::default() };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result.len(), 1);
         assert_eq!(result[0].len(), 1);

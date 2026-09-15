@@ -132,6 +132,7 @@ mod tests {
                 Item { json: serde_json::json!({"n": 1}), binary: serde_json::json!({}) },
                 Item { json: serde_json::json!({"n": 2}), binary: serde_json::json!({}) },
             ],
+            ..Default::default()
         };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result[0][0].json, serde_json::json!({"doubled": 2}));
@@ -141,7 +142,7 @@ mod tests {
     #[tokio::test]
     async fn missing_script_returns_error() {
         let node = CodeNode;
-        let ctx = NodeExecutionContext { parameters: serde_json::json!({}), input_items: vec![] };
+        let ctx = NodeExecutionContext { parameters: serde_json::json!({}), input_items: vec![], ..Default::default() };
         let result = node.execute(&ctx).await;
         assert!(matches!(result, Err(NodeError::ExecutionFailed(_))));
     }
@@ -152,6 +153,7 @@ mod tests {
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({"script": "return 42;"}),
             input_items: vec![],
+            ..Default::default()
         };
         let result = node.execute(&ctx).await;
         assert!(matches!(result, Err(NodeError::ExecutionFailed(_))));
@@ -178,6 +180,7 @@ mod tests {
                 "script": "while (true) {}"
             }),
             input_items: vec![],
+            ..Default::default()
         };
 
         let start = std::time::Instant::now();
@@ -207,6 +210,7 @@ mod tests {
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({"script": "return items;"}),
             input_items: vec![],
+            ..Default::default()
         };
         let result = node.execute(&ctx).await.unwrap();
         assert!(result[0].is_empty());

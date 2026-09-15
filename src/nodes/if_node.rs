@@ -43,6 +43,7 @@ mod tests {
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({"condition": true}),
             input_items: items(),
+            ..Default::default()
         };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result[0], items());
@@ -55,6 +56,7 @@ mod tests {
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({"condition": false}),
             input_items: items(),
+            ..Default::default()
         };
         let result = node.execute(&ctx).await.unwrap();
         assert!(result[0].is_empty());
@@ -64,7 +66,7 @@ mod tests {
     #[tokio::test]
     async fn missing_condition_defaults_to_false() {
         let node = IfNode;
-        let ctx = NodeExecutionContext { parameters: serde_json::json!({}), input_items: items() };
+        let ctx = NodeExecutionContext { parameters: serde_json::json!({}), input_items: items(), ..Default::default() };
         let result = node.execute(&ctx).await.unwrap();
         assert!(result[0].is_empty());
         assert_eq!(result[1], items());
@@ -80,6 +82,7 @@ mod tests {
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({"condition": 5}),
             input_items: items(),
+            ..Default::default()
         };
         let result = node.execute(&ctx).await;
         assert!(matches!(result, Err(NodeError::ExecutionFailed(_))));

@@ -25,7 +25,7 @@ mod tests {
     async fn passes_items_through_after_waiting() {
         let node = WaitNode;
         let items = vec![Item { json: serde_json::json!({"x": 1}), binary: serde_json::json!({}) }];
-        let ctx = NodeExecutionContext { parameters: serde_json::json!({"seconds": 0.01}), input_items: items.clone() };
+        let ctx = NodeExecutionContext { parameters: serde_json::json!({"seconds": 0.01}), input_items: items.clone(), ..Default::default() };
         let start = std::time::Instant::now();
         let result = node.execute(&ctx).await.unwrap();
         assert!(start.elapsed() >= std::time::Duration::from_millis(10));
@@ -35,7 +35,7 @@ mod tests {
     #[tokio::test]
     async fn missing_seconds_defaults_to_zero_wait() {
         let node = WaitNode;
-        let ctx = NodeExecutionContext { parameters: serde_json::json!({}), input_items: vec![] };
+        let ctx = NodeExecutionContext { parameters: serde_json::json!({}), input_items: vec![], ..Default::default() };
         let result = node.execute(&ctx).await.unwrap();
         assert!(result[0].is_empty());
     }

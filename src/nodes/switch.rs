@@ -48,6 +48,7 @@ mod tests {
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({"value": "b", "cases": ["a", "b", "c"]}),
             input_items: items(),
+            ..Default::default()
         };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result.len(), 4); // 3 cases + 1 default
@@ -63,6 +64,7 @@ mod tests {
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({"value": "z", "cases": ["a", "b"]}),
             input_items: items(),
+            ..Default::default()
         };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result.len(), 3); // 2 cases + 1 default

@@ -51,6 +51,7 @@ mod tests {
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({"fields": {"greeting": "hi"}}),
             input_items: vec![Item { json: serde_json::json!({"existing": true}), binary: serde_json::json!({}) }],
+            ..Default::default()
         };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result[0][0].json, serde_json::json!({"existing": true, "greeting": "hi"}));
@@ -62,6 +63,7 @@ mod tests {
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({"fields": {"greeting": "hi"}}),
             input_items: vec![],
+            ..Default::default()
         };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result.len(), 1);
@@ -75,6 +77,7 @@ mod tests {
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({"fields": {"greeting": "hi"}}),
             input_items: vec![Item { json: serde_json::json!([1, 2, 3]), binary: serde_json::json!({}) }],
+            ..Default::default()
         };
         let result = node.execute(&ctx).await;
         assert!(matches!(result, Err(NodeError::ExecutionFailed(_))));

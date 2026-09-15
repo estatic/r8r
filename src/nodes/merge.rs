@@ -61,7 +61,7 @@ mod tests {
             Item { json: serde_json::json!({"a": 1}), binary: serde_json::json!({}) },
             Item { json: serde_json::json!({"b": 2}), binary: serde_json::json!({}) },
         ];
-        let ctx = NodeExecutionContext { parameters: serde_json::json!({"mode": "append"}), input_items: items.clone() };
+        let ctx = NodeExecutionContext { parameters: serde_json::json!({"mode": "append"}), input_items: items.clone(), ..Default::default() };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result[0], items);
     }
@@ -70,7 +70,7 @@ mod tests {
     async fn default_mode_is_append() {
         let node = MergeNode;
         let items = vec![Item { json: serde_json::json!({"a": 1}), binary: serde_json::json!({}) }];
-        let ctx = NodeExecutionContext { parameters: serde_json::json!({}), input_items: items.clone() };
+        let ctx = NodeExecutionContext { parameters: serde_json::json!({}), input_items: items.clone(), ..Default::default() };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result[0], items);
     }
@@ -79,7 +79,7 @@ mod tests {
     async fn wait_for_all_mode_behaves_like_append() {
         let node = MergeNode;
         let items = vec![Item { json: serde_json::json!({"a": 1}), binary: serde_json::json!({}) }];
-        let ctx = NodeExecutionContext { parameters: serde_json::json!({"mode": "waitForAll"}), input_items: items.clone() };
+        let ctx = NodeExecutionContext { parameters: serde_json::json!({"mode": "waitForAll"}), input_items: items.clone(), ..Default::default() };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result[0], items);
     }
@@ -95,6 +95,7 @@ mod tests {
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({"mode": "mergeByKey", "key": "id"}),
             input_items: items,
+            ..Default::default()
         };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result[0].len(), 2);
@@ -108,6 +109,7 @@ mod tests {
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({"mode": "mergeByKey"}),
             input_items: vec![],
+            ..Default::default()
         };
         let result = node.execute(&ctx).await;
         assert!(matches!(result, Err(NodeError::ExecutionFailed(_))));

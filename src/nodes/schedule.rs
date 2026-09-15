@@ -25,6 +25,7 @@ mod tests {
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({"cron": "0 0 * * * *"}),
             input_items: vec![],
+            ..Default::default()
         };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result[0][0].json, serde_json::json!({}));

@@ -39,7 +39,7 @@ mod tests {
     #[tokio::test]
     async fn true_condition_keeps_all_items() {
         let node = FilterNode;
-        let ctx = NodeExecutionContext { parameters: serde_json::json!({"condition": true}), input_items: items() };
+        let ctx = NodeExecutionContext { parameters: serde_json::json!({"condition": true}), input_items: items(), ..Default::default() };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result[0], items());
     }
@@ -47,7 +47,7 @@ mod tests {
     #[tokio::test]
     async fn false_condition_drops_all_items() {
         let node = FilterNode;
-        let ctx = NodeExecutionContext { parameters: serde_json::json!({"condition": false}), input_items: items() };
+        let ctx = NodeExecutionContext { parameters: serde_json::json!({"condition": false}), input_items: items(), ..Default::default() };
         let result = node.execute(&ctx).await.unwrap();
         assert!(result[0].is_empty());
     }
@@ -59,7 +59,7 @@ mod tests {
         // from a PRESENT non-boolean value, which must error instead (see
         // present_non_boolean_condition_returns_error below).
         let node = FilterNode;
-        let ctx = NodeExecutionContext { parameters: serde_json::json!({}), input_items: items() };
+        let ctx = NodeExecutionContext { parameters: serde_json::json!({}), input_items: items(), ..Default::default() };
         let result = node.execute(&ctx).await.unwrap();
         assert!(result[0].is_empty());
     }
@@ -70,6 +70,7 @@ mod tests {
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({"condition": 5}),
             input_items: items(),
+            ..Default::default()
         };
         let result = node.execute(&ctx).await;
         assert!(matches!(result, Err(NodeError::ExecutionFailed(_))));

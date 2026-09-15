@@ -23,7 +23,7 @@ mod tests {
     async fn passes_items_through_unchanged() {
         let node = NoOpNode;
         let items = vec![Item { json: serde_json::json!({"x": 1}), binary: serde_json::json!({}) }];
-        let ctx = NodeExecutionContext { parameters: serde_json::json!({}), input_items: items.clone() };
+        let ctx = NodeExecutionContext { parameters: serde_json::json!({}), input_items: items.clone(), ..Default::default() };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result[0], items);
     }
