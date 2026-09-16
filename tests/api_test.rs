@@ -997,3 +997,87 @@ async fn credential_authenticated_http_request_executes_end_to_end() {
     assert_eq!(execution["status"], "Success");
     assert_eq!(execution["node_outputs"]["http1"][0]["json"], serde_json::json!({"orders": [1, 2, 3]}));
 }
+
+#[tokio::test]
+async fn credential_authenticated_telegram_send_message_executes_end_to_end() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/bot987:XYZ/sendMessage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ok": true,
+            "result": {"message_id": 7, "text": "hello from r8r"}
+        })))
+        .mount(&mock_server)
+        .await;
+
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "telegram-e2e@example.com").await;
+
+    let cred_response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/credentials")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({"name": "my-bot", "credential_type": "telegramApi", "data": {"bot_token": "987:XYZ"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cred_response.status(), StatusCode::CREATED);
+    let bytes = cred_response.into_body().collect().await.unwrap().to_bytes();
+    let credential: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let credential_id = credential["id"].as_str().unwrap();
+
+    let workflow_body = serde_json::json!({
+        "name": "telegram-e2e-wf",
+        "nodes": [
+            {"id": "trigger", "node_type": "core.manualTrigger", "position": [0.0, 0.0], "parameters": {}, "disabled": false},
+            {"id": "send", "node_type": "telegram.sendMessage", "position": [1.0, 0.0], "parameters": {
+                "chat_id": "42",
+                "text": "hello from r8r",
+                "auth": {"credential_id": credential_id},
+                "api_base_url": mock_server.uri()
+            }, "disabled": false}
+        ],
+        "connections": [
+            {"from_node": "trigger", "from_output": 0, "to_node": "send", "to_input": 0}
+        ]
+    });
+    let wf_response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/workflows")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(workflow_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wf_response.status(), StatusCode::CREATED);
+    let bytes = wf_response.into_body().collect().await.unwrap().to_bytes();
+    let workflow: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let workflow_id = workflow["id"].as_str().unwrap();
+
+    let exec_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exec_response.status(), StatusCode::OK);
+    let bytes = exec_response.into_body().collect().await.unwrap().to_bytes();
+    let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(execution["status"], "Success");
+    assert_eq!(execution["node_outputs"]["send"][0]["json"]["result"]["message_id"], 7);
+}
