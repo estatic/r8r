@@ -13,10 +13,18 @@ pub async fn activate_workflow_triggers(
         .find(|n| n.id == start_id)
         .ok_or_else(|| anyhow::anyhow!("start node {start_id} not found"))?;
 
-    if start_node.node_type != "core.schedule" {
-        return Ok(());
+    match start_node.node_type.as_str() {
+        "core.schedule" => activate_schedule_trigger(state, workflow, start_node).await,
+        "telegram.trigger" => crate::telegram_poller::activate_telegram_trigger(state, workflow, start_node).await,
+        _ => Ok(()),
     }
+}
 
+async fn activate_schedule_trigger(
+    state: &AppState,
+    workflow: &crate::domain::Workflow,
+    start_node: &crate::domain::NodeInstance,
+) -> anyhow::Result<()> {
     let cron_expr = start_node
         .parameters
         .get("cron")
@@ -48,6 +56,9 @@ pub async fn deactivate_workflow_triggers(state: &AppState, workflow_id: Uuid) {
         if let Err(e) = state.scheduler.unregister(job_id).await {
             tracing::warn!(error = %e, %workflow_id, "failed to unregister cron job on deactivation");
         }
+    }
+    if let Some(handle) = state.trigger_registry.take_telegram_poll(workflow_id) {
+        handle.abort();
     }
 }
 
@@ -265,5 +276,109 @@ mod tests {
 
         assert!(state.trigger_registry.take_cron_job(wf1.id).is_some());
         assert!(state.trigger_registry.take_cron_job(wf2.id).is_none());
+    }
+
+    fn telegram_trigger_workflow(credential_id: Uuid, api_base_url: &str) -> Workflow {
+        let now = chrono::Utc::now();
+        Workflow {
+            id: Uuid::new_v4(),
+            name: "telegram".into(),
+            active: true,
+            nodes: vec![
+                NodeInstance {
+                    id: "trigger".into(),
+                    node_type: "telegram.trigger".into(),
+                    position: (0.0, 0.0),
+                    parameters: serde_json::json!({
+                        "auth": {"credential_id": credential_id.to_string()},
+                        "api_base_url": api_base_url,
+                    }),
+                    disabled: false,
+                },
+                NodeInstance {
+                    id: "set1".into(),
+                    node_type: "core.set".into(),
+                    position: (1.0, 0.0),
+                    parameters: serde_json::json!({"fields": {"fired": true}}),
+                    disabled: false,
+                },
+            ],
+            connections: vec![Connection { from_node: "trigger".into(), from_output: 0, to_node: "set1".into(), to_input: 0 }],
+            created_at: now,
+            updated_at: now,
+        }
+    }
+
+    async fn create_telegram_credential(state: &AppState) -> Uuid {
+        use crate::domain::{Credential, User, UserRole};
+        let owner_id = Uuid::new_v4();
+        state
+            .storage
+            .create_user(&User {
+                id: owner_id,
+                email: format!("{owner_id}@example.com"),
+                password_hash: "irrelevant".into(),
+                role: UserRole::Owner,
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        let credential_id = Uuid::new_v4();
+        state
+            .storage
+            .create_credential(&Credential {
+                id: credential_id,
+                name: "bot".into(),
+                credential_type: "telegramApi".into(),
+                data: serde_json::json!({"bot_token": "111:AAA"}),
+                owner_id,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        credential_id
+    }
+
+    #[tokio::test]
+    async fn activate_registers_a_telegram_poll_for_a_telegram_trigger_start_node() {
+        let state = test_state().await;
+        let credential_id = create_telegram_credential(&state).await;
+        let wf = telegram_trigger_workflow(credential_id, "http://127.0.0.1:1");
+        state.storage.create_workflow(&wf).await.unwrap();
+
+        activate_workflow_triggers(&state, &wf).await.unwrap();
+        let handle = state.trigger_registry.take_telegram_poll(wf.id);
+        assert!(handle.is_some());
+        handle.unwrap().abort();
+    }
+
+    #[tokio::test]
+    async fn activate_errors_when_telegram_trigger_credential_id_is_missing() {
+        let state = test_state().await;
+        let mut wf = telegram_trigger_workflow(Uuid::new_v4(), "http://127.0.0.1:1");
+        wf.nodes[0].parameters = serde_json::json!({});
+        let result = activate_workflow_triggers(&state, &wf).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn activate_errors_when_telegram_trigger_credential_does_not_exist() {
+        let state = test_state().await;
+        let wf = telegram_trigger_workflow(Uuid::new_v4(), "http://127.0.0.1:1");
+        let result = activate_workflow_triggers(&state, &wf).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn deactivate_aborts_a_previously_activated_telegram_poll() {
+        let state = test_state().await;
+        let credential_id = create_telegram_credential(&state).await;
+        let wf = telegram_trigger_workflow(credential_id, "http://127.0.0.1:1");
+        state.storage.create_workflow(&wf).await.unwrap();
+        activate_workflow_triggers(&state, &wf).await.unwrap();
+
+        deactivate_workflow_triggers(&state, wf.id).await;
+        assert!(state.trigger_registry.take_telegram_poll(wf.id).is_none());
     }
 }
