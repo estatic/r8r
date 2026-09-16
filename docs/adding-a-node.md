@@ -353,8 +353,8 @@ parameter already.
 integration should default to — a workflow author configuring this node
 shouldn't have to know or supply Telegram's API host. But that means a test
 has no caller-supplied URL to redirect at a mock server. The node solves this
-by adding an **optional, test-only override parameter**, `api_base_url`
-(`src/nodes/telegram_send_message.rs:90-95`):
+by adding an **optional override parameter**, `api_base_url`
+(`src/nodes/telegram_send_message.rs:90-95`), intended for tests:
 
 ```rust
 let base_url = ctx
@@ -374,6 +374,18 @@ at `server.uri()` directly. If your node hardcodes a specific external API's
 host (because the whole point of the node is that one integration), add an
 optional override parameter like `api_base_url` so it stays testable without
 hitting the real API in CI.
+
+**Security caveat for URL-embedded-secret integrations:** nothing marks
+`api_base_url` as test-only at runtime — it's an ordinary workflow parameter,
+readable and settable by anyone who can author a workflow. That's fine for
+integrations where the secret travels in a header (like `core.httpRequest`'s
+Bearer/apiKey/Basic auth): redirecting the request doesn't hand the secret to
+the redirect target. It's *not* fine for an integration like this one where
+the secret is embedded in the URL path itself (`/bot<TOKEN>/sendMessage`) —
+pointing `api_base_url` at a host you control lets you read the bot token
+straight out of the incoming request. If you're adding a node with a
+URL-embedded secret, treat `api_base_url` (or any similar override) as a
+capability, not a convenience, and say so in the node's own docs.
 
 ### Combining with `execute_with_client` for finer-grained tests
 
