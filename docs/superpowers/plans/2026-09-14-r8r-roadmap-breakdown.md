@@ -127,8 +127,12 @@ Telegram as the reference third-party integration built on top of the
 HTTP Request pattern.
 
 **Status:** §4.1 and §4.2 shipped as "Plan 4a" (`docs/superpowers/plans/2026-09-15-r8r-plan4a-credentials-http.md`,
-merged to `main`). §4.3 (Telegram) remains — it depends on both and is
-its own natural follow-on plan ("Plan 4b"), not yet written.
+merged to `main`). §4.3.2 (Telegram action node) and §4.3.3 (developer docs)
+shipped as "Plan 4b" (`docs/superpowers/plans/2026-09-16-r8r-plan4b-telegram-node.md`,
+merged to `main`). §4.3.1 (Telegram Trigger) remains — deliberately deferred by
+Plan 4b (long-polling needs new background-task infrastructure; webhook mode
+needs a design decision about interop with `core.webhook`'s existing
+single-node-type-per-route model) and is its own future plan.
 
 ### 4.1 HTTP Request Node
 - 4.1.1 Core request building
@@ -151,15 +155,24 @@ its own natural follow-on plan ("Plan 4b"), not yet written.
   - 4.2.3.2 Node execution context can request decrypted credential data scoped to what the node declares needing
 
 ### 4.3 Telegram Nodes (reference integration)
-- 4.3.1 Telegram Trigger
+- 4.3.1 Telegram Trigger — **deferred**, own future plan (see Status above)
   - 4.3.1.1 Long-polling mode
   - 4.3.1.2 Webhook mode (`setWebhook`), reusing Plan 3's webhook infrastructure
-- 4.3.2 Telegram (action node)
-  - 4.3.2.1 Send message
-  - 4.3.2.2 Send photo / other basic methods
-  - 4.3.2.3 Built as a thin wrapper over the HTTP Request pattern — doubles as the "add a new integration" reference
-- 4.3.3 Developer docs
+- 4.3.2 Telegram (action node) — **shipped** (`telegram.sendMessage`, `src/nodes/telegram_send_message.rs`)
+  - 4.3.2.1 Send message — done; `sendPhoto`/other methods not built (4.3.2.2 partially deferred)
+  - 4.3.2.2 Send photo / other basic methods — not built; same pattern as `sendMessage`, add when needed
+  - 4.3.2.3 Built as a thin wrapper over the HTTP Request pattern — doubles as the "add a new integration" reference (own dedicated `reqwest::Client`, not shared with `core.httpRequest`, a deliberate scoped-simplicity choice)
+- 4.3.3 Developer docs — **shipped** (`docs/adding-a-node.md`)
   - 4.3.3.1 Short "adding a new node" guide using Telegram as the worked example
+
+Plan 4b's final review found and fixed a real security issue before merge:
+Telegram's dedicated HTTP client used reqwest's default redirect/referer
+behavior, which could leak the bot-token-bearing URL (the token lives in the
+URL path per Telegram's Bot API scheme) via the `Referer` header on a
+redirect — a channel outside the "never put secrets in error messages"
+discipline the node's error paths were built around. Fixed by disabling both
+on that client. Deferred hardening items tracked in issues #47 (comment) and
+#48 (milestone 25, "Plan 7 — Execution Hardening").
 
 ---
 
