@@ -115,6 +115,8 @@ mod tests {
         registry.record_cron_job(workflow_id, Uuid::new_v4());
         registry.record_telegram_poll(workflow_id, dummy_abort_handle());
         assert!(registry.take_cron_job(workflow_id).is_some());
-        assert!(registry.take_telegram_poll(workflow_id).unwrap().abort() == ());
+        let handle = registry.take_telegram_poll(workflow_id);
+        assert!(handle.is_some());
+        handle.unwrap().abort();
     }
 }
