@@ -3,3 +3,4 @@
 .env
 .claude/hooks/*.log
 .claude/scheduled_tasks.lock
+.superpowers/
