@@ -265,6 +265,22 @@ pub async fn poll_telegram_updates(
             }
 
             let trigger_item = Item { json: update, binary: serde_json::json!({}) };
+
+            // Resolve credentials for any downstream node before persisting a
+            // `Running` execution row, mirroring the pre-flight-check ordering
+            // `src/api/workflows.rs`'s manual-execution handler already uses
+            // (a resolution failure must never leave a stuck `Running` row
+            // behind). Without this, every credential-requiring downstream
+            // node (e.g. `telegram.sendMessage`, the whole point of an
+            // "echo bot" workflow) would fail on every single firing.
+            let credentials = match crate::credentials::resolve_credentials_for_workflow(storage.as_ref(), &workflow).await {
+                Ok(credentials) => credentials,
+                Err(e) => {
+                    tracing::warn!(error = %e, %workflow_id, "telegram poller: failed to resolve credentials for this update, skipping");
+                    continue;
+                }
+            };
+
             let mut execution = Execution {
                 id: Uuid::new_v4(),
                 workflow_id: workflow.id,
@@ -279,7 +295,7 @@ pub async fn poll_telegram_updates(
                 continue;
             }
 
-            match crate::engine::execute_workflow_seeded(&workflow, &registry, Some(vec![trigger_item]), &std::collections::HashMap::new()).await {
+            match crate::engine::execute_workflow_seeded(&workflow, &registry, Some(vec![trigger_item]), &credentials).await {
                 Ok(outputs) => {
                     execution.status = ExecutionStatus::Success;
                     execution.node_outputs = outputs;
