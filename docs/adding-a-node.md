@@ -28,7 +28,7 @@ pub trait Node: Send + Sync {
   `"core.httpRequest"`). This is a plain method, not `const`, but every real node
   implements it as a one-line literal return.
 - **`resolves_parameters()`** has a default (`true`) that is correct for nearly
-  every node — see the doc comment at `src/node.rs:28-38`. It controls whether
+  every node — see the doc comment at `src/node.rs:29-38`. It controls whether
   the engine runs the node's `parameters` through the expression engine
   (`expr::resolve_parameters`, `{{ }}` interpolation) before calling `execute()`.
   Override it to `false` only when a "parameter" is really verbatim source/text
