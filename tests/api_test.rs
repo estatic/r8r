@@ -1081,3 +1081,155 @@ async fn credential_authenticated_telegram_send_message_executes_end_to_end() {
     assert_eq!(execution["status"], "Success");
     assert_eq!(execution["node_outputs"]["send"][0]["json"]["result"]["message_id"], 7);
 }
+
+#[tokio::test]
+async fn telegram_trigger_fires_downstream_node_on_incoming_update() {
+    let telegram = MockServer::start().await;
+
+    // The "incoming" bot: the trigger polls this.
+    Mock::given(method("GET"))
+        .and(path("/bot111:AAA/getUpdates"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ok": true,
+            "result": [{"update_id": 1, "message": {"chat": {"id": 42}, "text": "ping"}}]
+        })))
+        .up_to_n_times(1)
+        .mount(&telegram)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/bot111:AAA/getUpdates"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "result": []})))
+        .mount(&telegram)
+        .await;
+
+    // The "outgoing" bot: the downstream telegram.sendMessage node calls this.
+    Mock::given(method("POST"))
+        .and(path("/bot222:BBB/sendMessage"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "ok": true,
+            "result": {"message_id": 7}
+        })))
+        .mount(&telegram)
+        .await;
+
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "telegram-trigger-e2e@example.com").await;
+
+    let incoming_cred = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/credentials")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({"name": "incoming-bot", "credential_type": "telegramApi", "data": {"bot_token": "111:AAA"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(incoming_cred.status(), StatusCode::CREATED);
+    let bytes = incoming_cred.into_body().collect().await.unwrap().to_bytes();
+    let incoming_cred_id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string();
+
+    let outgoing_cred = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/credentials")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({"name": "outgoing-bot", "credential_type": "telegramApi", "data": {"bot_token": "222:BBB"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(outgoing_cred.status(), StatusCode::CREATED);
+    let bytes = outgoing_cred.into_body().collect().await.unwrap().to_bytes();
+    let outgoing_cred_id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string();
+
+    let workflow_body = serde_json::json!({
+        "name": "telegram-trigger-e2e-wf",
+        "nodes": [
+            {"id": "trigger", "node_type": "telegram.trigger", "position": [0.0, 0.0], "parameters": {
+                "auth": {"credential_id": incoming_cred_id},
+                "api_base_url": telegram.uri()
+            }, "disabled": false},
+            {"id": "echo", "node_type": "telegram.sendMessage", "position": [1.0, 0.0], "parameters": {
+                "chat_id": "42",
+                "text": "echo",
+                "auth": {"credential_id": outgoing_cred_id},
+                "api_base_url": telegram.uri()
+            }, "disabled": false}
+        ],
+        "connections": [
+            {"from_node": "trigger", "from_output": 0, "to_node": "echo", "to_input": 0}
+        ]
+    });
+    let wf_response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/workflows")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(workflow_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wf_response.status(), StatusCode::CREATED);
+    let bytes = wf_response.into_body().collect().await.unwrap().to_bytes();
+    let workflow_id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string();
+
+    let activate_response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/rest/workflows/{workflow_id}/active"))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::json!({"active": true}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(activate_response.status(), StatusCode::OK);
+
+    // Bounded wait for the background poll task to fetch the queued update
+    // and fire the downstream telegram.sendMessage node against the same
+    // mock server. Outer timeout is a belt-and-braces bound, matching the
+    // pattern already established in http_request.rs's timeout test and
+    // this plan's own telegram_poller.rs tests.
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let requests = telegram.received_requests().await.unwrap();
+            if requests.iter().any(|r| r.url.path().contains("sendMessage")) {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("telegram.trigger should have fired the downstream telegram.sendMessage node within 5s");
+
+    // Clean up: deactivate so the background poll task stops before the
+    // test process exits (avoids a dangling task hammering a mock server
+    // that's about to be dropped).
+    let deactivate_response = app
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/rest/workflows/{workflow_id}/active"))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::json!({"active": false}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(deactivate_response.status(), StatusCode::OK);
+}
