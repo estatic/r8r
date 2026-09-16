@@ -9,6 +9,7 @@ pub mod schedule;
 pub mod set;
 pub mod switch;
 pub mod telegram_send_message;
+pub mod telegram_trigger;
 pub mod wait;
 pub mod webhook;
 
@@ -28,4 +29,5 @@ pub fn register_all(registry: &mut NodeRegistry) {
     registry.register(Box::new(webhook::WebhookNode));
     registry.register(Box::new(schedule::ScheduleNode));
     registry.register(Box::new(telegram_send_message::TelegramSendMessageNode));
+    registry.register(Box::new(telegram_trigger::TelegramTriggerNode));
 }

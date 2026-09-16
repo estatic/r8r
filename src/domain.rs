@@ -51,6 +51,7 @@ pub enum ExecutionMode {
     Manual,
     Webhook,
     Schedule,
+    Telegram,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
