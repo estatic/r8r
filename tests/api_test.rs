@@ -7,6 +7,8 @@ use r8r::storage::Storage;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tower::ServiceExt;
+use wiremock::matchers::{header, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 async fn test_state() -> AppState {
     let storage = SqliteStorage::new("sqlite::memory:", [0u8; 32]).await.unwrap();
@@ -913,4 +915,85 @@ async fn create_credential_requires_auth() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
+async fn credential_authenticated_http_request_executes_end_to_end() {
+    let mock_server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/orders"))
+        .and(header("authorization", "Bearer e2e-secret-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"orders": [1, 2, 3]})))
+        .mount(&mock_server)
+        .await;
+
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "http-e2e@example.com").await;
+
+    let cred_response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/credentials")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({"name": "orders-api", "credential_type": "bearer", "data": {"token": "e2e-secret-token"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(cred_response.status(), StatusCode::CREATED);
+    let bytes = cred_response.into_body().collect().await.unwrap().to_bytes();
+    let credential: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let credential_id = credential["id"].as_str().unwrap();
+
+    let workflow_body = serde_json::json!({
+        "name": "http-e2e-wf",
+        "nodes": [
+            {"id": "trigger", "node_type": "core.manualTrigger", "position": [0.0, 0.0], "parameters": {}, "disabled": false},
+            {"id": "http1", "node_type": "core.httpRequest", "position": [1.0, 0.0], "parameters": {
+                "method": "GET",
+                "url": format!("{}/orders", mock_server.uri()),
+                "auth": {"type": "bearer", "credential_id": credential_id}
+            }, "disabled": false}
+        ],
+        "connections": [
+            {"from_node": "trigger", "from_output": 0, "to_node": "http1", "to_input": 0}
+        ]
+    });
+    let wf_response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/workflows")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(workflow_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(wf_response.status(), StatusCode::CREATED);
+    let bytes = wf_response.into_body().collect().await.unwrap().to_bytes();
+    let workflow: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let workflow_id = workflow["id"].as_str().unwrap();
+
+    let exec_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(exec_response.status(), StatusCode::OK);
+    let bytes = exec_response.into_body().collect().await.unwrap().to_bytes();
+    let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(execution["status"], "Success");
+    assert_eq!(execution["node_outputs"]["http1"][0]["json"], serde_json::json!({"orders": [1, 2, 3]}));
 }
