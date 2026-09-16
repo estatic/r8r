@@ -7,7 +7,7 @@ use r8r::storage::Storage;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use tower::ServiceExt;
-use wiremock::matchers::{header, method, path};
+use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 async fn test_state() -> AppState {
@@ -1091,7 +1091,7 @@ async fn telegram_trigger_fires_downstream_node_on_incoming_update() {
         .and(path("/bot111:AAA/getUpdates"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "ok": true,
-            "result": [{"update_id": 1, "message": {"chat": {"id": 42}, "text": "ping"}}]
+            "result": [{"update_id": 1, "message": {"chat": {"id": 918273}, "text": "ping from the trigger test"}}]
         })))
         .up_to_n_times(1)
         .mount(&telegram)
@@ -1102,9 +1102,20 @@ async fn telegram_trigger_fires_downstream_node_on_incoming_update() {
         .mount(&telegram)
         .await;
 
-    // The "outgoing" bot: the downstream telegram.sendMessage node calls this.
+    // The "outgoing" bot: the downstream telegram.sendMessage node calls
+    // this. Matching on the request body (not just method+path) proves the
+    // incoming update's JSON actually flowed through the trigger into the
+    // downstream node's templated parameters -- see the workflow's `echo`
+    // node parameters below, which template `chat_id`/`text` off
+    // `$json.message.chat.id`/`$json.message.text` (the seeded update
+    // above). Without this, the test would pass identically even if the
+    // trigger's Update JSON never reached the workflow.
     Mock::given(method("POST"))
         .and(path("/bot222:BBB/sendMessage"))
+        .and(body_json(serde_json::json!({
+            "chat_id": 918273,
+            "text": "echo: ping from the trigger test"
+        })))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "ok": true,
             "result": {"message_id": 7}
@@ -1159,8 +1170,8 @@ async fn telegram_trigger_fires_downstream_node_on_incoming_update() {
                 "api_base_url": telegram.uri()
             }, "disabled": false},
             {"id": "echo", "node_type": "telegram.sendMessage", "position": [1.0, 0.0], "parameters": {
-                "chat_id": "42",
-                "text": "echo",
+                "chat_id": "{{ $json.message.chat.id }}",
+                "text": "echo: {{ $json.message.text }}",
                 "auth": {"credential_id": outgoing_cred_id},
                 "api_base_url": telegram.uri()
             }, "disabled": false}

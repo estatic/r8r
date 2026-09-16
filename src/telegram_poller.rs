@@ -209,7 +209,14 @@ pub async fn activate_telegram_trigger(
     let registry = state.registry.clone();
     let workflow_id = workflow.id;
 
-    let join_handle = tokio::spawn(poll_telegram_updates(storage, registry, workflow_id, bot_token, api_base_url));
+    // Pass an owned clone of `workflow` (not just its id) so the poll loop's
+    // very first iteration can skip the database active-check and trust
+    // this caller-supplied workflow directly — see `poll_telegram_updates`'s
+    // doc comment for why (closes an activation-race where the poller's
+    // first `storage.get_workflow` read could lose a commit-visibility race
+    // against the API handler's own `workflow.active = true` write).
+    let join_handle =
+        tokio::spawn(poll_telegram_updates(storage, registry, workflow.clone(), bot_token, api_base_url));
     state.trigger_registry.record_telegram_poll(workflow_id, join_handle.abort_handle());
     Ok(())
 }
@@ -219,41 +226,87 @@ pub async fn activate_telegram_trigger(
 /// re-fetching it each iteration, matching `fire_schedule`'s existing
 /// pattern in `triggers.rs`) or its `AbortHandle` is aborted from
 /// `deactivate_workflow_triggers`.
+///
+/// Takes an owned `workflow` (rather than just its id) so the FIRST
+/// iteration can skip the database active-check entirely and trust this
+/// caller-supplied workflow directly. This closes an activation race: the
+/// API handler that calls `activate_telegram_trigger` (and thus spawns this
+/// task) persists `workflow.active = true` to storage only AFTER spawning
+/// the poll task. Under a real multi-connection database pool, this task's
+/// first `storage.get_workflow` read could race ahead of that write's
+/// commit-visibility and observe `active: false`, causing the poller to
+/// exit immediately and permanently — leaving an "active" workflow (per
+/// storage and the API's 200 response) with no running poller and no
+/// self-healing. Trusting the caller-supplied `workflow` for the first
+/// iteration only avoids that read altogether; every iteration after the
+/// first falls back to the normal fresh-fetch-then-check-`.active`
+/// behavior, so a later deactivation is still detected exactly as before.
 pub async fn poll_telegram_updates(
     storage: Arc<dyn Storage>,
     registry: Arc<NodeRegistry>,
-    workflow_id: Uuid,
+    workflow: Workflow,
     bot_token: String,
     api_base_url: String,
 ) {
     let client = match build_client() {
         Ok(c) => c,
         Err(e) => {
-            tracing::error!(error = %e, %workflow_id, "telegram poller: failed to build HTTP client, trigger will not fire");
+            tracing::error!(error = %e, workflow_id = %workflow.id, "telegram poller: failed to build HTTP client, trigger will not fire");
             return;
         }
     };
 
     let mut offset: Option<i64> = None;
+    let mut current_workflow = workflow;
+    let mut first_iteration = true;
 
     loop {
-        let workflow = match storage.get_workflow(workflow_id).await {
-            Ok(Some(wf)) if wf.active => wf,
-            Ok(_) => {
-                tracing::info!(%workflow_id, "telegram poller: workflow no longer active or found, stopping");
-                return;
-            }
+        if !first_iteration {
+            current_workflow = match storage.get_workflow(current_workflow.id).await {
+                Ok(Some(wf)) if wf.active => wf,
+                Ok(_) => {
+                    tracing::info!(workflow_id = %current_workflow.id, "telegram poller: workflow no longer active or found, stopping");
+                    return;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, workflow_id = %current_workflow.id, "telegram poller: failed to fetch workflow, retrying after backoff");
+                    tokio::time::sleep(std::time::Duration::from_secs(RETRY_BACKOFF_SECS)).await;
+                    continue;
+                }
+            };
+        }
+        first_iteration = false;
+
+        let updates = match get_updates(&client, &api_base_url, &bot_token, offset).await {
+            Ok(updates) => updates,
             Err(e) => {
-                tracing::warn!(error = %e, %workflow_id, "telegram poller: failed to fetch workflow, retrying after backoff");
+                tracing::warn!(error = %e, workflow_id = %current_workflow.id, "telegram poller: getUpdates failed, retrying after backoff");
                 tokio::time::sleep(std::time::Duration::from_secs(RETRY_BACKOFF_SECS)).await;
                 continue;
             }
         };
 
-        let updates = match get_updates(&client, &api_base_url, &bot_token, offset).await {
-            Ok(updates) => updates,
+        if updates.is_empty() {
+            // Nothing to process — skip the credential resolution DB
+            // round-trip below entirely on every idle poll.
+            continue;
+        }
+
+        // Resolve credentials for any downstream node ONCE per batch,
+        // BEFORE any `offset` mutation happens below. If this fails (even a
+        // transient DB error, not just a genuinely-missing credential), we
+        // must NOT have already advanced `offset` past any update in this
+        // batch — otherwise Telegram would never redeliver the skipped
+        // update on the next `getUpdates` call, silently and permanently
+        // losing it. Retrying the outer loop with `offset` untouched means
+        // this exact batch is re-fetched from Telegram next iteration, and
+        // once resolution succeeds every update in it is processed
+        // normally. This also collapses the previous per-update redundant
+        // credential fetch+decrypt into a single resolution per batch.
+        let credentials = match crate::credentials::resolve_credentials_for_workflow(storage.as_ref(), &current_workflow).await {
+            Ok(credentials) => credentials,
             Err(e) => {
-                tracing::warn!(error = %e, %workflow_id, "telegram poller: getUpdates failed, retrying after backoff");
+                tracing::warn!(error = %e, workflow_id = %current_workflow.id, "telegram poller: failed to resolve credentials for this batch, retrying after backoff");
                 tokio::time::sleep(std::time::Duration::from_secs(RETRY_BACKOFF_SECS)).await;
                 continue;
             }
@@ -266,24 +319,9 @@ pub async fn poll_telegram_updates(
 
             let trigger_item = Item { json: update, binary: serde_json::json!({}) };
 
-            // Resolve credentials for any downstream node before persisting a
-            // `Running` execution row, mirroring the pre-flight-check ordering
-            // `src/api/workflows.rs`'s manual-execution handler already uses
-            // (a resolution failure must never leave a stuck `Running` row
-            // behind). Without this, every credential-requiring downstream
-            // node (e.g. `telegram.sendMessage`, the whole point of an
-            // "echo bot" workflow) would fail on every single firing.
-            let credentials = match crate::credentials::resolve_credentials_for_workflow(storage.as_ref(), &workflow).await {
-                Ok(credentials) => credentials,
-                Err(e) => {
-                    tracing::warn!(error = %e, %workflow_id, "telegram poller: failed to resolve credentials for this update, skipping");
-                    continue;
-                }
-            };
-
             let mut execution = Execution {
                 id: Uuid::new_v4(),
-                workflow_id: workflow.id,
+                workflow_id: current_workflow.id,
                 status: ExecutionStatus::Running,
                 mode: ExecutionMode::Telegram,
                 node_outputs: Default::default(),
@@ -291,23 +329,23 @@ pub async fn poll_telegram_updates(
                 finished_at: None,
             };
             if let Err(e) = storage.create_execution(&execution).await {
-                tracing::error!(error = %e, %workflow_id, "telegram poller: failed to persist new execution");
+                tracing::error!(error = %e, workflow_id = %current_workflow.id, "telegram poller: failed to persist new execution");
                 continue;
             }
 
-            match crate::engine::execute_workflow_seeded(&workflow, &registry, Some(vec![trigger_item]), &credentials).await {
+            match crate::engine::execute_workflow_seeded(&current_workflow, &registry, Some(vec![trigger_item]), &credentials).await {
                 Ok(outputs) => {
                     execution.status = ExecutionStatus::Success;
                     execution.node_outputs = outputs;
                 }
                 Err(e) => {
-                    tracing::warn!(error = %e, %workflow_id, "telegram-triggered execution failed");
+                    tracing::warn!(error = %e, workflow_id = %current_workflow.id, "telegram-triggered execution failed");
                     execution.status = ExecutionStatus::Error;
                 }
             }
             execution.finished_at = Some(chrono::Utc::now());
             if let Err(e) = storage.update_execution(&execution).await {
-                tracing::error!(error = %e, %workflow_id, "telegram poller: failed to persist execution result");
+                tracing::error!(error = %e, workflow_id = %current_workflow.id, "telegram poller: failed to persist execution result");
             }
         }
     }
@@ -316,10 +354,75 @@ pub async fn poll_telegram_updates(
 #[cfg(test)]
 mod poller_tests {
     use super::*;
-    use crate::domain::{Connection, NodeInstance};
+    use crate::domain::{Connection, Credential, CredentialSummary, NodeInstance, User, UserRole};
     use crate::storage::sqlite::SqliteStorage;
+    use async_trait::async_trait;
+    use std::sync::Mutex;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    /// Wraps a real `SqliteStorage`, delegating every `Storage` method to it
+    /// except `create_execution`/`update_execution`, which are ALSO
+    /// recorded into `recorded`. `Storage` deliberately has no "list
+    /// executions" method (confirmed out of scope to add), so an
+    /// `Execution`'s randomly-generated id can't be looked up after the
+    /// fact any other way -- this wrapper is the test-only mechanism used
+    /// to prove the poll loop actually persisted an execution (Fix 3 Part A
+    /// of the final-review fix wave), rather than only checking that the
+    /// mock Telegram server received requests.
+    struct RecordingStorage {
+        inner: SqliteStorage,
+        recorded: Arc<Mutex<Vec<Execution>>>,
+    }
+
+    #[async_trait]
+    impl Storage for RecordingStorage {
+        async fn create_workflow(&self, workflow: &Workflow) -> anyhow::Result<()> {
+            self.inner.create_workflow(workflow).await
+        }
+        async fn update_workflow(&self, workflow: &Workflow) -> anyhow::Result<()> {
+            self.inner.update_workflow(workflow).await
+        }
+        async fn get_workflow(&self, id: Uuid) -> anyhow::Result<Option<Workflow>> {
+            self.inner.get_workflow(id).await
+        }
+        async fn list_workflows(&self) -> anyhow::Result<Vec<Workflow>> {
+            self.inner.list_workflows().await
+        }
+        async fn create_execution(&self, execution: &Execution) -> anyhow::Result<()> {
+            self.inner.create_execution(execution).await?;
+            self.recorded.lock().unwrap().push(execution.clone());
+            Ok(())
+        }
+        async fn update_execution(&self, execution: &Execution) -> anyhow::Result<()> {
+            self.inner.update_execution(execution).await?;
+            let mut recorded = self.recorded.lock().unwrap();
+            if let Some(existing) = recorded.iter_mut().find(|e| e.id == execution.id) {
+                *existing = execution.clone();
+            } else {
+                recorded.push(execution.clone());
+            }
+            Ok(())
+        }
+        async fn get_execution(&self, id: Uuid) -> anyhow::Result<Option<Execution>> {
+            self.inner.get_execution(id).await
+        }
+        async fn create_user(&self, user: &User) -> anyhow::Result<()> {
+            self.inner.create_user(user).await
+        }
+        async fn get_user_by_email(&self, email: &str) -> anyhow::Result<Option<User>> {
+            self.inner.get_user_by_email(email).await
+        }
+        async fn create_credential(&self, credential: &Credential) -> anyhow::Result<()> {
+            self.inner.create_credential(credential).await
+        }
+        async fn get_credential(&self, id: Uuid) -> anyhow::Result<Option<Credential>> {
+            self.inner.get_credential(id).await
+        }
+        async fn list_credentials(&self) -> anyhow::Result<Vec<CredentialSummary>> {
+            self.inner.list_credentials().await
+        }
+    }
 
     fn trigger_workflow(credential_id: Uuid, api_base_url: &str, downstream: NodeInstance, connect_to: &str) -> Workflow {
         let now = chrono::Utc::now();
@@ -364,13 +467,46 @@ mod poller_tests {
             .mount(&telegram)
             .await;
 
-        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::new("sqlite::memory:", [0u8; 32]).await.unwrap());
+        let inner = SqliteStorage::new("sqlite::memory:", [0u8; 32]).await.unwrap();
+        let recorded: Arc<Mutex<Vec<Execution>>> = Arc::new(Mutex::new(Vec::new()));
+        let storage: Arc<dyn Storage> = Arc::new(RecordingStorage { inner, recorded: recorded.clone() });
         let mut registry = NodeRegistry::new();
         crate::nodes::register_all(&mut registry);
         let registry = Arc::new(registry);
 
+        // A real user + credential, so `resolve_credentials_for_workflow`
+        // (which the poll loop now calls once per batch -- Fix 2) actually
+        // succeeds: it scans every node's `auth.credential_id`, including
+        // the trigger node's own, so that id must resolve to a real,
+        // persisted credential for the loop to ever reach
+        // `execute_workflow_seeded` and thus ever persist an execution.
+        let owner_id = Uuid::new_v4();
+        storage
+            .create_user(&User {
+                id: owner_id,
+                email: format!("{owner_id}@example.com"),
+                password_hash: "irrelevant-for-this-test".into(),
+                role: UserRole::Owner,
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        let credential_id = Uuid::new_v4();
+        storage
+            .create_credential(&Credential {
+                id: credential_id,
+                name: "incoming-bot".into(),
+                credential_type: "telegramApi".into(),
+                data: serde_json::json!({"bot_token": "111:AAA"}),
+                owner_id,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
         let wf = trigger_workflow(
-            Uuid::new_v4(),
+            credential_id,
             &telegram.uri(),
             NodeInstance {
                 id: "passthrough".into(),
@@ -383,19 +519,22 @@ mod poller_tests {
         );
         storage.create_workflow(&wf).await.unwrap();
 
-        let workflow_id = wf.id;
-        let poll = tokio::spawn(poll_telegram_updates(storage.clone(), registry, workflow_id, "111:AAA".into(), telegram.uri()));
+        let poll = tokio::spawn(poll_telegram_updates(storage.clone(), registry, wf.clone(), "111:AAA".into(), telegram.uri()));
 
         // Bounded wait: the poller's tight loop against the mock (no real
         // 30s Telegram-side wait involved) should process the one queued
         // update well within this window. The outer timeout is a
         // belt-and-braces bound so a broken poll loop fails the test
         // instead of hanging the suite, matching the established pattern
-        // in `http_request.rs`'s timeout test.
+        // in `http_request.rs`'s timeout test. Because
+        // `poll_telegram_updates` processes one batch (get_updates,
+        // resolve credentials, create+execute+update every update in it)
+        // fully before looping around to its next `get_updates` call, by
+        // the time the SECOND getUpdates request is observed here, the
+        // first update's `Execution` row has already been created AND
+        // updated -- no race with the assertions below.
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                let wf = storage.get_workflow(workflow_id).await.unwrap().unwrap();
-                let _ = wf; // keep the workflow row alive/active for the poller
                 if telegram.received_requests().await.unwrap().len() >= 2 {
                     break;
                 }
@@ -406,6 +545,19 @@ mod poller_tests {
         .expect("poller should have made at least 2 getUpdates calls (one with an update, one empty) within 5s");
 
         poll.abort();
+
+        // Genuine proof of persistence: at least one `Execution` row was
+        // created (and then updated) with `mode: Telegram` and
+        // `status: Success` -- not just that the mock Telegram server saw
+        // requests, which would pass even if the update's JSON never
+        // reached the workflow or the execution was never persisted.
+        let recorded = recorded.lock().unwrap();
+        let modes_and_statuses: Vec<(ExecutionMode, ExecutionStatus)> =
+            recorded.iter().map(|e| (e.mode.clone(), e.status.clone())).collect();
+        assert!(
+            recorded.iter().any(|e| e.mode == ExecutionMode::Telegram && e.status == ExecutionStatus::Success),
+            "expected at least one persisted Execution with mode=Telegram, status=Success; recorded: {modes_and_statuses:?}"
+        );
     }
 
     #[tokio::test]
@@ -435,9 +587,8 @@ mod poller_tests {
             "passthrough",
         );
         storage.create_workflow(&wf).await.unwrap();
-        let workflow_id = wf.id;
 
-        let poll = tokio::spawn(poll_telegram_updates(storage.clone(), registry, workflow_id, "111:AAA".into(), telegram.uri()));
+        let poll = tokio::spawn(poll_telegram_updates(storage.clone(), registry, wf.clone(), "111:AAA".into(), telegram.uri()));
 
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while telegram.received_requests().await.unwrap().is_empty() {
