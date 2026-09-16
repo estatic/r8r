@@ -101,9 +101,12 @@ impl Node for TelegramSendMessageNode {
 (`src/nodes/telegram_send_message.rs:8, 35-44`.) The node struct itself is a
 zero-field marker (`pub struct TelegramSendMessageNode;`) — all the real logic
 lives in a free function, `execute_with_client`, that takes the HTTP client and
-context as parameters. This split exists so tests can call
-`execute_with_client` directly against a client pointed at a mock server,
-without going through the `http_client()` singleton (see §6).
+context as parameters. Telegram's own tests don't call `execute_with_client`
+directly — they go through `node.execute()` and redirect requests via the
+`api_base_url` parameter instead (see below). The split is kept anyway for
+structural consistency with `http_request.rs`'s pattern, and to keep
+`execute_with_client` unit-testable in principle against a hand-built client
+(see §6 for a node that actually does this).
 
 ### Parameter parsing: required fields → `Err` on missing
 

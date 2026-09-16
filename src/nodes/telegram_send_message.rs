@@ -25,6 +25,16 @@ fn http_client() -> Result<&'static reqwest::Client, NodeError> {
         .get_or_init(|| {
             reqwest::Client::builder()
                 .timeout(REQUEST_TIMEOUT)
+                // Telegram's Bot API embeds the bot token in the request URL
+                // (see the SECURITY note on `execute_with_client` below). A
+                // redirect response would make reqwest re-issue the request
+                // to a new host while auto-attaching a `Referer` header
+                // containing that token-bearing URL -- leaking it outside
+                // this node's error-message discipline. Telegram's real API
+                // never legitimately redirects `sendMessage` calls, so
+                // disabling both costs nothing functionally.
+                .redirect(reqwest::redirect::Policy::none())
+                .referer(false)
                 .build()
                 .map_err(|e| e.to_string())
         })
@@ -106,10 +116,11 @@ async fn execute_with_client(
         .map_err(|_| NodeError::ExecutionFailed("telegram.sendMessage: request to Telegram API failed".into()))?;
 
     let status = response.status();
-    let response_json: serde_json::Value = response
-        .json()
-        .await
-        .map_err(|_| NodeError::ExecutionFailed("telegram.sendMessage: failed to parse Telegram API response".into()))?;
+    let response_json: serde_json::Value = response.json().await.map_err(|_| {
+        NodeError::ExecutionFailed(format!(
+            "telegram.sendMessage: Telegram API returned HTTP {status} with a non-JSON response body"
+        ))
+    })?;
 
     let ok = response_json.get("ok").and_then(|v| v.as_bool()).unwrap_or(false);
     if !status.is_success() || !ok {
@@ -128,7 +139,7 @@ async fn execute_with_client(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use wiremock::matchers::{method, path_regex};
+    use wiremock::matchers::{body_json, method, path_regex};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -136,6 +147,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path_regex(r"^/bot123:ABC/sendMessage$"))
+            .and(body_json(serde_json::json!({"chat_id": "42", "text": "hello"})))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "ok": true,
                 "result": {"message_id": 42}
