@@ -126,6 +126,10 @@ listeners instead of being inert metadata.
 Telegram as the reference third-party integration built on top of the
 HTTP Request pattern.
 
+**Status:** §4.1 and §4.2 shipped as "Plan 4a" (`docs/superpowers/plans/2026-09-15-r8r-plan4a-credentials-http.md`,
+merged to `main`). §4.3 (Telegram) remains — it depends on both and is
+its own natural follow-on plan ("Plan 4b"), not yet written.
+
 ### 4.1 HTTP Request Node
 - 4.1.1 Core request building
   - 4.1.1.1 Method, URL, headers, query params, body (JSON/form/raw)
@@ -276,6 +280,19 @@ self-registration).
   - 7.6.2.1 Let `$json` (and per-item evaluation generally) see each item's own data within one node's execution, instead of only the first input item — needed for a genuinely per-item Filter condition and a richer Set node
 - 7.6.3 Code node sandbox hardening
   - 7.6.3.1 Add `rquickjs::Runtime::set_memory_limit` and a deadline-based `set_interrupt_handler` in `eval_js`, superseding the current `spawn_blocking`-based timeout (which leaves a script's thread running/allocating in the background after a 2s timeout — bounded by tokio's blocking-pool cap, but unbounded in wall-clock/RAM until then)
+
+### 7.7 Credential/HTTP Request hardening
+*(parked by Plan 4a's final whole-branch review — none individually blocking, none exploitable under the current single-shared-workspace trust model, but a coherent hardening batch)*
+- 7.7.1 Truncate/redact upstream response body in `core.httpRequest`'s non-2xx error message
+- 7.7.2 Mark `apiKey` auth header value as sensitive (`HeaderValue::set_sensitive(true)`)
+- 7.7.3 Prevent duplicate `Authorization` headers when a user supplies `headers.authorization` alongside `auth.type: "bearer"`
+- 7.7.4 Scope `NodeExecutionContext.credentials` per-node instead of cloning the full run's credential map into every node's context
+- 7.7.5 Bind `credential.id` as AEAD associated data on encrypt/decrypt
+- 7.7.6 Cap `core.httpRequest`'s response body read size (currently unbounded)
+- 7.7.7 Make `auth.type` a hard-required field when `auth`/`credential_id` is present
+- 7.7.8 Fix `.env.example`'s `CREDENTIALS_KEY` placeholder (not valid base64 as shipped) and add the `(see .env.example)` suffix to its error message
+- 7.7.9 Remove unused `rand` direct dependency from `Cargo.toml`
+- 7.7.10 Give `Credential` a hand-written `Debug` impl that redacts `data`
 
 ---
 
