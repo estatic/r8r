@@ -192,12 +192,39 @@ demand shows up (see §9).
   execution (not persisted across separate executions in v1).
 
 **Messaging (reference third-party integration)**
-- Telegram Trigger — long-polling or webhook-based (`setWebhook`),
-  emits incoming messages/updates as items.
-- Telegram — send message / send photo / etc., built as a thin
-  typed wrapper over the HTTP Request pattern; this node doubles as
-  the worked example for "how to add a new integration" in
-  developer docs.
+- Telegram Trigger (node type `telegram.trigger`) — **v1 ships
+  long-polling only**; webhook mode (`setWebhook`) is deferred (see
+  below). One spawned background task per activated workflow using
+  this trigger, mirroring how Schedule already gets one cron job per
+  workflow via `TriggerRegistry`: the task loops on Telegram's
+  `GET /bot<token>/getUpdates?offset=<n>&timeout=30`, where Telegram's
+  own `timeout` parameter does the blocking (no manual sleep needed),
+  dispatching each returned update as a trigger item
+  (`Item{json: <raw Update>, ..}`, same "pass the raw external
+  payload through" pattern as the Webhook node) into
+  `execute_workflow_seeded` and persisting the result as an
+  `Execution` (new `ExecutionMode::Telegram` variant). Cancellation on
+  deactivation uses a `tokio::task::AbortHandle` recorded in
+  `TriggerRegistry` alongside the existing cron-job map — no new
+  shutdown-signal mechanism needed. The trigger's bot-token credential
+  is fetched and decrypted once at activation time (before polling
+  starts), separately from `resolve_credentials_for_workflow`'s
+  per-execution resolution used by downstream nodes. The `offset` is
+  tracked in memory only for v1 (not persisted across process
+  restarts — a restart may replay or drop buffered updates depending
+  on Telegram's queue state at the time). **Known v1 limitation**:
+  Telegram allows only one active `getUpdates` long-poll per bot
+  token, so two workflows sharing the same bot credential would
+  conflict (409) — solving this means a shared-poller-per-credential
+  design, deliberately deferred as speculative complexity with no
+  current use case.
+- Telegram (action node, `telegram.sendMessage`) — send message,
+  shipped; send photo / other Bot API methods not yet built, add via
+  the same pattern when needed. Built as a thin typed wrapper over the
+  HTTP Request pattern (own dedicated HTTP client, not shared with
+  `core.httpRequest`, for security-isolation reasons — see
+  `docs/adding-a-node.md`); this node doubles as the worked example
+  for "how to add a new integration" in developer docs.
 
 Slack and Email are explicitly excluded from v1 (product decision);
 they can be added later as ordinary nodes with no engine changes.
@@ -318,6 +345,12 @@ no granular per-workflow permissions yet).
   when a tool node fails mid-agent-run) needs its own short design
   pass once implementation starts — this spec fixes the node's
   responsibility and external shape, not its internal control loop.
-- Telegram long-polling vs webhook mode both need to work behind the
-  same trigger node without doubling implementation effort — worth
-  revisiting during implementation planning.
+- ~~Telegram long-polling vs webhook mode both need to work behind
+  the same trigger node without doubling implementation effort~~ —
+  **Resolved**: v1 ships long-polling only (see §5.3), sidestepping
+  the doubled-effort problem entirely rather than solving it. Webhook
+  mode remains a candidate future addition once real usage shows it's
+  needed, at which point it'll need its own design pass — `core.webhook`'s
+  route matching currently hardcodes a single node type
+  (`src/api/webhook.rs`'s `webhook_node_matches`) and would need
+  generalizing to recognize a second trigger-capable node type.
