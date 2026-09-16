@@ -126,13 +126,14 @@ listeners instead of being inert metadata.
 Telegram as the reference third-party integration built on top of the
 HTTP Request pattern.
 
-**Status:** §4.1 and §4.2 shipped as "Plan 4a" (`docs/superpowers/plans/2026-09-15-r8r-plan4a-credentials-http.md`,
-merged to `main`). §4.3.2 (Telegram action node) and §4.3.3 (developer docs)
+**Status:** Plan 4 is complete. §4.1 and §4.2 shipped as "Plan 4a"
+(`docs/superpowers/plans/2026-09-15-r8r-plan4a-credentials-http.md`, merged
+to `main`). §4.3.2 (Telegram action node) and §4.3.3 (developer docs)
 shipped as "Plan 4b" (`docs/superpowers/plans/2026-09-16-r8r-plan4b-telegram-node.md`,
-merged to `main`). §4.3.1 (Telegram Trigger) remains — deliberately deferred by
-Plan 4b (long-polling needs new background-task infrastructure; webhook mode
-needs a design decision about interop with `core.webhook`'s existing
-single-node-type-per-route model) and is its own future plan.
+merged to `main`). §4.3.1 (Telegram Trigger, long-polling only — webhook mode
+deliberately deferred, see below) shipped as "Plan 4c"
+(`docs/superpowers/plans/2026-09-16-r8r-plan4c-telegram-trigger.md`, merged
+to `main`).
 
 ### 4.1 HTTP Request Node
 - 4.1.1 Core request building
@@ -155,9 +156,9 @@ single-node-type-per-route model) and is its own future plan.
   - 4.2.3.2 Node execution context can request decrypted credential data scoped to what the node declares needing
 
 ### 4.3 Telegram Nodes (reference integration)
-- 4.3.1 Telegram Trigger — **deferred**, own future plan (see Status above)
-  - 4.3.1.1 Long-polling mode
-  - 4.3.1.2 Webhook mode (`setWebhook`), reusing Plan 3's webhook infrastructure
+- 4.3.1 Telegram Trigger — **shipped, long-polling only** (`telegram.trigger`, `src/nodes/telegram_trigger.rs` + `src/telegram_poller.rs`)
+  - 4.3.1.1 Long-polling mode — done; one spawned background task per activated workflow, mirroring `core.schedule`'s per-workflow job pattern
+  - 4.3.1.2 Webhook mode (`setWebhook`), reusing Plan 3's webhook infrastructure — **deliberately deferred**, own future plan (needs a design decision about interop with `core.webhook`'s existing single-node-type-per-route model)
 - 4.3.2 Telegram (action node) — **shipped** (`telegram.sendMessage`, `src/nodes/telegram_send_message.rs`)
   - 4.3.2.1 Send message — done; `sendPhoto`/other methods not built (4.3.2.2 partially deferred)
   - 4.3.2.2 Send photo / other basic methods — not built; same pattern as `sendMessage`, add when needed
@@ -173,6 +174,22 @@ redirect — a channel outside the "never put secrets in error messages"
 discipline the node's error paths were built around. Fixed by disabling both
 on that client. Deferred hardening items tracked in issues #47 (comment) and
 #48 (milestone 25, "Plan 7 — Execution Hardening").
+
+Plan 4c's final review found and fixed three issues before merge: a
+production-only activation race (the poller's first active-check could race
+ahead of the DB write that activated it — invisible in tests because the
+in-memory test pool's single connection accidentally serializes the two
+queries; real under a production multi-connection pool), a
+credential-resolution-ordering bug that could silently drop a Telegram
+update on a transient failure (offset advanced before resolution ran — fixed
+by resolving once per batch, before any offset mutation), and test coverage
+that didn't actually prove execution persistence or that the Update payload
+reached the workflow (fixed with a request-recording `Storage` test wrapper
+and expression-templated E2E assertions). All three independently
+re-reviewed and confirmed fixed. Deferred hardening items — including the
+root-cause fix for `fire_schedule`/`handle_webhook`'s identical
+missing-credential-resolution gap, which Plan 4c's mid-flight fix only
+patched for the Telegram poller — tracked in issue #49 (milestone 25).
 
 ---
 
