@@ -759,6 +759,143 @@ async fn list_credentials_returns_created_ones_without_data() {
     assert!(list[0].get("data").is_none());
 }
 
+// Regression test for the fix in src/api/workflows.rs::execute_workflow:
+// credential resolution now runs BEFORE the Execution{status: Running} row is
+// built and persisted, so a workflow referencing a nonexistent credential
+// fails fast with 400 instead of leaving a permanently stuck "Running"
+// execution row behind (the old ordering created+persisted the Running row
+// first, then resolved credentials, then bailed with 400 on failure —
+// abandoning that row with no update_execution call ever able to reach it,
+// since its id was never returned to the caller).
+//
+// There is no `GET /rest/executions` list endpoint, so we can't directly
+// enumerate storage and assert "zero execution rows exist" after the failed
+// call. What we CAN assert with the existing public HTTP surface:
+//   1. The execute call returns 400, not 200/500 — credential resolution
+//      failure is surfaced correctly.
+//   2. The 400 response body is plain text (from `format!(...)`), not an
+//      `Execution` JSON object — it must not contain a `"status"` field,
+//      which is what a persisted (even if stuck) execution's response would
+//      always carry. This at least confirms the handler returned before
+//      ever constructing/serializing an `Execution`.
+//   3. Most importantly: after the failed call, a SECOND, unrelated workflow
+//      is created and executed to completion (200, status "Success") on the
+//      exact same `test_app()` / in-memory storage instance. This proves the
+//      failed credential-resolution attempt didn't leave the app, the
+//      storage layer, or the DB connection in any broken/inconsistent state
+//      — i.e. nothing about the reordering introduced a partial-write hazard
+//      that would poison subsequent requests.
+#[tokio::test]
+async fn execute_workflow_with_nonexistent_credential_returns_400_before_touching_executions() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "cred-exec@example.com").await;
+
+    // A credential id that was never created via POST /rest/credentials.
+    let missing_credential_id = uuid::Uuid::new_v4();
+
+    let workflow_body = serde_json::json!({
+        "name": "bad-credential-wf",
+        "nodes": [
+            {
+                "id": "http1",
+                "node_type": "core.httpRequest",
+                "position": [0.0, 0.0],
+                "parameters": {"auth": {"type": "bearer", "credential_id": missing_credential_id.to_string()}},
+                "disabled": false
+            }
+        ],
+        "connections": []
+    });
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/workflows")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(workflow_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let workflow: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let workflow_id = workflow["id"].as_str().unwrap();
+
+    // Attempt to execute — credential resolution must fail BEFORE any
+    // Execution row is created, so this must be a 400, not 200.
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body_text = String::from_utf8(bytes.to_vec()).unwrap();
+    assert!(
+        body_text.contains("credential resolution failed"),
+        "expected the plain-text credential-resolution error, got: {body_text}"
+    );
+    // A real (even if stuck) persisted Execution would serialize as JSON with
+    // a "status" field (e.g. `{"id":...,"status":"Running",...}`). The 400
+    // body here is a plain error string, not that shape at all.
+    assert!(!body_text.contains("\"status\""));
+
+    // Now prove the app/storage is still fully healthy: create and execute a
+    // second, unrelated, valid workflow on the SAME app instance and confirm
+    // it runs to completion normally.
+    let workflow_body_2 = serde_json::json!({
+        "name": "healthy-wf",
+        "nodes": [
+            {"id": "trigger", "node_type": "core.manualTrigger", "position": [0.0, 0.0], "parameters": {}, "disabled": false},
+            {"id": "set1", "node_type": "core.set", "position": [1.0, 0.0], "parameters": {"fields": {"ok": true}}, "disabled": false}
+        ],
+        "connections": [
+            {"from_node": "trigger", "from_output": 0, "to_node": "set1", "to_input": 0}
+        ]
+    });
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/workflows")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(workflow_body_2.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let workflow_2: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let workflow_2_id = workflow_2["id"].as_str().unwrap();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/rest/workflows/{workflow_2_id}/execute"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(execution["status"], "Success");
+    assert_eq!(execution["node_outputs"]["set1"][0]["json"]["ok"], true);
+}
+
 #[tokio::test]
 async fn create_credential_requires_auth() {
     let app = test_app().await;

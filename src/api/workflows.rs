@@ -166,6 +166,14 @@ pub async fn execute_workflow(
         }
     };
 
+    let credentials = match crate::credentials::resolve_credentials_for_workflow(state.storage.as_ref(), &workflow).await {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(error = %e, workflow_id = %workflow.id, "failed to resolve workflow credentials");
+            return (StatusCode::BAD_REQUEST, format!("credential resolution failed: {e}")).into_response();
+        }
+    };
+
     let mut execution = Execution {
         id: Uuid::new_v4(),
         workflow_id: workflow.id,
@@ -179,14 +187,6 @@ pub async fn execute_workflow(
         tracing::error!(error = %e, "failed to persist new execution");
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
-
-    let credentials = match crate::credentials::resolve_credentials_for_workflow(state.storage.as_ref(), &workflow).await {
-        Ok(c) => c,
-        Err(e) => {
-            tracing::warn!(error = %e, workflow_id = %workflow.id, "failed to resolve workflow credentials");
-            return (StatusCode::BAD_REQUEST, format!("credential resolution failed: {e}")).into_response();
-        }
-    };
 
     match crate::engine::execute_workflow_seeded(&workflow, &state.registry, None, &credentials).await {
         Ok(outputs) => {
