@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import { api } from '../api/client'
 import type { Workflow, Connection } from '../types/domain'
 import WorkflowCanvas from '../components/WorkflowCanvas.vue'
+import AddNodeMenu from '../components/AddNodeMenu.vue'
 
 const route = useRoute()
 const workflowId = route.params.id as string
@@ -29,6 +30,18 @@ function onConnect(connection: Connection) {
   if (!workflow.value) return
   workflow.value.connections.push(connection)
 }
+
+function onAddNode(nodeType: string) {
+  if (!workflow.value) return
+  const count = workflow.value.nodes.length
+  workflow.value.nodes.push({
+    id: crypto.randomUUID(),
+    node_type: nodeType,
+    position: [100 + count * 40, 100 + count * 40],
+    parameters: {},
+    disabled: false,
+  })
+}
 </script>
 
 <template>
@@ -40,6 +53,8 @@ function onConnect(connection: Connection) {
         v-model="workflow.name"
         class="text-lg font-medium border-none focus:outline-none focus:ring-1 focus:ring-blue-300 rounded px-1"
       />
+      <div class="flex-1"></div>
+      <AddNodeMenu @add="onAddNode" />
     </header>
     <div class="flex-1 relative">
       <WorkflowCanvas
