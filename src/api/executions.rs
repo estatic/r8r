@@ -1,4 +1,5 @@
 use crate::state::AppState;
+use axum::extract::ws::{Message, WebSocket, WebSocketUpgrade};
 use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -55,6 +56,58 @@ pub async fn list_executions_for_workflow(
         Err(e) => {
             tracing::error!(error = %e, "failed to list executions for workflow");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(serde::Deserialize)]
+struct AuthFrame {
+    token: String,
+}
+
+pub async fn subscribe_executions(
+    ws: WebSocketUpgrade,
+    State(state): State<AppState>,
+    Path(workflow_id): Path<Uuid>,
+) -> impl IntoResponse {
+    ws.on_upgrade(move |socket| handle_execution_socket(socket, state, workflow_id))
+}
+
+async fn handle_execution_socket(mut socket: WebSocket, state: AppState, workflow_id: Uuid) {
+    let authed = matches!(
+        tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await,
+        Ok(Some(Ok(Message::Text(ref text))))
+            if serde_json::from_str::<AuthFrame>(text)
+                .ok()
+                .and_then(|frame| crate::auth::verify_token(&frame.token, &state.jwt_secret).ok())
+                .is_some()
+    );
+    if !authed {
+        let _ = socket.close().await;
+        return;
+    }
+
+    let mut receiver = state.execution_events.subscribe();
+    loop {
+        tokio::select! {
+            event = receiver.recv() => {
+                match event {
+                    Ok(event) if event.workflow_id == workflow_id => {
+                        let Ok(json) = serde_json::to_string(&event) else { continue };
+                        if socket.send(Message::Text(json)).await.is_err() {
+                            break;
+                        }
+                    }
+                    Ok(_) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+                    Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+                }
+            }
+            incoming = socket.recv() => {
+                if incoming.is_none() {
+                    break;
+                }
+            }
         }
     }
 }

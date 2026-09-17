@@ -31,7 +31,7 @@ pub async fn serve_frontend(uri: Uri) -> Response {
 /// Matches the namespace itself (`rest`) as well as anything under it
 /// (`rest/...`).
 fn is_api_path(path: &str) -> bool {
-    ["rest", "webhook"]
+    ["rest", "webhook", "ws"]
         .iter()
         .any(|prefix| path == *prefix || path.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/')))
 }
@@ -68,7 +68,14 @@ mod tests {
 
     #[tokio::test]
     async fn unmatched_api_paths_404_instead_of_serving_the_spa() {
-        for path in ["/rest/definitely-not-a-real-route", "/webhook/definitely-not-a-real-route", "/rest", "/webhook"] {
+        for path in [
+            "/rest/definitely-not-a-real-route",
+            "/webhook/definitely-not-a-real-route",
+            "/ws/definitely-not-a-real-route",
+            "/rest",
+            "/webhook",
+            "/ws",
+        ] {
             let response = serve_frontend(path.parse::<Uri>().unwrap()).await;
             assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path} should not fall through to index.html");
         }

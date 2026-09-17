@@ -23,6 +23,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/rest/workflows/:id/execute", post(workflows::execute_workflow))
         .route("/rest/workflows/:id/active", axum::routing::patch(workflows::set_workflow_active))
         .route("/rest/workflows/:id/executions", get(executions::list_executions_for_workflow))
+        .route("/ws/workflows/:id/executions", get(executions::subscribe_executions))
         .route("/rest/node-types", get(node_types::list_node_types))
         .route("/rest/executions/:id", get(executions::get_execution))
         .route("/rest/credentials", post(credentials::create_credential).get(credentials::list_credentials))

@@ -1664,3 +1664,101 @@ async fn unmatched_api_paths_return_404_not_the_spa() {
         assert!(!String::from_utf8_lossy(&bytes).contains("<div id=\"app\">"), "{uri} must not serve the SPA");
     }
 }
+
+#[tokio::test]
+async fn websocket_streams_node_events_during_a_run_and_a_bad_token_closes_it() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let state = test_state().await;
+    let app = r8r::api::build_router(state.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let serve_app = app.clone();
+    tokio::spawn(async move {
+        axum::serve(listener, serve_app).await.unwrap();
+    });
+
+    let token = register_and_get_token(&app, "ws-live@example.com").await;
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/workflows")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({
+                        "name": "ws-live",
+                        "nodes": [
+                            {"id": "trigger", "node_type": "core.manualTrigger", "position": [0.0, 0.0], "parameters": {}, "disabled": false},
+                            {"id": "set1", "node_type": "core.set", "position": [1.0, 0.0], "parameters": {"fields": {"a": 1}}, "disabled": false}
+                        ],
+                        "connections": [{"from_node": "trigger", "from_output": 0, "to_node": "set1", "to_input": 0}]
+                    })
+                    .to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = create_response.into_body().collect().await.unwrap().to_bytes();
+    let workflow_id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string();
+
+    // A bad token closes the socket without forwarding anything.
+    let (mut bad_ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/workflows/{workflow_id}/executions"))
+        .await
+        .unwrap();
+    bad_ws.send(WsMessage::Text(serde_json::json!({"token": "not-a-real-token"}).to_string())).await.unwrap();
+    let next = tokio::time::timeout(std::time::Duration::from_secs(2), bad_ws.next()).await.unwrap();
+    assert!(matches!(next, Some(Ok(WsMessage::Close(_))) | None));
+
+    // A good token streams the run's events.
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/workflows/{workflow_id}/executions"))
+        .await
+        .unwrap();
+    ws.send(WsMessage::Text(serde_json::json!({"token": token}).to_string())).await.unwrap();
+
+    let exec_app = app.clone();
+    let exec_token = token.clone();
+    let exec_workflow_id = workflow_id.clone();
+    tokio::spawn(async move {
+        exec_app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/rest/workflows/{exec_workflow_id}/execute"))
+                    .header("authorization", format!("Bearer {exec_token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    });
+
+    let mut seen_types = Vec::new();
+    loop {
+        let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+            .await
+            .expect("timed out waiting for a websocket event")
+            .expect("socket closed early")
+            .unwrap();
+        if let WsMessage::Text(text) = msg {
+            let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+            assert_eq!(value["workflow_id"], workflow_id);
+            let event_type = value["type"].as_str().unwrap().to_string();
+            let is_final = event_type == "execution_finished";
+            seen_types.push(event_type);
+            if is_final {
+                break;
+            }
+        }
+    }
+
+    assert!(seen_types.contains(&"node_started".to_string()));
+    assert!(seen_types.contains(&"node_finished".to_string()));
+    assert_eq!(seen_types.last().unwrap(), "execution_finished");
+}
