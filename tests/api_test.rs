@@ -44,6 +44,7 @@ async fn test_app_with_state() -> (axum::Router, AppState) {
 struct FailingUpdateStorage {
     inner: SqliteStorage,
     fail_update: Arc<AtomicBool>,
+    fail_execution_update: Arc<AtomicBool>,
 }
 
 #[async_trait::async_trait]
@@ -70,6 +71,9 @@ impl Storage for FailingUpdateStorage {
         self.inner.create_execution(execution).await
     }
     async fn update_execution(&self, execution: &r8r::domain::Execution) -> anyhow::Result<()> {
+        if self.fail_execution_update.load(Ordering::SeqCst) {
+            anyhow::bail!("simulated storage failure");
+        }
         self.inner.update_execution(execution).await
     }
     async fn get_execution(&self, id: uuid::Uuid) -> anyhow::Result<Option<r8r::domain::Execution>> {
@@ -104,10 +108,15 @@ impl Storage for FailingUpdateStorage {
 /// `update_workflow` fails — starts `false` so setup calls (e.g. an initial
 /// successful activation) succeed; flip it to `true` right before the call
 /// under test.
-async fn test_app_with_failing_update() -> (axum::Router, AppState, Arc<AtomicBool>) {
+async fn test_app_with_failing_update() -> (axum::Router, AppState, Arc<AtomicBool>, Arc<AtomicBool>) {
     let inner = SqliteStorage::new("sqlite::memory:", [0u8; 32]).await.unwrap();
     let fail_update = Arc::new(AtomicBool::new(false));
-    let storage = FailingUpdateStorage { inner, fail_update: fail_update.clone() };
+    let fail_execution_update = Arc::new(AtomicBool::new(false));
+    let storage = FailingUpdateStorage {
+        inner,
+        fail_update: fail_update.clone(),
+        fail_execution_update: fail_execution_update.clone(),
+    };
     let mut registry = r8r::node::NodeRegistry::new();
     r8r::nodes::register_all(&mut registry);
     let state = AppState {
@@ -118,7 +127,7 @@ async fn test_app_with_failing_update() -> (axum::Router, AppState, Arc<AtomicBo
         trigger_registry: Arc::new(r8r::trigger_registry::TriggerRegistry::new()),
         execution_events: tokio::sync::broadcast::channel(16).0,
     };
-    (r8r::api::build_router(state.clone()), state, fail_update)
+    (r8r::api::build_router(state.clone()), state, fail_update, fail_execution_update)
 }
 
 #[tokio::test]
@@ -634,6 +643,74 @@ async fn webhook_trigger_executes_workflow_end_to_end_then_404s_after_deactivati
     assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
+#[tokio::test]
+async fn webhook_run_that_succeeds_but_fails_to_persist_still_returns_200_with_the_result() {
+    // Documents a deliberate contract (see Plan 7.1's design spec, section
+    // 11): run_and_track_execution's Err means only "couldn't create the
+    // execution row" -- a failure to persist the FINAL result after an
+    // otherwise-successful run is logged, not surfaced as an error
+    // response, since the workflow's real side effects already happened
+    // regardless of whether the DB write succeeded.
+    let (app, _state, _fail_update, fail_execution_update) = test_app_with_failing_update().await;
+    let token = register_and_get_token(&app, "webhook-persist-fail@example.com").await;
+
+    let create_body = serde_json::json!({
+        "name": "webhook-persist-fail-wf",
+        "nodes": [{"id": "hook", "node_type": "core.webhook", "position": [0.0, 0.0], "parameters": {"path": "persist-fail", "method": "POST"}, "disabled": false}],
+        "connections": []
+    });
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/workflows")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = create_response.into_body().collect().await.unwrap().to_bytes();
+    let workflow_id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string();
+
+    let activate_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/rest/workflows/{workflow_id}/active"))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::json!({"active": true}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(activate_response.status(), StatusCode::OK);
+
+    fail_execution_update.store(true, Ordering::SeqCst);
+
+    let webhook_response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/webhook/{workflow_id}/persist-fail"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    // The run itself succeeded (no engine failure) -- only the persistence
+    // write failed, which must not turn into a 500.
+    assert_eq!(webhook_response.status(), StatusCode::OK);
+    let bytes = webhook_response.into_body().collect().await.unwrap().to_bytes();
+    let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(execution["status"], "Success");
+}
+
 fn scheduled_workflow_body() -> serde_json::Value {
     serde_json::json!({
         "name": "scheduled-wf",
@@ -701,7 +778,7 @@ async fn activate_then_deactivate_updates_trigger_registry_correctly() {
 // deactivate again).
 #[tokio::test]
 async fn activation_persist_failure_unregisters_the_cron_job() {
-    let (app, state, fail_update) = test_app_with_failing_update().await;
+    let (app, state, fail_update, _fail_execution_update) = test_app_with_failing_update().await;
     let token = register_and_get_token(&app, "compensate-activate@example.com").await;
 
     let response = app.clone()
@@ -739,7 +816,7 @@ async fn activation_persist_failure_unregisters_the_cron_job() {
 // silently stops running its schedule until a process restart.
 #[tokio::test]
 async fn deactivation_persist_failure_reregisters_the_cron_job() {
-    let (app, state, fail_update) = test_app_with_failing_update().await;
+    let (app, state, fail_update, _fail_execution_update) = test_app_with_failing_update().await;
     let token = register_and_get_token(&app, "compensate-deactivate@example.com").await;
 
     let response = app.clone()
@@ -1749,7 +1826,12 @@ async fn websocket_streams_node_events_during_a_run_and_a_bad_token_closes_it() 
         if let WsMessage::Text(text) = msg {
             let value: serde_json::Value = serde_json::from_str(&text).unwrap();
             assert_eq!(value["workflow_id"], workflow_id);
+            assert!(value["execution_id"].as_str().is_some(), "every event must carry a non-null execution_id");
             let event_type = value["type"].as_str().unwrap().to_string();
+            if event_type == "node_finished" && value["node_id"] == "set1" {
+                assert_eq!(value["node_id"], "set1");
+                assert_eq!(value["items"][0]["json"]["a"], 1);
+            }
             let is_final = event_type == "execution_finished";
             seen_types.push(event_type);
             if is_final {
@@ -1761,4 +1843,88 @@ async fn websocket_streams_node_events_during_a_run_and_a_bad_token_closes_it() 
     assert!(seen_types.contains(&"node_started".to_string()));
     assert!(seen_types.contains(&"node_finished".to_string()));
     assert_eq!(seen_types.last().unwrap(), "execution_finished");
+}
+
+#[tokio::test]
+async fn websocket_never_forwards_events_for_a_different_workflow() {
+    use futures_util::{SinkExt, StreamExt};
+    use tokio_tungstenite::tungstenite::Message as WsMessage;
+
+    let state = test_state().await;
+    let app = r8r::api::build_router(state.clone());
+
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    let serve_app = app.clone();
+    tokio::spawn(async move {
+        axum::serve(listener, serve_app).await.unwrap();
+    });
+
+    let token = register_and_get_token(&app, "ws-isolation@example.com").await;
+
+    async fn create_manual_workflow(app: &axum::Router, token: &str, name: &str) -> String {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/rest/workflows")
+                    .header("content-type", "application/json")
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(
+                        serde_json::json!({
+                            "name": name,
+                            "nodes": [{"id": "trigger", "node_type": "core.manualTrigger", "position": [0.0, 0.0], "parameters": {}, "disabled": false}],
+                            "connections": []
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string()
+    }
+
+    async fn execute(app: &axum::Router, token: &str, workflow_id: &str) {
+        app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+    }
+
+    let workflow_a = create_manual_workflow(&app, &token, "ws-isolation-a").await;
+    let workflow_b = create_manual_workflow(&app, &token, "ws-isolation-b").await;
+
+    let (mut ws, _) = tokio_tungstenite::connect_async(format!("ws://{addr}/ws/workflows/{workflow_a}/executions"))
+        .await
+        .unwrap();
+    ws.send(WsMessage::Text(serde_json::json!({"token": token}).to_string())).await.unwrap();
+
+    // Executing workflow B must produce nothing on the socket subscribed to A.
+    execute(&app, &token, &workflow_b).await;
+    let nothing_arrived = tokio::time::timeout(std::time::Duration::from_millis(500), ws.next()).await;
+    assert!(nothing_arrived.is_err(), "socket subscribed to workflow A must not receive workflow B's events");
+
+    // Now execute A -- its events must arrive.
+    execute(&app, &token, &workflow_a).await;
+    let msg = tokio::time::timeout(std::time::Duration::from_secs(5), ws.next())
+        .await
+        .expect("timed out waiting for workflow A's event")
+        .expect("socket closed early")
+        .unwrap();
+    if let WsMessage::Text(text) = msg {
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(value["workflow_id"], workflow_a);
+    } else {
+        panic!("expected a text frame");
+    }
 }

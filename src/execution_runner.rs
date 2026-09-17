@@ -8,6 +8,13 @@ use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 use uuid::Uuid;
 
+/// Capacity of the global execution-events broadcast channel (see
+/// `AppState.execution_events`). Chosen generously relative to a typical
+/// workflow's node count so a slow WS consumer doesn't miss events under
+/// normal load; a consumer that falls behind by more than this many events
+/// sees a `Lagged` gap (handled by skipping ahead), not a crash.
+pub const EXECUTION_EVENTS_CAPACITY: usize = 256;
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExecutionEventKind {
@@ -61,6 +68,9 @@ impl LiveExecutionTracker {
     }
 
     fn emit(&self, kind: ExecutionEventKind) {
+        if self.events.receiver_count() == 0 {
+            return;
+        }
         let _ = self.events.send(ExecutionEvent {
             execution_id: self.execution_id,
             workflow_id: self.workflow_id,
@@ -68,7 +78,7 @@ impl LiveExecutionTracker {
         });
     }
 
-    async fn into_execution(self) -> Execution {
+    fn into_execution(self) -> Execution {
         self.execution.into_inner()
     }
 }
@@ -116,7 +126,7 @@ pub async fn run_and_track_execution(
     let tracker = LiveExecutionTracker::new(execution, storage.clone(), events.clone());
     let result = crate::engine::execute_workflow_seeded(workflow, registry, trigger_items, credentials, &tracker).await;
 
-    let mut final_execution = tracker.into_execution().await;
+    let mut final_execution = tracker.into_execution();
     match &result {
         Ok(outputs) => {
             final_execution.status = ExecutionStatus::Success;

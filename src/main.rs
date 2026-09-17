@@ -36,7 +36,7 @@ async fn main() -> anyhow::Result<()> {
         jwt_secret,
         scheduler: Arc::new(scheduler),
         trigger_registry: Arc::new(TriggerRegistry::new()),
-        execution_events: tokio::sync::broadcast::channel(256).0,
+        execution_events: tokio::sync::broadcast::channel(r8r::execution_runner::EXECUTION_EVENTS_CAPACITY).0,
     };
 
     if let Err(e) = r8r::triggers::reactivate_all(&state).await {

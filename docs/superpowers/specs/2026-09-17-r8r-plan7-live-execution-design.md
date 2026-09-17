@@ -158,7 +158,7 @@ pub enum ExecutionEventKind {
     NodeStarted { node_id: String },
     NodeFinished { node_id: String, items: Vec<Item> },
     NodeErrored { node_id: String, error: String },
-    NodeSkipped { node_id: String },
+    NodeSkipped { node_id: String, items: Vec<Item> },
     ExecutionFinished { status: ExecutionStatus },
 }
 
@@ -298,12 +298,21 @@ unchanged — this only adds a second source that can populate the same
   extra ceremony this feature doesn't need; this is a read-only,
   best-effort channel, not a resource with its own existence to assert.
 - A `storage.update_execution` failure inside `on_node_finished` etc. is
-  logged (`tracing::error!`) and does **not** abort the run — matches
-  every other persistence-failure handling in this codebase's engine/
-  runner call sites, which already tolerate a failed final
-  `update_execution` without aborting (the workflow's actual side effects
-  already happened; failing to record that isn't a reason to also fail
-  the response).
+  logged (`tracing::error!`) and does **not** abort the run. This is a
+  deliberate, accepted behavior change for the two HTTP-facing call sites
+  (`workflows.rs::execute_workflow`, `webhook.rs::handle_webhook`): before
+  this plan, both returned `500` if the *final* `update_execution` call
+  failed after an otherwise-successful run; now they return `200` with an
+  (unpersisted) `Execution`, exactly like `fire_schedule`/
+  `telegram_poller`'s pre-existing log-and-continue behavior (which never
+  had an HTTP response to fail in the first place — the "matches every
+  other persistence-failure path" framing in an earlier draft of this
+  section was true of those two sites only, not of the HTTP-facing ones,
+  and has been corrected here). The workflow's real side effects (an HTTP
+  call already made, a message already sent) already happened regardless
+  of whether the DB write succeeded, so returning `500` risks a caller
+  retrying and duplicating those side effects — worse than the status quo
+  this produces. The failure is still logged server-side either way.
 - A broadcast `send` with zero receivers is not an error (see §6).
 
 ## 12. Testing

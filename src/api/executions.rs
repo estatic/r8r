@@ -73,6 +73,11 @@ pub async fn subscribe_executions(
     ws.on_upgrade(move |socket| handle_execution_socket(socket, state, workflow_id))
 }
 
+/// First-message auth handshake, then forwards matching `ExecutionEvent`s
+/// until the client disconnects. The socket is closed with nothing ever
+/// forwarded if: no frame arrives within 5s, the first frame isn't text,
+/// the text doesn't parse as `{"token": "..."}`, or the token fails
+/// `crate::auth::verify_token`.
 async fn handle_execution_socket(mut socket: WebSocket, state: AppState, workflow_id: Uuid) {
     let authed = matches!(
         tokio::time::timeout(std::time::Duration::from_secs(5), socket.recv()).await,
@@ -104,7 +109,7 @@ async fn handle_execution_socket(mut socket: WebSocket, state: AppState, workflo
                 }
             }
             incoming = socket.recv() => {
-                if incoming.is_none() {
+                if matches!(incoming, None | Some(Err(_))) {
                     break;
                 }
             }

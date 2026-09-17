@@ -19,11 +19,14 @@ export interface LiveExecutionSocket {
 export function useLiveExecutionSocket(workflowId: string): LiveExecutionSocket {
   const execution = ref<Execution | null>(null)
   let socket: WebSocket | null = null
-  let liveExecutionId: string | null = null
+  const supersededExecutionIds = new Set<string>()
 
   function applyEvent(event: LiveExecutionEvent) {
-    if (liveExecutionId !== event.execution_id) {
-      liveExecutionId = event.execution_id
+    if (supersededExecutionIds.has(event.execution_id)) return
+
+    const current = execution.value
+    if (!current || current.id !== event.execution_id) {
+      if (current) supersededExecutionIds.add(current.id)
       execution.value = {
         id: event.execution_id,
         workflow_id: event.workflow_id,
@@ -34,19 +37,19 @@ export function useLiveExecutionSocket(workflowId: string): LiveExecutionSocket 
         finished_at: null,
       }
     }
-    const current = execution.value
-    if (!current) return
+
+    const updated = execution.value!
     switch (event.type) {
       case 'node_finished':
       case 'node_skipped':
-        current.node_outputs[event.node_id] = event.items
+        updated.node_outputs[event.node_id] = event.items
         break
       case 'node_errored':
-        current.node_outputs[event.node_id] = [{ json: { error: event.error }, binary: {} }]
+        updated.node_outputs[event.node_id] = [{ json: { error: event.error }, binary: {} }]
         break
       case 'execution_finished':
-        current.status = event.status
-        current.finished_at = new Date().toISOString()
+        updated.status = event.status
+        updated.finished_at = new Date().toISOString()
         break
       case 'node_started':
         break

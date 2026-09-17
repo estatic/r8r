@@ -38,7 +38,7 @@ describe('useLiveExecutionSocket', () => {
     expect(ws.sent).toEqual([JSON.stringify({ token: 'test-token' })])
   })
 
-  it('adopts a new execution_id and fills node_outputs from node_finished/skipped events', () => {
+  it('adopts a new execution_id and fills node_outputs from node_finished and node_skipped events', () => {
     const { execution, connect } = useLiveExecutionSocket('wf-1')
     connect()
     const ws = MockWebSocket.instances[0]
@@ -56,12 +56,32 @@ describe('useLiveExecutionSocket', () => {
     })
     expect(execution.value?.node_outputs['trigger']).toEqual([{ json: {}, binary: {} }])
 
+    ws.emitMessage({
+      type: 'node_skipped',
+      execution_id: 'e1',
+      workflow_id: 'wf-1',
+      node_id: 'disabled_node',
+      items: [{ json: { passthrough: true }, binary: {} }],
+    })
+    expect(execution.value?.node_outputs['disabled_node']).toEqual([{ json: { passthrough: true }, binary: {} }])
+
     ws.emitMessage({ type: 'execution_finished', execution_id: 'e1', workflow_id: 'wf-1', status: 'Success' })
     expect(execution.value?.status).toBe('Success')
     expect(execution.value?.finished_at).not.toBeNull()
   })
 
-  it('a new execution_id supersedes a stale one', () => {
+  it('records a node_errored event as a synthesized error item', () => {
+    const { execution, connect } = useLiveExecutionSocket('wf-1')
+    connect()
+    const ws = MockWebSocket.instances[0]
+
+    ws.emitMessage({ type: 'node_started', execution_id: 'e1', workflow_id: 'wf-1', node_id: 'set1' })
+    ws.emitMessage({ type: 'node_errored', execution_id: 'e1', workflow_id: 'wf-1', node_id: 'set1', error: 'boom' })
+
+    expect(execution.value?.node_outputs['set1']).toEqual([{ json: { error: 'boom' }, binary: {} }])
+  })
+
+  it('a new execution_id supersedes a stale one, and a late event for the superseded id is ignored', () => {
     const { execution, connect } = useLiveExecutionSocket('wf-1')
     connect()
     const ws = MockWebSocket.instances[0]
@@ -71,6 +91,52 @@ describe('useLiveExecutionSocket', () => {
 
     expect(execution.value?.id).toBe('e2')
     expect(execution.value?.node_outputs['a']).toBeUndefined()
+
+    // A stray, out-of-order event for the now-superseded e1 must not revert the view back to e1.
+    ws.emitMessage({
+      type: 'node_finished',
+      execution_id: 'e1',
+      workflow_id: 'wf-1',
+      node_id: 'a',
+      items: [{ json: {}, binary: {} }],
+    })
+    expect(execution.value?.id).toBe('e2')
+  })
+
+  it('a live event never mutates an externally-assigned execution object (e.g. a selected historical run)', () => {
+    const { execution, connect } = useLiveExecutionSocket('wf-1')
+    connect()
+    const ws = MockWebSocket.instances[0]
+
+    ws.emitMessage({ type: 'node_started', execution_id: 'e1', workflow_id: 'wf-1', node_id: 'trigger' })
+    expect(execution.value?.id).toBe('e1')
+
+    // Simulate the user selecting a different, unrelated historical execution
+    // in the UI (WorkflowEditorView's @select handler does exactly this: it
+    // reassigns the ref directly, bypassing applyEvent).
+    const historical = {
+      id: 'h1',
+      workflow_id: 'wf-1',
+      status: 'Success' as const,
+      mode: 'Manual' as const,
+      node_outputs: { old: [{ json: { keep: true }, binary: {} }] },
+      started_at: 'earlier',
+      finished_at: 'earlier',
+    }
+    execution.value = historical
+
+    // A live event for the original in-flight execution (e1) must not write
+    // into the historical object -- it must swap to a fresh e1 object instead.
+    ws.emitMessage({
+      type: 'node_finished',
+      execution_id: 'e1',
+      workflow_id: 'wf-1',
+      node_id: 'trigger',
+      items: [{ json: {}, binary: {} }],
+    })
+
+    expect(execution.value?.id).toBe('e1')
+    expect(historical.node_outputs).toEqual({ old: [{ json: { keep: true }, binary: {} }] })
   })
 
   it('does not connect when there is no stored token', () => {
