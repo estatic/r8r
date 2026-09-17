@@ -56,6 +56,9 @@ impl Storage for FailingUpdateStorage {
         }
         self.inner.update_workflow(workflow).await
     }
+    async fn delete_workflow(&self, id: uuid::Uuid) -> anyhow::Result<()> {
+        self.inner.delete_workflow(id).await
+    }
     async fn get_workflow(&self, id: uuid::Uuid) -> anyhow::Result<Option<r8r::domain::Workflow>> {
         self.inner.get_workflow(id).await
     }
@@ -1243,4 +1246,205 @@ async fn telegram_trigger_fires_downstream_node_on_incoming_update() {
         .await
         .unwrap();
     assert_eq!(deactivate_response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn update_workflow_persists_new_nodes_and_name() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "update-wf@example.com").await;
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/workflows")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({"name": "original", "nodes": [], "connections": []}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = create_response.into_body().collect().await.unwrap().to_bytes();
+    let workflow_id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string();
+
+    let update_body = serde_json::json!({
+        "name": "renamed",
+        "nodes": [{"id": "n1", "node_type": "core.manualTrigger", "position": [0.0, 0.0], "parameters": {}, "disabled": false}],
+        "connections": []
+    });
+    let update_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/rest/workflows/{workflow_id}"))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(update_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(update_response.status(), StatusCode::OK);
+    let bytes = update_response.into_body().collect().await.unwrap().to_bytes();
+    let updated: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(updated["name"], "renamed");
+    assert_eq!(updated["nodes"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn update_workflow_on_missing_id_returns_404() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "update-missing@example.com").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/rest/workflows/{}", uuid::Uuid::new_v4()))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::json!({"name": "x", "nodes": [], "connections": []}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn delete_workflow_removes_it_and_then_404s() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "delete-wf@example.com").await;
+
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/workflows")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::json!({"name": "to-delete", "nodes": [], "connections": []}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = create_response.into_body().collect().await.unwrap().to_bytes();
+    let workflow_id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string();
+
+    let delete_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/rest/workflows/{workflow_id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+
+    let get_response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri(format!("/rest/workflows/{workflow_id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(get_response.status(), StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn deleting_an_active_workflow_deactivates_its_trigger_first() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "delete-active-wf@example.com").await;
+
+    let create_body = serde_json::json!({
+        "name": "active-to-delete",
+        "nodes": [{"id": "t", "node_type": "core.schedule", "position": [0.0, 0.0], "parameters": {"cron": "0 0 0 1 1 *"}, "disabled": false}],
+        "connections": []
+    });
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/workflows")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = create_response.into_body().collect().await.unwrap().to_bytes();
+    let workflow_id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string();
+
+    let activate_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("PATCH")
+                .uri(format!("/rest/workflows/{workflow_id}/active"))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(serde_json::json!({"active": true}).to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(activate_response.status(), StatusCode::OK);
+
+    // Must not hang or error just because the workflow is active with a
+    // live cron job registered — deletion has to tear that down cleanly.
+    let delete_response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/rest/workflows/{workflow_id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn node_types_lists_registered_types() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "node-types@example.com").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/rest/node-types")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let types: Vec<String> = serde_json::from_slice(&bytes).unwrap();
+    assert!(types.contains(&"core.manualTrigger".to_string()));
+    assert!(types.contains(&"telegram.sendMessage".to_string()));
+    // Sorted.
+    let mut sorted = types.clone();
+    sorted.sort();
+    assert_eq!(types, sorted);
 }

@@ -60,6 +60,14 @@ impl NodeRegistry {
     pub fn get(&self, type_name: &str) -> Option<&dyn Node> {
         self.nodes.get(type_name).map(|b| b.as_ref())
     }
+
+    /// All registered node type names, sorted for a stable, predictable
+    /// order in any UI listing them (e.g. an "add node" picker).
+    pub fn type_names(&self) -> Vec<&'static str> {
+        let mut names: Vec<&'static str> = self.nodes.keys().copied().collect();
+        names.sort_unstable();
+        names
+    }
 }
 
 #[cfg(test)]
@@ -117,5 +125,12 @@ mod tests {
             ..Default::default()
         };
         assert!(ctx.credentials.is_empty());
+    }
+
+    #[test]
+    fn type_names_returns_registered_types_sorted() {
+        let mut registry = NodeRegistry::new();
+        registry.register(Box::new(EchoNode));
+        assert_eq!(registry.type_names(), vec!["test.echo"]);
     }
 }

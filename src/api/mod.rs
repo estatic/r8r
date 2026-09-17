@@ -3,6 +3,7 @@ pub mod credentials;
 pub mod executions;
 pub mod webhook;
 pub mod workflows;
+pub mod node_types;
 
 use crate::state::AppState;
 use axum::routing::{get, post};
@@ -13,9 +14,15 @@ pub fn build_router(state: AppState) -> Router {
         .route("/rest/auth/register", post(auth::register))
         .route("/rest/auth/login", post(auth::login))
         .route("/rest/workflows", post(workflows::create_workflow).get(workflows::list_workflows))
-        .route("/rest/workflows/:id", get(workflows::get_workflow))
+        .route(
+            "/rest/workflows/:id",
+            get(workflows::get_workflow)
+                .put(workflows::update_workflow)
+                .delete(workflows::delete_workflow),
+        )
         .route("/rest/workflows/:id/execute", post(workflows::execute_workflow))
         .route("/rest/workflows/:id/active", axum::routing::patch(workflows::set_workflow_active))
+        .route("/rest/node-types", get(node_types::list_node_types))
         .route("/rest/executions/:id", get(executions::get_execution))
         .route("/rest/credentials", post(credentials::create_credential).get(credentials::list_credentials))
         .route(

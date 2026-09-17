@@ -75,6 +75,13 @@ impl Storage for SqliteStorage {
         .await?;
         Ok(())
     }
+    async fn delete_workflow(&self, id: Uuid) -> anyhow::Result<()> {
+        sqlx::query("DELETE FROM workflows WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
     async fn get_workflow(&self, id: Uuid) -> anyhow::Result<Option<Workflow>> {
         let row = sqlx::query_as::<_, (String, String, i64, String, String, String)>(
             "SELECT id, name, active, definition, created_at, updated_at FROM workflows WHERE id = ?"
@@ -476,6 +483,23 @@ mod tests {
         let wf = sample_workflow();
         let result = storage.update_workflow(&wf).await;
         assert!(result.is_ok());
+    }
+
+    #[tokio::test]
+    async fn delete_workflow_removes_it() {
+        let storage = SqliteStorage::new("sqlite::memory:", test_key()).await.unwrap();
+        let wf = sample_workflow();
+        storage.create_workflow(&wf).await.unwrap();
+
+        storage.delete_workflow(wf.id).await.unwrap();
+
+        assert!(storage.get_workflow(wf.id).await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn delete_workflow_on_a_nonexistent_id_does_not_error() {
+        let storage = SqliteStorage::new("sqlite::memory:", test_key()).await.unwrap();
+        storage.delete_workflow(Uuid::new_v4()).await.unwrap();
     }
 
     #[tokio::test]

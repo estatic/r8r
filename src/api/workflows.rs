@@ -35,6 +35,13 @@ pub struct CreateWorkflowRequest {
     pub connections: Vec<Connection>,
 }
 
+#[derive(Deserialize)]
+pub struct UpdateWorkflowRequest {
+    pub name: String,
+    pub nodes: Vec<NodeInstance>,
+    pub connections: Vec<Connection>,
+}
+
 pub async fn create_workflow(
     State(state): State<AppState>,
     AuthUser(_user_id): AuthUser,
@@ -209,4 +216,66 @@ pub async fn execute_workflow(
     }
 
     Json(execution).into_response()
+}
+
+/// Deliberately does not touch `active` or trigger activation state — that
+/// stays the job of `PATCH .../active`. This is safe even for a currently
+/// active workflow: every trigger implementation in this codebase
+/// (`fire_schedule`, `handle_webhook`, `poll_telegram_updates`) already
+/// re-fetches the workflow fresh on each firing, so an edit here takes
+/// effect on the trigger's next firing with no special-casing needed.
+pub async fn update_workflow(
+    State(state): State<AppState>,
+    AuthUser(_user_id): AuthUser,
+    Path(id): Path<Uuid>,
+    Json(payload): Json<UpdateWorkflowRequest>,
+) -> impl IntoResponse {
+    let mut workflow = match state.storage.get_workflow(id).await {
+        Ok(Some(wf)) => wf,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to fetch workflow for update");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    workflow.name = payload.name;
+    workflow.nodes = payload.nodes;
+    workflow.connections = payload.connections;
+    workflow.updated_at = chrono::Utc::now();
+    match state.storage.update_workflow(&workflow).await {
+        Ok(()) => Json(workflow).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to persist workflow update");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+pub async fn delete_workflow(
+    State(state): State<AppState>,
+    AuthUser(_user_id): AuthUser,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    let workflow = match state.storage.get_workflow(id).await {
+        Ok(Some(wf)) => wf,
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to fetch workflow for deletion");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    // A deleted workflow's background trigger (a cron job or a Telegram
+    // long-poll task) must be torn down explicitly — deleting the row
+    // doesn't stop a task that's already spawned and holding no reference
+    // back to storage's row-existence.
+    if workflow.active {
+        crate::triggers::deactivate_workflow_triggers(&state, workflow.id).await;
+    }
+    match state.storage.delete_workflow(id).await {
+        Ok(()) => StatusCode::NO_CONTENT.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to delete workflow");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
 }

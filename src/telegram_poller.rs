@@ -383,6 +383,9 @@ mod poller_tests {
         async fn update_workflow(&self, workflow: &Workflow) -> anyhow::Result<()> {
             self.inner.update_workflow(workflow).await
         }
+        async fn delete_workflow(&self, id: Uuid) -> anyhow::Result<()> {
+            self.inner.delete_workflow(id).await
+        }
         async fn get_workflow(&self, id: Uuid) -> anyhow::Result<Option<Workflow>> {
             self.inner.get_workflow(id).await
         }
