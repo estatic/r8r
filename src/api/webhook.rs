@@ -58,6 +58,7 @@ pub async fn handle_webhook(
         &state.registry,
         Some(vec![trigger_item]),
         &std::collections::HashMap::new(),
+        &crate::engine::NoopObserver,
     )
     .await
     {

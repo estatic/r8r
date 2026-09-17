@@ -195,7 +195,7 @@ pub async fn execute_workflow(
         return StatusCode::INTERNAL_SERVER_ERROR.into_response();
     }
 
-    match crate::engine::execute_workflow_seeded(&workflow, &state.registry, None, &credentials).await {
+    match crate::engine::execute_workflow_seeded(&workflow, &state.registry, None, &credentials, &crate::engine::NoopObserver).await {
         Ok(outputs) => {
             execution.status = ExecutionStatus::Success;
             execution.node_outputs = outputs;

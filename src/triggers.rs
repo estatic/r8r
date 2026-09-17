@@ -91,7 +91,7 @@ pub async fn fire_schedule(
     }
 
     let trigger_items = vec![crate::domain::Item { json: serde_json::json!({}), binary: serde_json::json!({}) }];
-    match crate::engine::execute_workflow_seeded(&workflow, &registry, Some(trigger_items), &std::collections::HashMap::new()).await {
+    match crate::engine::execute_workflow_seeded(&workflow, &registry, Some(trigger_items), &std::collections::HashMap::new(), &crate::engine::NoopObserver).await {
         Ok(outputs) => {
             execution.status = ExecutionStatus::Success;
             execution.node_outputs = outputs;

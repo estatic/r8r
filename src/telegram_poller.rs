@@ -333,7 +333,7 @@ pub async fn poll_telegram_updates(
                 continue;
             }
 
-            match crate::engine::execute_workflow_seeded(&current_workflow, &registry, Some(vec![trigger_item]), &credentials).await {
+            match crate::engine::execute_workflow_seeded(&current_workflow, &registry, Some(vec![trigger_item]), &credentials, &crate::engine::NoopObserver).await {
                 Ok(outputs) => {
                     execution.status = ExecutionStatus::Success;
                     execution.node_outputs = outputs;

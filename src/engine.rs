@@ -2,11 +2,29 @@ use crate::domain::{Item, NodeInstance, Workflow};
 use crate::node::{NodeExecutionContext, NodeRegistry};
 use std::collections::{HashMap, HashSet, VecDeque};
 
+#[async_trait::async_trait]
+pub trait ExecutionObserver: Send + Sync {
+    async fn on_node_started(&self, node_id: &str);
+    async fn on_node_finished(&self, node_id: &str, items: &[Item]);
+    async fn on_node_errored(&self, node_id: &str, error: &str);
+    async fn on_node_skipped(&self, node_id: &str, items: &[Item]);
+}
+
+pub struct NoopObserver;
+
+#[async_trait::async_trait]
+impl ExecutionObserver for NoopObserver {
+    async fn on_node_started(&self, _node_id: &str) {}
+    async fn on_node_finished(&self, _node_id: &str, _items: &[Item]) {}
+    async fn on_node_errored(&self, _node_id: &str, _error: &str) {}
+    async fn on_node_skipped(&self, _node_id: &str, _items: &[Item]) {}
+}
+
 pub async fn execute_workflow(
     workflow: &Workflow,
     registry: &NodeRegistry,
 ) -> anyhow::Result<HashMap<String, Vec<Item>>> {
-    execute_workflow_seeded(workflow, registry, None, &HashMap::new()).await
+    execute_workflow_seeded(workflow, registry, None, &HashMap::new(), &NoopObserver).await
 }
 
 pub fn start_node_id(workflow: &Workflow) -> anyhow::Result<String> {
@@ -25,6 +43,7 @@ pub async fn execute_workflow_seeded(
     registry: &NodeRegistry,
     trigger_items: Option<Vec<Item>>,
     credentials: &HashMap<uuid::Uuid, serde_json::Value>,
+    observer: &dyn ExecutionObserver,
 ) -> anyhow::Result<HashMap<String, Vec<Item>>> {
     let order = topological_order(workflow)?;
     let start_id = order.first().map(|n| n.id.clone());
@@ -58,6 +77,7 @@ pub async fn execute_workflow_seeded(
             // A disabled node is a no-op passthrough: its input items flow
             // through unchanged as its (single-port) output, and it is never
             // handed to the registry, executed, or given resolved parameters.
+            observer.on_node_skipped(&node_instance.id, &input_items).await;
             produced.insert(node_instance.id.clone(), vec![input_items]);
             continue;
         }
@@ -71,6 +91,8 @@ pub async fn execute_workflow_seeded(
         // always empty anyway; the seed replaces it, not merges with it).
         if let (Some(items), Some(start)) = (&trigger_items, &start_id) {
             if &node_instance.id == start {
+                observer.on_node_started(&node_instance.id).await;
+                observer.on_node_finished(&node_instance.id, items).await;
                 produced.insert(node_instance.id.clone(), vec![items.clone()]);
                 continue;
             }
@@ -92,6 +114,7 @@ pub async fn execute_workflow_seeded(
         // node.
         let has_incoming_connection = workflow.connections.iter().any(|c| c.to_node == node_instance.id);
         if has_incoming_connection && input_items.is_empty() {
+            observer.on_node_skipped(&node_instance.id, &[]).await;
             produced.insert(node_instance.id.clone(), vec![]);
             continue;
         }
@@ -128,14 +151,18 @@ pub async fn execute_workflow_seeded(
             input_items,
             credentials: credentials.clone(),
         };
+        observer.on_node_started(&node_instance.id).await;
         match node.execute(&ctx).await {
             Ok(output) => {
+                let primary = output.first().cloned().unwrap_or_default();
+                observer.on_node_finished(&node_instance.id, &primary).await;
                 produced.insert(node_instance.id.clone(), output);
             }
             Err(e) => {
                 let has_error_route = workflow.connections.iter().any(|c| {
                     c.from_node == node_instance.id && c.from_output == crate::node::ERROR_OUTPUT
                 });
+                observer.on_node_errored(&node_instance.id, &e.to_string()).await;
                 if has_error_route {
                     error_produced.insert(
                         node_instance.id.clone(),
@@ -308,7 +335,7 @@ mod tests {
     async fn execute_workflow_seeded_injects_trigger_items_as_start_node_output() {
         let wf = linear_workflow(); // trigger -> set1
         let seeded_items = vec![Item { json: serde_json::json!({"from": "webhook"}), binary: serde_json::json!({}) }];
-        let outputs = execute_workflow_seeded(&wf, &registry(), Some(seeded_items.clone()), &HashMap::new()).await.unwrap();
+        let outputs = execute_workflow_seeded(&wf, &registry(), Some(seeded_items.clone()), &HashMap::new(), &NoopObserver).await.unwrap();
         // trigger's own execute() was never called — its output IS the seeded item, verbatim.
         assert_eq!(outputs["trigger"], seeded_items);
         // set1 (which merges a static "greeting" field into its input item, per
@@ -689,5 +716,118 @@ mod tests {
         assert_eq!(outputs["error_handler"][0].json["handled"], serde_json::json!(true));
         // set1 itself produced no primary-output items (it errored).
         assert!(outputs["set1"].is_empty());
+    }
+
+    struct SpyObserver {
+        calls: std::sync::Mutex<Vec<String>>,
+    }
+
+    impl SpyObserver {
+        fn new() -> Self {
+            Self { calls: std::sync::Mutex::new(Vec::new()) }
+        }
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ExecutionObserver for SpyObserver {
+        async fn on_node_started(&self, node_id: &str) {
+            self.calls.lock().unwrap().push(format!("started:{node_id}"));
+        }
+        async fn on_node_finished(&self, node_id: &str, items: &[Item]) {
+            self.calls.lock().unwrap().push(format!("finished:{node_id}:{}", items.len()));
+        }
+        async fn on_node_errored(&self, node_id: &str, error: &str) {
+            self.calls.lock().unwrap().push(format!("errored:{node_id}:{error}"));
+        }
+        async fn on_node_skipped(&self, node_id: &str, items: &[Item]) {
+            self.calls.lock().unwrap().push(format!("skipped:{node_id}:{}", items.len()));
+        }
+    }
+
+    #[tokio::test]
+    async fn observer_sees_started_then_finished_for_a_normal_run() {
+        // trigger -> set_disabled (disabled passthrough) -> set_final, same
+        // shape as disabled_node_is_skipped_as_passthrough above.
+        let mut wf = linear_workflow();
+        wf.nodes[1].id = "set_disabled".into();
+        wf.nodes[1].parameters = serde_json::json!({"fields": {"skipped": "yes"}});
+        wf.nodes[1].disabled = true;
+        wf.connections[0].to_node = "set_disabled".into();
+        wf.nodes.push(NodeInstance {
+            id: "set_final".into(),
+            node_type: "core.set".into(),
+            position: (2.0, 0.0),
+            parameters: serde_json::json!({"fields": {"final": "yes"}}),
+            disabled: false,
+        });
+        wf.connections.push(Connection {
+            from_node: "set_disabled".into(),
+            from_output: 0,
+            to_node: "set_final".into(),
+            to_input: 0,
+        });
+
+        let spy = SpyObserver::new();
+        execute_workflow_seeded(&wf, &registry(), None, &HashMap::new(), &spy).await.unwrap();
+
+        assert_eq!(
+            spy.calls(),
+            vec![
+                "started:trigger".to_string(),
+                "finished:trigger:1".to_string(),
+                "skipped:set_disabled:1".to_string(),
+                "started:set_final".to_string(),
+                "finished:set_final:1".to_string(),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn observer_sees_errored_for_both_routed_and_hard_failures() {
+        // Routed: trigger -> set1 (fails, routed to error_handler).
+        let mut wf = linear_workflow();
+        wf.nodes[1].node_type = "test.alwaysFails".into();
+        wf.nodes.push(NodeInstance {
+            id: "error_handler".into(),
+            node_type: "core.set".into(),
+            position: (2.0, 0.0),
+            parameters: serde_json::json!({"fields": {"handled": true}}),
+            disabled: false,
+        });
+        wf.connections.push(Connection {
+            from_node: "set1".into(),
+            from_output: crate::node::ERROR_OUTPUT,
+            to_node: "error_handler".into(),
+            to_input: 0,
+        });
+
+        let spy = SpyObserver::new();
+        execute_workflow_seeded(&wf, &registry_with_failing_node(), None, &HashMap::new(), &spy)
+            .await
+            .unwrap();
+
+        let calls = spy.calls();
+        assert_eq!(calls[0], "started:trigger");
+        assert_eq!(calls[1], "finished:trigger:1");
+        assert_eq!(calls[2], "started:set1");
+        assert!(calls[3].starts_with("errored:set1:"));
+        assert_eq!(calls[4], "started:error_handler");
+        assert_eq!(calls[5], "finished:error_handler:1");
+
+        // Hard failure (no error route): still reports errored before the
+        // engine aborts the whole run.
+        let mut hard_wf = linear_workflow();
+        hard_wf.nodes[1].node_type = "test.alwaysFails".into();
+        let spy2 = SpyObserver::new();
+        let result =
+            execute_workflow_seeded(&hard_wf, &registry_with_failing_node(), None, &HashMap::new(), &spy2).await;
+        assert!(result.is_err());
+        assert_eq!(spy2.calls()[0], "started:trigger");
+        assert_eq!(spy2.calls()[1], "finished:trigger:1");
+        assert_eq!(spy2.calls()[2], "started:set1");
+        assert!(spy2.calls()[3].starts_with("errored:set1:"));
     }
 }
