@@ -1559,3 +1559,18 @@ async fn rest_routes_still_take_priority_over_the_frontend_fallback() {
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     assert!(!String::from_utf8_lossy(&bytes).contains("<div id=\"app\">"));
 }
+
+#[tokio::test]
+async fn unmatched_api_paths_return_404_not_the_spa() {
+    // The test above only covers a *matched* route's own error response. An
+    // unmatched path under /rest or /webhook reaches the SPA fallback, and
+    // must get a clean 404 rather than 200 + index.html -- otherwise a
+    // frontend typo or a renamed endpoint looks like a successful HTML page.
+    for uri in ["/rest/definitely-not-a-real-route", "/webhook/definitely-not-a-real-route"] {
+        let app = test_app().await;
+        let response = app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri} must 404");
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        assert!(!String::from_utf8_lossy(&bytes).contains("<div id=\"app\">"), "{uri} must not serve the SPA");
+    }
+}
