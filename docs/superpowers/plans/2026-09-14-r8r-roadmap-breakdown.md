@@ -240,10 +240,16 @@ spec `docs/superpowers/specs/2026-09-16-r8r-plan6a-frontend-design.md`,
 merged to `main`): login/register, workflow list (create/delete/toggle
 active), a Vue Flow canvas editor (add/drag/connect/configure nodes,
 credential picker), and save/execute with an inline per-node JSON results
-panel for the just-run execution. 6.3.1 (live execution status) and 6.3.3
-(execution log/replay of *past* runs, not just the current one) are not
-built — 6.3.1 stays blocked on Plan 7's WebSocket push per the sequencing
-note below; 6.3.3 is the remaining first-class gap for a future "Plan 6b".
+panel for the just-run execution. 6.3.3 (execution log/replay of *past*
+runs) shipped as "Plan 6b" — a bounded change (brainstormed and
+implemented directly, no separate plan doc, per this project's
+spec/plan-doc threshold): `GET /rest/workflows/:id/executions?limit=N`
+(newest-first, default 50, capped at 200 server-side) plus an index on
+`executions.workflow_id`, and a "History" selector in
+`ExecutionResultsPanel` that swaps between past runs' already-fetched
+per-node output. 6.3.1 (live execution status) is the sole remaining
+gap — still blocked on Plan 7's WebSocket push per the sequencing note
+below.
 
 Plan 6a's final whole-branch review (browser-verified with Playwright
 against the built binary) found and fixed 7 issues before merge, folded
@@ -281,8 +287,8 @@ key). All fixes verified in a real browser, not just unit tests.
   - 6.3.1.1 WebSocket client subscribing to execution progress (depends on Plan 7's WebSocket push)
 - 6.3.2 Inline JSON data preview
   - 6.3.2.1 Per-node input/output item viewer
-- 6.3.3 Execution log/replay
-  - 6.3.3.1 List past executions for a workflow; inspect a past run's per-node data
+- 6.3.3 Execution log/replay — **shipped** (Plan 6b)
+  - 6.3.3.1 List past executions for a workflow; inspect a past run's per-node data — done
 
 ### 6.4 Auth UI
 - 6.4.1 Login/register screens
