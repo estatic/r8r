@@ -2,6 +2,7 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api, ApiError } from '../api/client'
+import { useExecutionsStore } from '../stores/executions'
 import type { Workflow, Connection, NodeInstance, Execution } from '../types/domain'
 import WorkflowCanvas from '../components/WorkflowCanvas.vue'
 import AddNodeMenu from '../components/AddNodeMenu.vue'
@@ -10,11 +11,13 @@ import ExecutionResultsPanel from '../components/ExecutionResultsPanel.vue'
 
 const route = useRoute()
 const workflowId = route.params.id as string
+const executionsStore = useExecutionsStore()
 
 const workflow = ref<Workflow | null>(null)
 const selectedNodeId = ref<string | null>(null)
 const saving = ref(false)
 const executing = ref(false)
+const loadingHistory = ref(false)
 const execution = ref<Execution | null>(null)
 const loadError = ref('')
 const actionError = ref('')
@@ -115,6 +118,21 @@ async function execute() {
     executing.value = false
   }
 }
+
+async function showHistory() {
+  actionError.value = ''
+  loadingHistory.value = true
+  try {
+    await executionsStore.fetchHistory(workflowId)
+    if (!execution.value && executionsStore.history.length > 0) {
+      execution.value = executionsStore.history[0]
+    }
+  } catch (e) {
+    actionError.value = messageFor(e, 'Failed to load execution history.')
+  } finally {
+    loadingHistory.value = false
+  }
+}
 </script>
 
 <template>
@@ -142,6 +160,13 @@ async function execute() {
       >
         {{ executing ? 'Running…' : 'Execute' }}
       </button>
+      <button
+        class="bg-gray-200 text-gray-800 rounded px-3 py-1.5 text-sm disabled:opacity-50"
+        :disabled="loadingHistory"
+        @click="showHistory"
+      >
+        {{ loadingHistory ? 'Loading…' : 'History' }}
+      </button>
     </header>
     <p v-if="actionError" class="bg-red-50 border-b border-red-200 px-6 py-2 text-sm text-red-600">{{ actionError }}</p>
     <div class="flex-1 relative">
@@ -155,7 +180,12 @@ async function execute() {
         @connect="onConnect"
       />
       <NodeConfigPanel :node="selectedNode" @update="onNodeUpdate" @close="selectedNodeId = null" />
-      <ExecutionResultsPanel :execution="execution" @close="execution = null" />
+      <ExecutionResultsPanel
+        :execution="execution"
+        :history="executionsStore.history"
+        @close="execution = null"
+        @select="execution = $event"
+      />
     </div>
   </div>
 </template>

@@ -1,13 +1,19 @@
 <script setup lang="ts">
 import type { Execution } from '../types/domain'
 
-defineProps<{ execution: Execution | null }>()
-defineEmits<{ close: [] }>()
+const props = defineProps<{ execution: Execution | null; history?: Execution[] }>()
+const emit = defineEmits<{ close: []; select: [execution: Execution] }>()
+
+function onHistorySelect(e: Event) {
+  const id = (e.target as HTMLSelectElement).value
+  const chosen = (props.history ?? []).find((run) => run.id === id)
+  if (chosen) emit('select', chosen)
+}
 </script>
 
 <template>
   <aside v-if="execution" class="absolute bottom-0 left-0 right-0 h-64 bg-white border-t shadow-lg flex flex-col">
-    <header class="px-4 py-2 border-b flex justify-between items-center">
+    <header class="px-4 py-2 border-b flex justify-between items-center gap-3">
       <span
         class="text-sm font-medium"
         :class="{
@@ -18,6 +24,15 @@ defineEmits<{ close: [] }>()
       >
         {{ execution.status }}
       </span>
+      <select
+        v-if="history && history.length > 0"
+        :value="execution.id"
+        class="text-xs border rounded px-1 py-0.5"
+        @change="onHistorySelect"
+      >
+        <option v-for="run in history" :key="run.id" :value="run.id">{{ run.started_at }} — {{ run.status }}</option>
+      </select>
+      <div class="flex-1"></div>
       <button class="text-gray-400" @click="$emit('close')">&times;</button>
     </header>
     <div class="p-4 overflow-auto flex-1 space-y-3">
