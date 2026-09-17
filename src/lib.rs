@@ -4,6 +4,7 @@ pub mod credentials;
 pub mod crypto;
 pub mod domain;
 pub mod engine;
+pub mod execution_runner;
 pub mod expr;
 pub mod node;
 pub mod nodes;
