@@ -1,3 +1,4 @@
+use crate::execution_runner::ExecutionEvent;
 use crate::node::NodeRegistry;
 use crate::scheduler::Scheduler;
 use crate::storage::Storage;
@@ -11,4 +12,5 @@ pub struct AppState {
     pub jwt_secret: String,
     pub scheduler: Arc<Scheduler>,
     pub trigger_registry: Arc<TriggerRegistry>,
+    pub execution_events: tokio::sync::broadcast::Sender<ExecutionEvent>,
 }

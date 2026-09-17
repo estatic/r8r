@@ -1,4 +1,4 @@
-use crate::domain::{Execution, ExecutionMode, ExecutionStatus, Item, NodeInstance, Workflow};
+use crate::domain::{ExecutionMode, Item, NodeInstance, Workflow};
 use crate::node::NodeRegistry;
 use crate::state::AppState;
 use crate::storage::Storage;
@@ -207,6 +207,7 @@ pub async fn activate_telegram_trigger(
 
     let storage = state.storage.clone();
     let registry = state.registry.clone();
+    let events = state.execution_events.clone();
     let workflow_id = workflow.id;
 
     // Pass an owned clone of `workflow` (not just its id) so the poll loop's
@@ -215,8 +216,14 @@ pub async fn activate_telegram_trigger(
     // doc comment for why (closes an activation-race where the poller's
     // first `storage.get_workflow` read could lose a commit-visibility race
     // against the API handler's own `workflow.active = true` write).
-    let join_handle =
-        tokio::spawn(poll_telegram_updates(storage, registry, workflow.clone(), bot_token, api_base_url));
+    let join_handle = tokio::spawn(poll_telegram_updates(
+        storage,
+        registry,
+        events,
+        workflow.clone(),
+        bot_token,
+        api_base_url,
+    ));
     state.trigger_registry.record_telegram_poll(workflow_id, join_handle.abort_handle());
     Ok(())
 }
@@ -244,6 +251,7 @@ pub async fn activate_telegram_trigger(
 pub async fn poll_telegram_updates(
     storage: Arc<dyn Storage>,
     registry: Arc<NodeRegistry>,
+    events: tokio::sync::broadcast::Sender<crate::execution_runner::ExecutionEvent>,
     workflow: Workflow,
     bot_token: String,
     api_base_url: String,
@@ -319,33 +327,18 @@ pub async fn poll_telegram_updates(
 
             let trigger_item = Item { json: update, binary: serde_json::json!({}) };
 
-            let mut execution = Execution {
-                id: Uuid::new_v4(),
-                workflow_id: current_workflow.id,
-                status: ExecutionStatus::Running,
-                mode: ExecutionMode::Telegram,
-                node_outputs: Default::default(),
-                started_at: chrono::Utc::now(),
-                finished_at: None,
-            };
-            if let Err(e) = storage.create_execution(&execution).await {
+            if let Err(e) = crate::execution_runner::run_and_track_execution(
+                &storage,
+                &events,
+                &registry,
+                &current_workflow,
+                ExecutionMode::Telegram,
+                Some(vec![trigger_item]),
+                &credentials,
+            )
+            .await
+            {
                 tracing::error!(error = %e, workflow_id = %current_workflow.id, "telegram poller: failed to persist new execution");
-                continue;
-            }
-
-            match crate::engine::execute_workflow_seeded(&current_workflow, &registry, Some(vec![trigger_item]), &credentials, &crate::engine::NoopObserver).await {
-                Ok(outputs) => {
-                    execution.status = ExecutionStatus::Success;
-                    execution.node_outputs = outputs;
-                }
-                Err(e) => {
-                    tracing::warn!(error = %e, workflow_id = %current_workflow.id, "telegram-triggered execution failed");
-                    execution.status = ExecutionStatus::Error;
-                }
-            }
-            execution.finished_at = Some(chrono::Utc::now());
-            if let Err(e) = storage.update_execution(&execution).await {
-                tracing::error!(error = %e, workflow_id = %current_workflow.id, "telegram poller: failed to persist execution result");
             }
         }
     }
@@ -354,7 +347,7 @@ pub async fn poll_telegram_updates(
 #[cfg(test)]
 mod poller_tests {
     use super::*;
-    use crate::domain::{Connection, Credential, CredentialSummary, NodeInstance, User, UserRole};
+    use crate::domain::{Connection, Credential, CredentialSummary, Execution, ExecutionStatus, NodeInstance, User, UserRole};
     use crate::storage::sqlite::SqliteStorage;
     use async_trait::async_trait;
     use std::sync::Mutex;
@@ -529,7 +522,8 @@ mod poller_tests {
         );
         storage.create_workflow(&wf).await.unwrap();
 
-        let poll = tokio::spawn(poll_telegram_updates(storage.clone(), registry, wf.clone(), "111:AAA".into(), telegram.uri()));
+        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        let poll = tokio::spawn(poll_telegram_updates(storage.clone(), registry, events, wf.clone(), "111:AAA".into(), telegram.uri()));
 
         // Bounded wait: the poller's tight loop against the mock (no real
         // 30s Telegram-side wait involved) should process the one queued
@@ -598,7 +592,8 @@ mod poller_tests {
         );
         storage.create_workflow(&wf).await.unwrap();
 
-        let poll = tokio::spawn(poll_telegram_updates(storage.clone(), registry, wf.clone(), "111:AAA".into(), telegram.uri()));
+        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        let poll = tokio::spawn(poll_telegram_updates(storage.clone(), registry, events, wf.clone(), "111:AAA".into(), telegram.uri()));
 
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while telegram.received_requests().await.unwrap().is_empty() {

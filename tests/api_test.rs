@@ -20,6 +20,7 @@ async fn test_state() -> AppState {
         jwt_secret: "test-secret".into(),
         scheduler: Arc::new(r8r::scheduler::Scheduler::new().await.unwrap()),
         trigger_registry: Arc::new(r8r::trigger_registry::TriggerRegistry::new()),
+        execution_events: tokio::sync::broadcast::channel(16).0,
     }
 }
 
@@ -115,6 +116,7 @@ async fn test_app_with_failing_update() -> (axum::Router, AppState, Arc<AtomicBo
         jwt_secret: "test-secret".into(),
         scheduler: Arc::new(r8r::scheduler::Scheduler::new().await.unwrap()),
         trigger_registry: Arc::new(r8r::trigger_registry::TriggerRegistry::new()),
+        execution_events: tokio::sync::broadcast::channel(16).0,
     };
     (r8r::api::build_router(state.clone()), state, fail_update)
 }

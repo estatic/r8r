@@ -39,45 +39,28 @@ pub async fn handle_webhook(
 
     let trigger_item = build_trigger_item(&headers, &query, &body);
 
-    let mut execution = crate::domain::Execution {
-        id: Uuid::new_v4(),
-        workflow_id: workflow.id,
-        status: ExecutionStatus::Running,
-        mode: ExecutionMode::Webhook,
-        node_outputs: Default::default(),
-        started_at: chrono::Utc::now(),
-        finished_at: None,
-    };
-    if let Err(e) = state.storage.create_execution(&execution).await {
-        tracing::error!(error = %e, "webhook: failed to persist new execution");
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-
-    let response_status = match crate::engine::execute_workflow_seeded(
-        &workflow,
+    let execution = match crate::execution_runner::run_and_track_execution(
+        &state.storage,
+        &state.execution_events,
         &state.registry,
+        &workflow,
+        ExecutionMode::Webhook,
         Some(vec![trigger_item]),
         &std::collections::HashMap::new(),
-        &crate::engine::NoopObserver,
     )
     .await
     {
-        Ok(outputs) => {
-            execution.status = ExecutionStatus::Success;
-            execution.node_outputs = outputs;
-            StatusCode::OK
-        }
+        Ok(execution) => execution,
         Err(e) => {
-            tracing::warn!(error = %e, workflow_id = %workflow.id, "webhook-triggered execution failed");
-            execution.status = ExecutionStatus::Error;
-            StatusCode::INTERNAL_SERVER_ERROR
+            tracing::error!(error = %e, "webhook: failed to persist new execution");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };
-    execution.finished_at = Some(chrono::Utc::now());
-    if let Err(e) = state.storage.update_execution(&execution).await {
-        tracing::error!(error = %e, "webhook: failed to persist execution result");
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
+    let response_status = if execution.status == ExecutionStatus::Error {
+        StatusCode::INTERNAL_SERVER_ERROR
+    } else {
+        StatusCode::OK
+    };
 
     (response_status, Json(execution)).into_response()
 }

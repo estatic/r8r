@@ -1,4 +1,4 @@
-use crate::domain::{Connection, Execution, ExecutionMode, ExecutionStatus, NodeInstance, Workflow};
+use crate::domain::{Connection, ExecutionMode, NodeInstance, Workflow};
 use crate::state::AppState;
 use axum::async_trait;
 use axum::extract::{FromRequestParts, Path, State};
@@ -181,41 +181,23 @@ pub async fn execute_workflow(
         }
     };
 
-    let mut execution = Execution {
-        id: Uuid::new_v4(),
-        workflow_id: workflow.id,
-        status: ExecutionStatus::Running,
-        mode: ExecutionMode::Manual,
-        node_outputs: Default::default(),
-        started_at: chrono::Utc::now(),
-        finished_at: None,
-    };
-    if let Err(e) = state.storage.create_execution(&execution).await {
-        tracing::error!(error = %e, "failed to persist new execution");
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-
-    match crate::engine::execute_workflow_seeded(&workflow, &state.registry, None, &credentials, &crate::engine::NoopObserver).await {
-        Ok(outputs) => {
-            execution.status = ExecutionStatus::Success;
-            execution.node_outputs = outputs;
-        }
+    match crate::execution_runner::run_and_track_execution(
+        &state.storage,
+        &state.execution_events,
+        &state.registry,
+        &workflow,
+        ExecutionMode::Manual,
+        None,
+        &credentials,
+    )
+    .await
+    {
+        Ok(execution) => Json(execution).into_response(),
         Err(e) => {
-            // Workflow execution failures here are almost always due to the
-            // shape of the user-authored workflow (unknown node type, cycle,
-            // disconnected components, a node's own validation) rather than a
-            // server-side bug, so this is a warning, not an error.
-            tracing::warn!(error = %e, workflow_id = %workflow.id, "workflow execution failed");
-            execution.status = ExecutionStatus::Error;
+            tracing::error!(error = %e, "failed to persist new execution");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
-    execution.finished_at = Some(chrono::Utc::now());
-    if let Err(e) = state.storage.update_execution(&execution).await {
-        tracing::error!(error = %e, "failed to persist execution result");
-        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
-    }
-
-    Json(execution).into_response()
 }
 
 /// Deliberately does not touch `active` or trigger activation state — that

@@ -1,4 +1,4 @@
-use crate::domain::{ExecutionMode, ExecutionStatus};
+use crate::domain::ExecutionMode;
 use crate::state::AppState;
 use uuid::Uuid;
 
@@ -34,6 +34,7 @@ async fn activate_schedule_trigger(
 
     let storage = state.storage.clone();
     let registry = state.registry.clone();
+    let events = state.execution_events.clone();
     let workflow_id = workflow.id;
 
     let job_id = state
@@ -41,8 +42,9 @@ async fn activate_schedule_trigger(
         .register(&cron_expr, move || {
             let storage = storage.clone();
             let registry = registry.clone();
+            let events = events.clone();
             async move {
-                fire_schedule(storage, registry, workflow_id).await;
+                fire_schedule(storage, registry, events, workflow_id).await;
             }
         })
         .await?;
@@ -65,6 +67,7 @@ pub async fn deactivate_workflow_triggers(state: &AppState, workflow_id: Uuid) {
 pub async fn fire_schedule(
     storage: std::sync::Arc<dyn crate::storage::Storage>,
     registry: std::sync::Arc<crate::node::NodeRegistry>,
+    events: tokio::sync::broadcast::Sender<crate::execution_runner::ExecutionEvent>,
     workflow_id: Uuid,
 ) {
     let workflow = match storage.get_workflow(workflow_id).await {
@@ -76,34 +79,19 @@ pub async fn fire_schedule(
         }
     };
 
-    let mut execution = crate::domain::Execution {
-        id: Uuid::new_v4(),
-        workflow_id: workflow.id,
-        status: ExecutionStatus::Running,
-        mode: ExecutionMode::Schedule,
-        node_outputs: Default::default(),
-        started_at: chrono::Utc::now(),
-        finished_at: None,
-    };
-    if let Err(e) = storage.create_execution(&execution).await {
-        tracing::error!(error = %e, "fire_schedule: failed to persist new execution");
-        return;
-    }
-
     let trigger_items = vec![crate::domain::Item { json: serde_json::json!({}), binary: serde_json::json!({}) }];
-    match crate::engine::execute_workflow_seeded(&workflow, &registry, Some(trigger_items), &std::collections::HashMap::new(), &crate::engine::NoopObserver).await {
-        Ok(outputs) => {
-            execution.status = ExecutionStatus::Success;
-            execution.node_outputs = outputs;
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, workflow_id = %workflow.id, "scheduled workflow execution failed");
-            execution.status = ExecutionStatus::Error;
-        }
-    }
-    execution.finished_at = Some(chrono::Utc::now());
-    if let Err(e) = storage.update_execution(&execution).await {
-        tracing::error!(error = %e, "fire_schedule: failed to persist execution result");
+    if let Err(e) = crate::execution_runner::run_and_track_execution(
+        &storage,
+        &events,
+        &registry,
+        &workflow,
+        ExecutionMode::Schedule,
+        Some(trigger_items),
+        &std::collections::HashMap::new(),
+    )
+    .await
+    {
+        tracing::error!(error = %e, "fire_schedule: failed to persist new execution");
     }
 }
 
@@ -135,6 +123,7 @@ mod tests {
             jwt_secret: "test-secret".into(),
             scheduler: Arc::new(crate::scheduler::Scheduler::new().await.unwrap()),
             trigger_registry: Arc::new(crate::trigger_registry::TriggerRegistry::new()),
+            execution_events: tokio::sync::broadcast::channel(16).0,
         }
     }
 
@@ -231,7 +220,7 @@ mod tests {
         let wf = schedule_workflow("* * * * * *");
         state.storage.create_workflow(&wf).await.unwrap();
 
-        fire_schedule(state.storage.clone(), state.registry.clone(), wf.id).await;
+        fire_schedule(state.storage.clone(), state.registry.clone(), state.execution_events.clone(), wf.id).await;
 
         let executions_are_findable = state.storage.list_workflows().await.unwrap();
         assert_eq!(executions_are_findable.len(), 1); // sanity: workflow itself still there
@@ -254,13 +243,13 @@ mod tests {
         state.storage.create_workflow(&wf).await.unwrap();
 
         // Must not panic even though the workflow is inactive.
-        fire_schedule(state.storage.clone(), state.registry.clone(), wf.id).await;
+        fire_schedule(state.storage.clone(), state.registry.clone(), state.execution_events.clone(), wf.id).await;
     }
 
     #[tokio::test]
     async fn fire_schedule_on_missing_workflow_is_a_noop() {
         let state = test_state().await;
-        fire_schedule(state.storage.clone(), state.registry.clone(), Uuid::new_v4()).await;
+        fire_schedule(state.storage.clone(), state.registry.clone(), state.execution_events.clone(), Uuid::new_v4()).await;
     }
 
     #[tokio::test]

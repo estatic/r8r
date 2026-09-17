@@ -15,6 +15,7 @@ async fn test_app() -> axum::Router {
         jwt_secret: "test-secret".into(),
         scheduler: Arc::new(r8r::scheduler::Scheduler::new().await.unwrap()),
         trigger_registry: Arc::new(r8r::trigger_registry::TriggerRegistry::new()),
+        execution_events: tokio::sync::broadcast::channel(16).0,
     };
     r8r::api::build_router(state)
 }
