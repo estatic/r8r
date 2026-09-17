@@ -2,16 +2,20 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../api/client'
-import type { Workflow, Connection, NodeInstance } from '../types/domain'
+import type { Workflow, Connection, NodeInstance, Execution } from '../types/domain'
 import WorkflowCanvas from '../components/WorkflowCanvas.vue'
 import AddNodeMenu from '../components/AddNodeMenu.vue'
 import NodeConfigPanel from '../components/NodeConfigPanel.vue'
+import ExecutionResultsPanel from '../components/ExecutionResultsPanel.vue'
 
 const route = useRoute()
 const workflowId = route.params.id as string
 
 const workflow = ref<Workflow | null>(null)
 const selectedNodeId = ref<string | null>(null)
+const saving = ref(false)
+const executing = ref(false)
+const execution = ref<Execution | null>(null)
 
 const selectedNode = computed<NodeInstance | null>(
   () => workflow.value?.nodes.find((n) => n.id === selectedNodeId.value) ?? null,
@@ -53,6 +57,29 @@ function onNodeUpdate(updated: NodeInstance) {
   const idx = workflow.value.nodes.findIndex((n) => n.id === updated.id)
   if (idx !== -1) workflow.value.nodes[idx] = updated
 }
+
+async function save() {
+  if (!workflow.value) return
+  saving.value = true
+  try {
+    workflow.value = await api.put<Workflow>(`/rest/workflows/${workflowId}`, {
+      name: workflow.value.name,
+      nodes: workflow.value.nodes,
+      connections: workflow.value.connections,
+    })
+  } finally {
+    saving.value = false
+  }
+}
+
+async function execute() {
+  executing.value = true
+  try {
+    execution.value = await api.post<Execution>(`/rest/workflows/${workflowId}/execute`)
+  } finally {
+    executing.value = false
+  }
+}
 </script>
 
 <template>
@@ -66,6 +93,20 @@ function onNodeUpdate(updated: NodeInstance) {
       />
       <div class="flex-1"></div>
       <AddNodeMenu @add="onAddNode" />
+      <button
+        class="bg-gray-200 text-gray-800 rounded px-3 py-1.5 text-sm disabled:opacity-50"
+        :disabled="saving"
+        @click="save"
+      >
+        {{ saving ? 'Saving…' : 'Save' }}
+      </button>
+      <button
+        class="bg-green-600 text-white rounded px-3 py-1.5 text-sm disabled:opacity-50"
+        :disabled="executing"
+        @click="execute"
+      >
+        {{ executing ? 'Running…' : 'Execute' }}
+      </button>
     </header>
     <div class="flex-1 relative">
       <WorkflowCanvas
@@ -77,6 +118,7 @@ function onNodeUpdate(updated: NodeInstance) {
         @connect="onConnect"
       />
       <NodeConfigPanel :node="selectedNode" @update="onNodeUpdate" @close="selectedNodeId = null" />
+      <ExecutionResultsPanel :execution="execution" @close="execution = null" />
     </div>
   </div>
 </template>
