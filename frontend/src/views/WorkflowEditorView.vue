@@ -1,16 +1,21 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api } from '../api/client'
-import type { Workflow, Connection } from '../types/domain'
+import type { Workflow, Connection, NodeInstance } from '../types/domain'
 import WorkflowCanvas from '../components/WorkflowCanvas.vue'
 import AddNodeMenu from '../components/AddNodeMenu.vue'
+import NodeConfigPanel from '../components/NodeConfigPanel.vue'
 
 const route = useRoute()
 const workflowId = route.params.id as string
 
 const workflow = ref<Workflow | null>(null)
 const selectedNodeId = ref<string | null>(null)
+
+const selectedNode = computed<NodeInstance | null>(
+  () => workflow.value?.nodes.find((n) => n.id === selectedNodeId.value) ?? null,
+)
 
 onMounted(async () => {
   workflow.value = await api.get<Workflow>(`/rest/workflows/${workflowId}`)
@@ -42,6 +47,12 @@ function onAddNode(nodeType: string) {
     disabled: false,
   })
 }
+
+function onNodeUpdate(updated: NodeInstance) {
+  if (!workflow.value) return
+  const idx = workflow.value.nodes.findIndex((n) => n.id === updated.id)
+  if (idx !== -1) workflow.value.nodes[idx] = updated
+}
 </script>
 
 <template>
@@ -65,6 +76,7 @@ function onAddNode(nodeType: string) {
         @node-move="onNodeMove"
         @connect="onConnect"
       />
+      <NodeConfigPanel :node="selectedNode" @update="onNodeUpdate" @close="selectedNodeId = null" />
     </div>
   </div>
 </template>
