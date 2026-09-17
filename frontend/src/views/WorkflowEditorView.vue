@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, onMounted, onUnmounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import { api, ApiError } from '../api/client'
 import { useExecutionsStore } from '../stores/executions'
+import { useLiveExecutionSocket } from '../composables/useLiveExecutionSocket'
 import type { Workflow, Connection, NodeInstance, Execution } from '../types/domain'
 import WorkflowCanvas from '../components/WorkflowCanvas.vue'
 import AddNodeMenu from '../components/AddNodeMenu.vue'
@@ -18,7 +19,8 @@ const selectedNodeId = ref<string | null>(null)
 const saving = ref(false)
 const executing = ref(false)
 const loadingHistory = ref(false)
-const execution = ref<Execution | null>(null)
+const live = useLiveExecutionSocket(workflowId)
+const execution = live.execution
 const loadError = ref('')
 const actionError = ref('')
 
@@ -44,11 +46,16 @@ function messageFor(e: unknown, fallback: string): string {
 }
 
 onMounted(async () => {
+  live.connect()
   try {
     workflow.value = await api.get<Workflow>(`/rest/workflows/${workflowId}`)
   } catch (e) {
     loadError.value = messageFor(e, 'Failed to load workflow.')
   }
+})
+
+onUnmounted(() => {
+  live.disconnect()
 })
 
 function onNodeSelect(nodeId: string) {
