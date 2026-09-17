@@ -22,6 +22,9 @@ export class ApiError extends Error {
   }
 }
 
+/** Endpoints whose own 401 means "bad credentials", not "session expired". */
+const AUTH_PATHS = ['/rest/auth/login', '/rest/auth/register']
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getToken()
   const headers: Record<string, string> = {
@@ -35,8 +38,15 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(path, { ...options, headers })
 
   if (response.status === 401) {
-    clearToken()
-    window.location.href = '/login'
+    // The auth endpoints answer 401 for "wrong password" / "unknown email",
+    // which is not an expired session: no token is ever sent with them, and
+    // redirecting would reload the page we're already on, destroying
+    // LoginView/RegisterView before their own catch block can render the
+    // inline error. Still throw, so the view can show that message.
+    if (!AUTH_PATHS.includes(path)) {
+      clearToken()
+      window.location.href = '/login'
+    }
     throw new ApiError(401, 'unauthorized')
   }
 

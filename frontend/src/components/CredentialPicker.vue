@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from 'vue'
 import { useCredentialsStore } from '../stores/credentials'
+import type { CredentialSummary } from '../types/domain'
 
 const props = defineProps<{ modelValue: string | null }>()
 const emit = defineEmits<{ 'update:modelValue': [id: string | null] }>()
@@ -12,7 +13,11 @@ const newType = ref('')
 const newDataText = ref('{}')
 const error = ref('')
 
-if (!store.loaded) store.fetchAll()
+if (!store.loaded) {
+  store.fetchAll().catch(() => {
+    error.value = 'Failed to load credentials.'
+  })
+}
 
 async function createCredential() {
   error.value = ''
@@ -23,7 +28,14 @@ async function createCredential() {
     error.value = 'Data must be valid JSON.'
     return
   }
-  const summary = await store.create(newName.value, newType.value, data)
+  let summary: CredentialSummary
+  try {
+    summary = await store.create(newName.value, newType.value, data)
+  } catch {
+    // Keep the form and its contents so the user can correct and retry.
+    error.value = 'Failed to create credential.'
+    return
+  }
   emit('update:modelValue', summary.id)
   creating.value = false
   newName.value = ''
@@ -47,8 +59,9 @@ async function createCredential() {
       <input v-model="newName" placeholder="Name" class="w-full border rounded px-2 py-1 text-sm" />
       <input v-model="newType" placeholder="Type (e.g. telegramApi)" class="w-full border rounded px-2 py-1 text-sm" />
       <textarea v-model="newDataText" rows="3" placeholder="{}" class="w-full border rounded px-2 py-1 text-xs font-mono"></textarea>
-      <p v-if="error" class="text-xs text-red-600">{{ error }}</p>
       <button type="button" class="text-xs bg-blue-600 text-white rounded px-2 py-1" @click="createCredential">Create</button>
     </div>
+    <!-- Outside the create form so load failures are visible too. -->
+    <p v-if="error" class="text-xs text-red-600">{{ error }}</p>
   </div>
 </template>

@@ -8,14 +8,44 @@ const store = useWorkflowsStore()
 const auth = useAuthStore()
 const router = useRouter()
 const newName = ref('')
+const error = ref('')
 
-onMounted(() => store.fetchAll())
+onMounted(async () => {
+  try {
+    await store.fetchAll()
+  } catch {
+    error.value = 'Failed to load workflows.'
+  }
+})
 
 async function createWorkflow() {
   if (!newName.value.trim()) return
-  const workflow = await store.create(newName.value.trim())
-  newName.value = ''
-  router.push({ name: 'workflow-editor', params: { id: workflow.id } })
+  error.value = ''
+  try {
+    const workflow = await store.create(newName.value.trim())
+    newName.value = ''
+    router.push({ name: 'workflow-editor', params: { id: workflow.id } })
+  } catch {
+    error.value = 'Failed to create workflow.'
+  }
+}
+
+async function removeWorkflow(id: string) {
+  error.value = ''
+  try {
+    await store.remove(id)
+  } catch {
+    error.value = 'Failed to delete workflow.'
+  }
+}
+
+async function setActive(id: string, active: boolean) {
+  error.value = ''
+  try {
+    await store.setActive(id, active)
+  } catch {
+    error.value = active ? 'Failed to activate workflow.' : 'Failed to deactivate workflow.'
+  }
 }
 
 function logout() {
@@ -35,6 +65,7 @@ function logout() {
         <input v-model="newName" placeholder="New workflow name" class="flex-1 border rounded px-3 py-2" />
         <button type="submit" class="bg-blue-600 text-white rounded px-4 py-2">+ New workflow</button>
       </form>
+      <p v-if="error" class="text-sm text-red-600">{{ error }}</p>
       <ul class="divide-y bg-white rounded shadow">
         <li v-for="wf in store.workflows" :key="wf.id" class="flex justify-between items-center px-4 py-3">
           <router-link :to="{ name: 'workflow-editor', params: { id: wf.id } }" class="text-blue-600">{{ wf.name }}</router-link>
@@ -43,11 +74,11 @@ function logout() {
               <input
                 type="checkbox"
                 :checked="wf.active"
-                @change="store.setActive(wf.id, ($event.target as HTMLInputElement).checked)"
+                @change="setActive(wf.id, ($event.target as HTMLInputElement).checked)"
               />
               Active
             </label>
-            <button class="text-sm text-red-600" @click="store.remove(wf.id)">Delete</button>
+            <button class="text-sm text-red-600" @click="removeWorkflow(wf.id)">Delete</button>
           </div>
         </li>
       </ul>

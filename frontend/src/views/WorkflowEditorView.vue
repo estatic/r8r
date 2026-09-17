@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { api } from '../api/client'
+import { api, ApiError } from '../api/client'
 import type { Workflow, Connection, NodeInstance, Execution } from '../types/domain'
 import WorkflowCanvas from '../components/WorkflowCanvas.vue'
 import AddNodeMenu from '../components/AddNodeMenu.vue'
@@ -16,13 +16,36 @@ const selectedNodeId = ref<string | null>(null)
 const saving = ref(false)
 const executing = ref(false)
 const execution = ref<Execution | null>(null)
+const loadError = ref('')
+const actionError = ref('')
 
 const selectedNode = computed<NodeInstance | null>(
   () => workflow.value?.nodes.find((n) => n.id === selectedNodeId.value) ?? null,
 )
 
+/**
+ * `crypto.randomUUID()` only exists in a secure context (https, localhost).
+ * r8r is self-hosted and commonly reached at `http://<lan-ip>:3000`, where it
+ * is `undefined` — so fall back to a non-cryptographic id. These ids are
+ * workflow-scoped local identifiers, not secrets.
+ */
+function newNodeId(): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID()
+  }
+  return `${Date.now().toString(36)}${Math.random().toString(36).slice(2)}`
+}
+
+function messageFor(e: unknown, fallback: string): string {
+  return e instanceof ApiError ? `${fallback} (${e.status})` : fallback
+}
+
 onMounted(async () => {
-  workflow.value = await api.get<Workflow>(`/rest/workflows/${workflowId}`)
+  try {
+    workflow.value = await api.get<Workflow>(`/rest/workflows/${workflowId}`)
+  } catch (e) {
+    loadError.value = messageFor(e, 'Failed to load workflow.')
+  }
 })
 
 function onNodeSelect(nodeId: string) {
@@ -44,9 +67,13 @@ function onAddNode(nodeType: string) {
   if (!workflow.value) return
   const count = workflow.value.nodes.length
   workflow.value.nodes.push({
-    id: crypto.randomUUID(),
+    id: newNodeId(),
     node_type: nodeType,
-    position: [100 + count * 40, 100 + count * 40],
+    // Stack new nodes vertically with enough clearance that a node never
+    // covers the one above it: nodes are ~100px tall and the connection
+    // handles sit on their top and bottom edges, so an overlapping node would
+    // swallow the pointer events a connection drag has to start from.
+    position: [100, 100 + count * 160],
     parameters: {},
     disabled: false,
   })
@@ -60,6 +87,7 @@ function onNodeUpdate(updated: NodeInstance) {
 
 async function save() {
   if (!workflow.value) return
+  actionError.value = ''
   saving.value = true
   try {
     workflow.value = await api.put<Workflow>(`/rest/workflows/${workflowId}`, {
@@ -67,15 +95,22 @@ async function save() {
       nodes: workflow.value.nodes,
       connections: workflow.value.connections,
     })
+  } catch (e) {
+    // Leave workflow.value untouched so the user keeps their unsaved edits
+    // and can simply retry.
+    actionError.value = messageFor(e, 'Failed to save workflow — your changes were not saved.')
   } finally {
     saving.value = false
   }
 }
 
 async function execute() {
+  actionError.value = ''
   executing.value = true
   try {
     execution.value = await api.post<Execution>(`/rest/workflows/${workflowId}/execute`)
+  } catch (e) {
+    actionError.value = messageFor(e, 'Failed to execute workflow.')
   } finally {
     executing.value = false
   }
@@ -108,7 +143,9 @@ async function execute() {
         {{ executing ? 'Running…' : 'Execute' }}
       </button>
     </header>
+    <p v-if="actionError" class="bg-red-50 border-b border-red-200 px-6 py-2 text-sm text-red-600">{{ actionError }}</p>
     <div class="flex-1 relative">
+      <p v-if="loadError" class="p-6 text-sm text-red-600">{{ loadError }}</p>
       <WorkflowCanvas
         v-if="workflow"
         :nodes="workflow.nodes"
