@@ -9,6 +9,7 @@ pub mod node;
 pub mod nodes;
 pub mod scheduler;
 pub mod state;
+pub mod static_files;
 pub mod storage;
 pub mod telegram_poller;
 pub mod trigger_registry;

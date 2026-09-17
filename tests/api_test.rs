@@ -1448,3 +1448,56 @@ async fn node_types_lists_registered_types() {
     sorted.sort();
     assert_eq!(types, sorted);
 }
+
+#[tokio::test]
+async fn root_path_serves_the_embedded_frontend() {
+    let app = test_app().await;
+    let response = app
+        .oneshot(Request::builder().method("GET").uri("/").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&bytes).contains("<div id=\"app\">"));
+}
+
+#[tokio::test]
+async fn a_client_side_route_falls_back_to_the_frontend_not_a_404() {
+    let app = test_app().await;
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/workflows/00000000-0000-0000-0000-000000000000")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&bytes).contains("<div id=\"app\">"));
+}
+
+#[tokio::test]
+async fn rest_routes_still_take_priority_over_the_frontend_fallback() {
+    let app = test_app().await;
+    // An unauthenticated request to a real, known API route must get that
+    // route's own real behavior (here: 400/422 for a malformed body, from
+    // axum's own JSON extractor), never the SPA's index.html -- proving
+    // the fallback genuinely only catches unmatched paths.
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/auth/login")
+                .header("content-type", "application/json")
+                .body(Body::from("not valid json"))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_ne!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(!String::from_utf8_lossy(&bytes).contains("<div id=\"app\">"));
+}

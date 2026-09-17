@@ -30,5 +30,6 @@ pub fn build_router(state: AppState) -> Router {
             axum::routing::get(webhook::handle_webhook).post(webhook::handle_webhook),
         )
         .route("/health", get(|| async { "ok" }))
+        .fallback(crate::static_files::serve_frontend)
         .with_state(state)
 }
