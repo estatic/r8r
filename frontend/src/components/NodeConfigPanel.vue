@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref, watch } from 'vue'
 import type { NodeInstance } from '../types/domain'
+import CredentialPicker from './CredentialPicker.vue'
 
 const props = defineProps<{ node: NodeInstance | null }>()
 const emit = defineEmits<{ update: [node: NodeInstance]; close: [] }>()
@@ -8,6 +9,7 @@ const emit = defineEmits<{ update: [node: NodeInstance]; close: [] }>()
 const paramsText = ref('')
 const error = ref('')
 const disabled = ref(false)
+const credentialId = ref<string | null>(null)
 
 watch(
   () => props.node,
@@ -16,6 +18,8 @@ watch(
       paramsText.value = JSON.stringify(node.parameters, null, 2)
       disabled.value = node.disabled
       error.value = ''
+      const auth = node.parameters?.auth as { credential_id?: string } | undefined
+      credentialId.value = auth?.credential_id ?? null
     }
   },
   { immediate: true },
@@ -29,6 +33,9 @@ function apply() {
   } catch {
     error.value = 'Parameters must be valid JSON.'
     return
+  }
+  if (credentialId.value) {
+    parsed.auth = { ...((parsed.auth as object) ?? {}), credential_id: credentialId.value }
   }
   emit('update', { ...props.node, parameters: parsed, disabled: disabled.value })
   error.value = ''
@@ -49,6 +56,10 @@ function apply() {
         <input v-model="disabled" type="checkbox" />
         Disabled
       </label>
+      <div>
+        <label class="block text-sm text-gray-600 mb-1">Credential (for nodes that need auth)</label>
+        <CredentialPicker v-model="credentialId" />
+      </div>
       <div>
         <label class="block text-sm text-gray-600 mb-1">Parameters (JSON)</label>
         <textarea v-model="paramsText" rows="14" class="w-full border rounded px-2 py-1.5 font-mono text-xs"></textarea>
