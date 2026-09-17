@@ -76,10 +76,22 @@ impl Storage for SqliteStorage {
         Ok(())
     }
     async fn delete_workflow(&self, id: Uuid) -> anyhow::Result<()> {
+        // `executions.workflow_id` references `workflows(id)` with no
+        // `ON DELETE CASCADE`, so a workflow that has ever been executed
+        // must have its executions removed first or the DELETE below fails
+        // with a FOREIGN KEY constraint violation. Do both deletes in a
+        // transaction so they're atomic — either the workflow and its
+        // executions are gone, or neither is touched.
+        let mut tx = self.pool.begin().await?;
+        sqlx::query("DELETE FROM executions WHERE workflow_id = ?")
+            .bind(id.to_string())
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM workflows WHERE id = ?")
             .bind(id.to_string())
-            .execute(&self.pool)
+            .execute(&mut *tx)
             .await?;
+        tx.commit().await?;
         Ok(())
     }
     async fn get_workflow(&self, id: Uuid) -> anyhow::Result<Option<Workflow>> {
@@ -500,6 +512,22 @@ mod tests {
     async fn delete_workflow_on_a_nonexistent_id_does_not_error() {
         let storage = SqliteStorage::new("sqlite::memory:", test_key()).await.unwrap();
         storage.delete_workflow(Uuid::new_v4()).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn delete_workflow_with_executions_removes_both() {
+        // Regression test: executions.workflow_id references workflows(id)
+        // with no ON DELETE CASCADE, so deleting a workflow that has been
+        // executed used to fail with a FOREIGN KEY constraint violation.
+        let storage = SqliteStorage::new("sqlite::memory:", test_key()).await.unwrap();
+        let wf = sample_workflow();
+        storage.create_workflow(&wf).await.unwrap();
+        let exec = sample_execution(wf.id);
+        storage.create_execution(&exec).await.unwrap();
+
+        storage.delete_workflow(wf.id).await.unwrap();
+
+        assert!(storage.get_workflow(wf.id).await.unwrap().is_none());
     }
 
     #[tokio::test]

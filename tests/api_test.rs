@@ -1423,6 +1423,64 @@ async fn deleting_an_active_workflow_deactivates_its_trigger_first() {
 }
 
 #[tokio::test]
+async fn deleting_an_executed_workflow_succeeds() {
+    // Regression test: executions.workflow_id has no ON DELETE CASCADE, so
+    // deleting a workflow that was previously executed used to 500 with a
+    // FOREIGN KEY constraint violation. Proves the fix at the HTTP level,
+    // exercising the exact "execute then delete" path a real user hits.
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "delete-executed-wf@example.com").await;
+
+    let create_body = serde_json::json!({
+        "name": "executed-then-deleted",
+        "nodes": [{"id": "trigger", "node_type": "core.manualTrigger", "position": [0.0, 0.0], "parameters": {}, "disabled": false}],
+        "connections": []
+    });
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/workflows")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(create_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = create_response.into_body().collect().await.unwrap().to_bytes();
+    let workflow_id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string();
+
+    let execute_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(execute_response.status(), StatusCode::OK);
+
+    let delete_response = app
+        .oneshot(
+            Request::builder()
+                .method("DELETE")
+                .uri(format!("/rest/workflows/{workflow_id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(delete_response.status(), StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
 async fn node_types_lists_registered_types() {
     let app = test_app().await;
     let token = register_and_get_token(&app, "node-types@example.com").await;
