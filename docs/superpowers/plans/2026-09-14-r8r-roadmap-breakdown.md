@@ -234,6 +234,33 @@ dependency, per the spec's lightweight-footprint goal.
 **Goal:** Vue 3 + Vue Flow SPA against the existing REST/WebSocket API —
 canvas editing, inline JSON data preview, execution log/replay.
 
+**Status:** §6.1, §6.2, §6.4, and part of §6.3 (6.3.2) shipped as "Plan 6a —
+First Slice" (`docs/superpowers/plans/2026-09-16-r8r-plan6a-frontend.md`,
+spec `docs/superpowers/specs/2026-09-16-r8r-plan6a-frontend-design.md`,
+merged to `main`): login/register, workflow list (create/delete/toggle
+active), a Vue Flow canvas editor (add/drag/connect/configure nodes,
+credential picker), and save/execute with an inline per-node JSON results
+panel for the just-run execution. 6.3.1 (live execution status) and 6.3.3
+(execution log/replay of *past* runs, not just the current one) are not
+built — 6.3.1 stays blocked on Plan 7's WebSocket push per the sequencing
+note below; 6.3.3 is the remaining first-class gap for a future "Plan 6b".
+
+Plan 6a's final whole-branch review (browser-verified with Playwright
+against the built binary) found and fixed 7 issues before merge, folded
+into commit `270d069`: Vue Flow's `DefaultNode` (and its connection
+`<Handle>` elements) was being fully replaced by the custom node slot,
+making it impossible to drag a connection in a real browser (critical);
+failed API calls silently looked like success (no inline error surfaced,
+editor state could be lost); a 401 from the login/register endpoints
+themselves triggered the client's global redirect-to-`/login`, destroying
+`LoginView` before it could render "invalid credentials"; `Backspace`
+deleted a node from Vue Flow's internal store only, so it reappeared on
+the next prop sync and a subsequent Save silently kept it;
+`crypto.randomUUID()` threw outside a secure context (plain-HTTP LAN
+access, r8r's typical self-hosted deployment); and two frontend test-setup
+issues (a non-portable `NODE_OPTIONS` flag, an untyped Vitest `test` config
+key). All fixes verified in a real browser, not just unit tests.
+
 ### 6.1 Project Scaffold
 - 6.1.1 Vue 3 + Vite setup
   - 6.1.1.1 Base project, TypeScript config, dev-server proxy to the Rust API
