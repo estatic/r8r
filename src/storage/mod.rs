@@ -15,6 +15,11 @@ pub trait Storage: Send + Sync {
     async fn create_execution(&self, execution: &Execution) -> anyhow::Result<()>;
     async fn update_execution(&self, execution: &Execution) -> anyhow::Result<()>;
     async fn get_execution(&self, id: Uuid) -> anyhow::Result<Option<Execution>>;
+    async fn list_executions_for_workflow(
+        &self,
+        workflow_id: Uuid,
+        limit: i64,
+    ) -> anyhow::Result<Vec<Execution>>;
 
     async fn create_user(&self, user: &User) -> anyhow::Result<()>;
     async fn get_user_by_email(&self, email: &str) -> anyhow::Result<Option<User>>;

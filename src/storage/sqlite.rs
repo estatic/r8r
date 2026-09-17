@@ -147,6 +147,21 @@ impl Storage for SqliteStorage {
         .await?;
         row.map(row_to_execution).transpose()
     }
+    async fn list_executions_for_workflow(
+        &self,
+        workflow_id: Uuid,
+        limit: i64,
+    ) -> anyhow::Result<Vec<Execution>> {
+        let rows = sqlx::query_as::<_, (String, String, String, String, String, String, Option<String>)>(
+            "SELECT id, workflow_id, status, mode, data, started_at, finished_at \
+             FROM executions WHERE workflow_id = ? ORDER BY started_at DESC LIMIT ?"
+        )
+        .bind(workflow_id.to_string())
+        .bind(limit)
+        .fetch_all(&self.pool)
+        .await?;
+        rows.into_iter().map(row_to_execution).collect()
+    }
     async fn create_user(&self, user: &User) -> anyhow::Result<()> {
         sqlx::query(
             "INSERT INTO users (id, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)"
@@ -407,6 +422,34 @@ mod tests {
             fetched.node_outputs["n1"][0].json,
             serde_json::json!({"a": 1})
         );
+    }
+
+    #[tokio::test]
+    async fn list_executions_for_workflow_returns_newest_first_and_respects_limit() {
+        let storage = storage_with_test_key().await;
+        let wf = sample_workflow();
+        storage.create_workflow(&wf).await.unwrap();
+
+        let mut oldest = sample_execution(wf.id);
+        oldest.started_at = Utc::now() - chrono::Duration::minutes(2);
+        let mut middle = sample_execution(wf.id);
+        middle.started_at = Utc::now() - chrono::Duration::minutes(1);
+        let mut newest = sample_execution(wf.id);
+        newest.started_at = Utc::now();
+        for exec in [&oldest, &middle, &newest] {
+            storage.create_execution(exec).await.unwrap();
+        }
+
+        // A different workflow's execution must never appear in this list.
+        let other_wf = sample_workflow();
+        storage.create_workflow(&other_wf).await.unwrap();
+        storage.create_execution(&sample_execution(other_wf.id)).await.unwrap();
+
+        let page = storage.list_executions_for_workflow(wf.id, 2).await.unwrap();
+
+        assert_eq!(page.len(), 2);
+        assert_eq!(page[0].id, newest.id);
+        assert_eq!(page[1].id, middle.id);
     }
 
     #[tokio::test]

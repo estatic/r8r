@@ -410,6 +410,13 @@ mod poller_tests {
         async fn get_execution(&self, id: Uuid) -> anyhow::Result<Option<Execution>> {
             self.inner.get_execution(id).await
         }
+        async fn list_executions_for_workflow(
+            &self,
+            workflow_id: Uuid,
+            limit: i64,
+        ) -> anyhow::Result<Vec<Execution>> {
+            self.inner.list_executions_for_workflow(workflow_id, limit).await
+        }
         async fn create_user(&self, user: &User) -> anyhow::Result<()> {
             self.inner.create_user(user).await
         }

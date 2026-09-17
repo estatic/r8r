@@ -74,6 +74,13 @@ impl Storage for FailingUpdateStorage {
     async fn get_execution(&self, id: uuid::Uuid) -> anyhow::Result<Option<r8r::domain::Execution>> {
         self.inner.get_execution(id).await
     }
+    async fn list_executions_for_workflow(
+        &self,
+        workflow_id: uuid::Uuid,
+        limit: i64,
+    ) -> anyhow::Result<Vec<r8r::domain::Execution>> {
+        self.inner.list_executions_for_workflow(workflow_id, limit).await
+    }
     async fn create_user(&self, user: &r8r::domain::User) -> anyhow::Result<()> {
         self.inner.create_user(user).await
     }
@@ -350,6 +357,87 @@ async fn create_execute_and_fetch_execution_end_to_end() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn list_executions_for_workflow_returns_newest_first_and_honors_limit() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "exec-history@example.com").await;
+
+    let workflow_body = serde_json::json!({
+        "name": "history-wf",
+        "nodes": [{"id": "trigger", "node_type": "core.manualTrigger", "position": [0.0, 0.0], "parameters": {}, "disabled": false}],
+        "connections": []
+    });
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/workflows")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(workflow_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let workflow_id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string();
+
+    let mut execution_ids = Vec::new();
+    for _ in 0..3 {
+        let response = app.clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                    .header("authorization", format!("Bearer {token}"))
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        execution_ids.push(execution["id"].as_str().unwrap().to_string());
+    }
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/rest/workflows/{workflow_id}/executions?limit=2"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let executions: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+
+    assert_eq!(executions.len(), 2);
+    assert_eq!(executions[0]["id"], execution_ids[2]);
+    assert_eq!(executions[1]["id"], execution_ids[1]);
+}
+
+#[tokio::test]
+async fn list_executions_for_a_nonexistent_workflow_returns_404() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "exec-history-404@example.com").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .uri(format!("/rest/workflows/{}/executions", uuid::Uuid::new_v4()))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]

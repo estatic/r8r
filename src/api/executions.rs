@@ -1,8 +1,9 @@
 use crate::state::AppState;
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use serde::Deserialize;
 use uuid::Uuid;
 
 pub async fn get_execution(
@@ -15,6 +16,44 @@ pub async fn get_execution(
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
             tracing::error!(error = %e, "failed to fetch execution");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct ListExecutionsQuery {
+    limit: Option<i64>,
+}
+
+/// Server-side cap on `?limit=`, independent of whatever a caller asks for,
+/// so a very large or negative value can't turn this into an unbounded scan.
+const MAX_EXECUTIONS_LIMIT: i64 = 200;
+const DEFAULT_EXECUTIONS_LIMIT: i64 = 50;
+
+pub async fn list_executions_for_workflow(
+    State(state): State<AppState>,
+    super::workflows::AuthUser(_user_id): super::workflows::AuthUser,
+    Path(workflow_id): Path<Uuid>,
+    Query(query): Query<ListExecutionsQuery>,
+) -> impl IntoResponse {
+    match state.storage.get_workflow(workflow_id).await {
+        Ok(Some(_)) => {}
+        Ok(None) => return StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to fetch workflow for execution history");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    }
+
+    let limit = query
+        .limit
+        .unwrap_or(DEFAULT_EXECUTIONS_LIMIT)
+        .clamp(1, MAX_EXECUTIONS_LIMIT);
+    match state.storage.list_executions_for_workflow(workflow_id, limit).await {
+        Ok(executions) => Json(executions).into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to list executions for workflow");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
         }
     }
