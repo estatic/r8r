@@ -22,7 +22,7 @@ impl ExecutionObserver for NoopObserver {
 
 pub async fn execute_workflow(
     workflow: &Workflow,
-    registry: &NodeRegistry,
+    registry: &std::sync::Arc<NodeRegistry>,
 ) -> anyhow::Result<HashMap<String, Vec<Item>>> {
     execute_workflow_seeded(workflow, registry, None, &HashMap::new(), &NoopObserver).await
 }
@@ -40,7 +40,7 @@ pub fn start_node_id(workflow: &Workflow) -> anyhow::Result<String> {
 
 pub async fn execute_workflow_seeded(
     workflow: &Workflow,
-    registry: &NodeRegistry,
+    registry: &std::sync::Arc<NodeRegistry>,
     trigger_items: Option<Vec<Item>>,
     credentials: &HashMap<uuid::Uuid, serde_json::Value>,
     observer: &dyn ExecutionObserver,
@@ -311,10 +311,10 @@ mod tests {
         }
     }
 
-    fn registry() -> NodeRegistry {
+    fn registry() -> std::sync::Arc<NodeRegistry> {
         let mut r = NodeRegistry::new();
         crate::nodes::register_all(&mut r);
-        r
+        std::sync::Arc::new(r)
     }
 
     #[test]
@@ -659,10 +659,11 @@ mod tests {
         }
     }
 
-    fn registry_with_failing_node() -> NodeRegistry {
-        let mut r = registry();
+    fn registry_with_failing_node() -> std::sync::Arc<NodeRegistry> {
+        let mut r = NodeRegistry::new();
+        crate::nodes::register_all(&mut r);
         r.register(Box::new(AlwaysFailsNode));
-        r
+        std::sync::Arc::new(r)
     }
 
     #[tokio::test]

@@ -106,7 +106,7 @@ impl ExecutionObserver for LiveExecutionTracker {
 pub async fn run_and_track_execution(
     storage: &Arc<dyn Storage>,
     events: &broadcast::Sender<ExecutionEvent>,
-    registry: &NodeRegistry,
+    registry: &Arc<NodeRegistry>,
     workflow: &Workflow,
     mode: ExecutionMode,
     trigger_items: Option<Vec<Item>>,
@@ -163,10 +163,10 @@ mod tests {
     use std::sync::Arc;
     use uuid::Uuid;
 
-    fn registry() -> NodeRegistry {
+    fn registry() -> Arc<NodeRegistry> {
         let mut r = NodeRegistry::new();
         crate::nodes::register_all(&mut r);
-        r
+        Arc::new(r)
     }
 
     fn linear_workflow() -> Workflow {
