@@ -20,6 +20,7 @@ password-hash = { version = "0.5", features = ["getrandom"] }
 jsonwebtoken = "9"
 async-trait = "0.1"
 thiserror = "1"
+tiktoken-rs = "0.6"
 anyhow = "1"
 tower = { version = "0.4", features = ["util"] }
 tracing = "0.1"

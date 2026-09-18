@@ -6,6 +6,7 @@
 //! node's error handling.
 
 pub mod anthropic;
+pub mod openai;
 
 #[derive(Debug, Clone)]
 pub enum LlmMessage {
