@@ -31,7 +31,7 @@ pub struct ToolDefinition {
     pub parameters: serde_json::Value,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum ProviderResponse {
     Text(String),
     ToolCalls(Vec<ToolCall>),

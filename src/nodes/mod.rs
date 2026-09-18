@@ -1,3 +1,4 @@
+pub mod agent;
 pub mod code;
 pub mod filter;
 pub mod http_request;
