@@ -184,7 +184,7 @@ impl ProviderClient for AnthropicClient {
 mod tests {
     use super::*;
     use crate::llm::{LlmMessage, ProviderClient, ProviderResponse, ToolCall, ToolDefinition};
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{body_partial_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
@@ -193,6 +193,9 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
             .and(header("x-api-key", "test-key"))
+            .and(body_partial_json(serde_json::json!({
+                "messages": [{"role": "user", "content": "hi"}]
+            })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "msg_1",
                 "type": "message",
@@ -296,6 +299,13 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/v1/messages"))
+            .and(body_partial_json(serde_json::json!({
+                "messages": [
+                    {"role": "user", "content": "weather in Warsaw?"},
+                    {"role": "assistant", "content": [{"type": "tool_use", "id": "toolu_1", "name": "fetch_weather", "input": {"city": "Warsaw"}}]},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "toolu_1", "content": "{\"temp_c\": 22}", "is_error": false}]}
+                ]
+            })))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
                 "id": "msg_3",
                 "type": "message",
