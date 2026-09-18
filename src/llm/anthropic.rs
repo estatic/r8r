@@ -26,6 +26,15 @@ impl AnthropicClient {
         Self::with_base_url_result(base_url).expect("failed to build reqwest client")
     }
 
+    /// Non-test override for a custom base URL (e.g. a node-level
+    /// `api_base_url` parameter pointing at a mock or a compatible
+    /// self-hosted endpoint) -- unlike `with_base_url` (test-only, panics
+    /// on a build failure), this returns a proper `Result` since it's
+    /// reachable from real node execution.
+    pub fn with_base_url_for_node(base_url: String) -> Result<Self, NodeError> {
+        Self::with_base_url_result(base_url)
+    }
+
     fn with_base_url_result(base_url: String) -> Result<Self, NodeError> {
         let client = reqwest::Client::builder()
             .timeout(REQUEST_TIMEOUT)

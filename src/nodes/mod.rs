@@ -31,4 +31,5 @@ pub fn register_all(registry: &mut NodeRegistry) {
     registry.register(Box::new(schedule::ScheduleNode));
     registry.register(Box::new(telegram_send_message::TelegramSendMessageNode));
     registry.register(Box::new(telegram_trigger::TelegramTriggerNode));
+    registry.register(Box::new(agent::AgentNode));
 }

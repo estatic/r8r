@@ -1,5 +1,5 @@
 use crate::domain::Item;
-use crate::llm::{LlmMessage, ProviderClient, ProviderResponse, ToolCall, ToolDefinition};
+use crate::llm::{LlmMessage, ProviderClient, ProviderResponse, ToolDefinition};
 use crate::node::{Node, NodeError, NodeExecutionContext, NodeOutput};
 use async_trait::async_trait;
 
@@ -195,6 +195,71 @@ pub(crate) async fn run_agent_loop(
     }
 
     Err(NodeError::ExecutionFailed("ai.agent: exceeded max_iterations without a final response".into()))
+}
+
+#[async_trait]
+impl Node for AgentNode {
+    fn type_name(&self) -> &'static str {
+        "ai.agent"
+    }
+
+    async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
+        let provider_name = ctx
+            .parameters
+            .get("provider")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| NodeError::ExecutionFailed("ai.agent requires a \"provider\" parameter (\"anthropic\" or \"openai\")".into()))?;
+        let model = ctx
+            .parameters
+            .get("model")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| NodeError::ExecutionFailed("ai.agent requires a \"model\" parameter".into()))?;
+        let system_prompt = ctx.parameters.get("system_prompt").and_then(|v| v.as_str()).unwrap_or("");
+        let user_message = ctx
+            .parameters
+            .get("user_message")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| NodeError::ExecutionFailed("ai.agent requires a \"user_message\" parameter".into()))?
+            .to_string();
+        let max_iterations = ctx.parameters.get("max_iterations").and_then(|v| v.as_u64()).unwrap_or(10);
+        let max_context_tokens = ctx.parameters.get("max_context_tokens").and_then(|v| v.as_u64()).map(|n| n as usize);
+        let empty_tools = serde_json::json!([]);
+        let tools_param = ctx.parameters.get("tools").unwrap_or(&empty_tools);
+
+        let credential_id_str = ctx
+            .parameters
+            .get("auth")
+            .and_then(|a| a.get("credential_id"))
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| NodeError::ExecutionFailed("ai.agent requires auth.credential_id".into()))?;
+        let credential_id = uuid::Uuid::parse_str(credential_id_str)
+            .map_err(|e| NodeError::ExecutionFailed(format!("ai.agent: invalid credential_id: {e}")))?;
+        let credential_data = ctx
+            .credentials
+            .get(&credential_id)
+            .ok_or_else(|| NodeError::ExecutionFailed(format!("ai.agent: credential {credential_id} was not resolved for this run")))?;
+        let api_key = credential_data
+            .get("api_key")
+            .and_then(|v| v.as_str())
+            .ok_or_else(|| NodeError::ExecutionFailed("ai.agent: credential is missing \"api_key\"".into()))?;
+
+        match provider_name {
+            "anthropic" => {
+                let base_url = ctx.parameters.get("api_base_url").and_then(|v| v.as_str());
+                let client = match base_url {
+                    Some(url) => crate::llm::anthropic::AnthropicClient::with_base_url_for_node(url.to_string())?,
+                    None => crate::llm::anthropic::AnthropicClient::new()?,
+                };
+                run_agent_loop(&client, model, api_key, system_prompt, user_message, tools_param, max_iterations, max_context_tokens, ctx).await
+            }
+            "openai" => {
+                let base_url = credential_data.get("base_url").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let client = crate::llm::openai::OpenAiClient::new(base_url)?;
+                run_agent_loop(&client, model, api_key, system_prompt, user_message, tools_param, max_iterations, max_context_tokens, ctx).await
+            }
+            other => Err(NodeError::ExecutionFailed(format!("ai.agent: unknown provider \"{other}\" (expected \"anthropic\" or \"openai\")"))),
+        }
+    }
 }
 
 #[cfg(test)]

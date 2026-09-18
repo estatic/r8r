@@ -1928,3 +1928,131 @@ async fn websocket_never_forwards_events_for_a_different_workflow() {
         panic!("expected a text frame");
     }
 }
+
+#[tokio::test]
+async fn agent_node_calls_a_tool_then_returns_a_final_response_end_to_end() {
+    let anthropic_server = wiremock::MockServer::start().await;
+    let tool_server = wiremock::MockServer::start().await;
+
+    // Turn 1: Anthropic responds with a tool_use call to core.httpRequest.
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/messages"))
+        .respond_with(
+            wiremock::ResponseTemplate::new(200)
+                .set_body_json(serde_json::json!({
+                    "id": "msg_1",
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "tool_use", "id": "toolu_1", "name": "fetch_status", "input": {}}],
+                    "stop_reason": "tool_use"
+                }))
+                .append_header("content-type", "application/json"),
+        )
+        .up_to_n_times(1)
+        .mount(&anthropic_server)
+        .await;
+
+    // Turn 2: Anthropic responds with the final text answer.
+    wiremock::Mock::given(wiremock::matchers::method("POST"))
+        .and(wiremock::matchers::path("/v1/messages"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": "msg_2",
+            "type": "message",
+            "role": "assistant",
+            "content": [{"type": "text", "text": "The status is ok."}],
+            "stop_reason": "end_turn"
+        })))
+        .mount(&anthropic_server)
+        .await;
+
+    // The tool itself: core.httpRequest hitting a second mocked endpoint.
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/status"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({"status": "ok"})))
+        .mount(&tool_server)
+        .await;
+
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "agent-e2e@example.com").await;
+
+    let create_cred_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/credentials")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(
+                    serde_json::json!({"name": "test-anthropic", "credential_type": "anthropicApi", "data": {"api_key": "test-key"}}).to_string(),
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = create_cred_response.into_body().collect().await.unwrap().to_bytes();
+    let credential_id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string();
+
+    let workflow_body = serde_json::json!({
+        "name": "agent-e2e",
+        "nodes": [
+            {"id": "trigger", "node_type": "core.manualTrigger", "position": [0.0, 0.0], "parameters": {}, "disabled": false},
+            {
+                "id": "agent1",
+                "node_type": "ai.agent",
+                "position": [1.0, 0.0],
+                "parameters": {
+                    "provider": "anthropic",
+                    "model": "claude-opus-5",
+                    "system_prompt": "You are a status-checking assistant.",
+                    "user_message": "What is the status?",
+                    "auth": {"credential_id": credential_id},
+                    "api_base_url": anthropic_server.uri(),
+                    "max_iterations": 5,
+                    "tools": [{
+                        "name": "fetch_status",
+                        "description": "Fetch the current status",
+                        "node_type": "core.httpRequest",
+                        "argument_schema": {"type": "object", "properties": {}},
+                        "base_parameters": {"method": "GET", "url": format!("{}/status", tool_server.uri())}
+                    }]
+                },
+                "disabled": false
+            }
+        ],
+        "connections": [{"from_node": "trigger", "from_output": 0, "to_node": "agent1", "to_input": 0}]
+    });
+    let create_response = app
+        .clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/workflows")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(workflow_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = create_response.into_body().collect().await.unwrap().to_bytes();
+    let workflow_id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string();
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(execution["status"], "Success");
+    assert_eq!(execution["node_outputs"]["agent1"][0]["json"]["response"], "The status is ok.");
+    assert_eq!(execution["node_outputs"]["agent1"][0]["json"]["tool_calls_made"], 1);
+}
