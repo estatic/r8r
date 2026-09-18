@@ -200,32 +200,68 @@ sub-workflows exposed as callable tools) and per-execution memory,
 implemented against provider HTTP APIs directly — no LangChain
 dependency, per the spec's lightweight-footprint goal.
 
-### 5.1 LLM Provider Clients
-- 5.1.1 Anthropic-compatible HTTP client
-  - 5.1.1.1 Request/response types for the Messages API
-  - 5.1.1.2 Decide streaming vs. non-streaming scope for v1
-- 5.1.2 OpenAI-compatible HTTP client
-  - 5.1.2.1 Request/response types for a Chat Completions-style API
-- 5.1.3 Provider abstraction
-  - 5.1.3.1 A trait/enum so the Agent node switches providers via credential config
+**Status:** Shipped, scoped to same-workflow tool-calling
+(`docs/superpowers/specs/2026-09-18-r8r-plan5-ai-agent-design.md`,
+`docs/superpowers/plans/2026-09-18-r8r-plan5-ai-agent.md`). The last
+unbuilt major roadmap feature — everything else (Plans 2/3/4/6, 7.1) was
+already shipped before this one. Both providers landed in v1 (the
+brainstorm's explicit scope call, rather than shipping one first):
+`AnthropicClient` (Messages API, token counting via Anthropic's own
+hosted `count_tokens` endpoint) and `OpenAiClient` (Chat Completions
+shape, local `tiktoken-rs` counting). Tools are declared inline as JSON
+on the Agent node's own `parameters.tools` — no canvas/connection-model
+changes, no frontend changes at all (verified by the final review: node
+parameter editing and the credential picker already work generically for
+any node). Tool-calling reaches another node type via a new, narrow
+`ToolExecutor` trait on `NodeExecutionContext`, not a `Node` trait
+change — every other of the 14 existing node types is untouched.
+Sub-workflow-as-tool (5.2.1.2) was deliberately descoped to v1 during
+brainstorming — a genuinely separate capability (cross-workflow
+invocation, its own recursion question) that doesn't exist in this
+codebase at all yet, deferred to its own future plan the same way
+Telegram webhook mode was deferred.
 
-### 5.2 Tool-Calling Loop
+Plan 5's final whole-branch review (Opus, independently re-ran the full
+suite and traced the 6-task tool-call round trip end-to-end rather than
+trusting the per-task reviews) found 4 Important issues before merge,
+fixed in one wave and re-verified clean on 4 of 5 points: parallel tool
+calls (a single turn returning more than one tool call) were serializing
+as multiple separate Anthropic messages instead of one grouped message,
+a real gap against strict role-alternation-enforcing API proxies, fixed
+by grouping consecutive tool results into a single message; an
+assistant's own text accompanying a tool call was being silently
+discarded rather than preserved in conversation history, degrading
+multi-turn coherence, fixed by widening `ProviderResponse::ToolCalls` to
+carry the text; a stale line in `docs/adding-a-node.md`; and dead test
+scaffolding that was the repo's only two compiler warnings. One residual
+(5 further stale doc line-citations the fix wave's own text missed) was
+fixed directly post-review rather than spending a second review round on
+a docs-only, zero-code-impact correction.
+
+### 5.1 LLM Provider Clients — **shipped**
+- 5.1.1 Anthropic-compatible HTTP client — done (`src/llm/anthropic.rs`)
+  - 5.1.1.1 Request/response types for the Messages API — done (raw `serde_json::Value` navigation, matching this codebase's existing HTTP-node convention — no typed API structs anywhere)
+  - 5.1.1.2 Decide streaming vs. non-streaming scope for v1 — resolved: non-streaming only. r8r's execution model is fully synchronous (one HTTP response per run) and Plan 7.1's WebSocket only streams node-level events, not tokens — nothing would consume a stream
+- 5.1.2 OpenAI-compatible HTTP client — done (`src/llm/openai.rs`; configurable base URL for self-hosted/local-model compatibility)
+- 5.1.3 Provider abstraction — done (`ProviderClient` trait, `src/llm/mod.rs`; provider selection via the Agent node's own `parameters.provider`, credential resolution reuses the existing generic `auth.credential_id` mechanism with zero new code)
+
+### 5.2 Tool-Calling Loop — **shipped, same-workflow only**
 - 5.2.1 Tool exposure
-  - 5.2.1.1 Expose other workflow nodes as callable tools (map Node parameter schema → tool schema)
-  - 5.2.1.2 Expose sub-workflows as callable tools
-- 5.2.2 Loop control
-  - 5.2.2.1 Multi-turn tool-use loop with a max-iteration cap
-  - 5.2.2.2 Error handling when a tool node fails mid-agent-run
+  - 5.2.1.1 Expose other workflow nodes as callable tools — done, but not via "map Node parameter schema → tool schema" as originally phrased (this codebase has no per-node parameter schema system at all, confirmed absent during brainstorming). Instead: inline JSON tool declarations on the Agent node itself (`name`, `description`, `node_type`, `argument_schema`, `base_parameters`), each hand-authored by the workflow author — the model's arguments merge over `base_parameters` and dispatch via the new `ToolExecutor` trait
+  - 5.2.1.2 Expose sub-workflows as callable tools — **deliberately deferred**, own future plan (see Status above)
+- 5.2.2 Loop control — done (`src/nodes/agent.rs::run_agent_loop`)
+  - 5.2.2.1 Multi-turn tool-use loop with a max-iteration cap — done (`max_iterations` parameter, default 10; exceeding it without a final response is a hard error, never a silently truncated answer)
+  - 5.2.2.2 Error handling when a tool node fails mid-agent-run — done (a failed tool call becomes a `ToolResult{is_error: true}` fed back to the model, which gets to see and react to the failure, rather than aborting the run; an unknown tool name gets the same treatment, caught before ever reaching the tool executor)
 
-### 5.3 Conversational Memory
-- 5.3.1 Per-execution buffer
-  - 5.3.1.1 Short-term memory scoped to a single execution, not persisted across executions (per spec's v1 scope)
-  - 5.3.1.2 Token/size budget for the memory buffer
+### 5.3 Conversational Memory — **shipped**
+- 5.3.1 Per-execution buffer — done
+  - 5.3.1.1 Short-term memory scoped to a single execution, not persisted across executions (per spec's v1 scope) — done
+  - 5.3.1.2 Token/size budget for the memory buffer — done, with REAL per-provider token counts (not an approximation) — Anthropic's own hosted `count_tokens` endpoint, OpenAI via local `tiktoken-rs`. Trims whole tool-call/result turn units from the oldest end of history when over budget, re-checking after each drop; never drops the original seed message
 
-### 5.4 Agent Node Wiring
-- 5.4.1 Node implementation
-  - 5.4.1.1 System prompt, model/provider, tool list as node parameters
-  - 5.4.1.2 Register in `NodeRegistry` alongside existing nodes
+### 5.4 Agent Node Wiring — **shipped**
+- 5.4.1 Node implementation — done (`src/nodes/agent.rs::AgentNode`, `type_name() -> "ai.agent"`)
+  - 5.4.1.1 System prompt, model/provider, tool list as node parameters — done
+  - 5.4.1.2 Register in `NodeRegistry` alongside existing nodes — done
 
 ---
 
