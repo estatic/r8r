@@ -8,7 +8,7 @@ needed), registration, and tests.
 
 ## 1. The `Node` trait
 
-Every node type implements the `Node` trait defined in `src/node.rs:25-44`:
+Every node type implements the `Node` trait defined in `src/node.rs:52-71`:
 
 ```rust
 #[async_trait]
@@ -28,7 +28,7 @@ pub trait Node: Send + Sync {
   `"core.httpRequest"`). This is a plain method, not `const`, but every real node
   implements it as a one-line literal return.
 - **`resolves_parameters()`** has a default (`true`) that is correct for nearly
-  every node — see the doc comment at `src/node.rs:29-38`. It controls whether
+  every node — see the doc comment at `src/node.rs:56-65`. It controls whether
   the engine runs the node's `parameters` through the expression engine
   (`expr::resolve_parameters`, `{{ }}` interpolation) before calling `execute()`.
   Override it to `false` only when a "parameter" is really verbatim source/text
@@ -86,7 +86,7 @@ this pattern (e.g. `missing_chat_id_returns_error` at
 pub type NodeOutput = Vec<Vec<Item>>;
 ```
 
-(`src/node.rs:18`.) The outer `Vec` is indexed by **output port**; the inner
+(`src/node.rs:45`.) The outer `Vec` is indexed by **output port**; the inner
 `Vec<Item>` is the items flowing out of that port. A node with a single output
 port returns `Ok(vec![items])` — one element in the outer vec. A node with
 multiple output ports (e.g. `if_node.rs`'s true/false branches) returns
@@ -171,7 +171,7 @@ JSON object (`serde_json::json!({})`) when there's no binary payload to attach.
 
 ## 3. Error handling conventions
 
-`NodeError` is a small enum with a single variant today (`src/node.rs:12-16`):
+`NodeError` is a small enum with a single variant today (`src/node.rs:39-43`):
 
 ```rust
 #[derive(Debug, thiserror::Error)]
@@ -317,7 +317,7 @@ additions, both already present for the Telegram node:
    registry.register(Box::new(telegram_send_message::TelegramSendMessageNode));
    ```
 
-`NodeRegistry::register` (`src/node.rs:56-58`) keys the registry by
+`NodeRegistry::register` (`src/node.rs:83-85`) keys the registry by
 `node.type_name()`, so the node becomes reachable under
 `"telegram.sendMessage"` — whatever string your `type_name()` returns — the
 moment `register_all()` runs. There is no other registration step; a node not
