@@ -34,7 +34,7 @@ pub struct ToolDefinition {
 #[derive(Debug, Clone)]
 pub enum ProviderResponse {
     Text(String),
-    ToolCalls(Vec<ToolCall>),
+    ToolCalls { text: Option<String>, calls: Vec<ToolCall> },
 }
 
 #[async_trait::async_trait]

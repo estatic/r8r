@@ -73,6 +73,30 @@ impl AnthropicClient {
         }
     }
 
+    fn messages_to_json(messages: &[LlmMessage]) -> Vec<serde_json::Value> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < messages.len() {
+            if matches!(messages[i], LlmMessage::ToolResult { .. }) {
+                let mut blocks = Vec::new();
+                while let Some(LlmMessage::ToolResult { tool_call_id, content, is_error }) = messages.get(i) {
+                    blocks.push(serde_json::json!({
+                        "type": "tool_result",
+                        "tool_use_id": tool_call_id,
+                        "content": content,
+                        "is_error": is_error
+                    }));
+                    i += 1;
+                }
+                out.push(serde_json::json!({"role": "user", "content": blocks}));
+            } else {
+                out.push(Self::message_to_json(&messages[i]));
+                i += 1;
+            }
+        }
+        out
+    }
+
     fn build_request_body(
         &self,
         system_prompt: &str,
@@ -84,7 +108,7 @@ impl AnthropicClient {
         let mut body = serde_json::json!({
             "model": model,
             "system": system_prompt,
-            "messages": messages.iter().map(Self::message_to_json).collect::<Vec<_>>(),
+            "messages": Self::messages_to_json(messages),
         });
         if include_max_tokens {
             body["max_tokens"] = serde_json::json!(MAX_TOKENS);
@@ -166,7 +190,8 @@ impl ProviderClient for AnthropicClient {
         }
 
         if !tool_calls.is_empty() {
-            Ok(ProviderResponse::ToolCalls(tool_calls))
+            let text = if text.is_empty() { None } else { Some(text) };
+            Ok(ProviderResponse::ToolCalls { text, calls: tool_calls })
         } else {
             Ok(ProviderResponse::Text(text))
         }
@@ -256,7 +281,7 @@ mod tests {
             .unwrap();
 
         match response {
-            ProviderResponse::ToolCalls(calls) => {
+            ProviderResponse::ToolCalls { text: _, calls } => {
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0].name, "fetch_weather");
                 assert_eq!(calls[0].arguments, serde_json::json!({"city": "Warsaw"}));
@@ -339,5 +364,47 @@ mod tests {
             ProviderResponse::Text(text) => assert_eq!(text, "It's sunny."),
             other => panic!("expected Text, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn parallel_tool_results_are_grouped_into_a_single_user_message() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/messages"))
+            .and(body_partial_json(serde_json::json!({
+                "messages": [
+                    {"role": "user", "content": "check two things"},
+                    {"role": "assistant", "content": [
+                        {"type": "tool_use", "id": "t1", "name": "a", "input": {}},
+                        {"type": "tool_use", "id": "t2", "name": "b", "input": {}}
+                    ]},
+                    {"role": "user", "content": [
+                        {"type": "tool_result", "tool_use_id": "t1", "content": "result-a", "is_error": false},
+                        {"type": "tool_result", "tool_use_id": "t2", "content": "result-b", "is_error": false}
+                    ]}
+                ]
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "id": "msg_x", "type": "message", "role": "assistant",
+                "content": [{"type": "text", "text": "done"}], "stop_reason": "end_turn"
+            })))
+            .mount(&server)
+            .await;
+
+        let client = AnthropicClient::with_base_url(server.uri());
+        let messages = vec![
+            LlmMessage::User { content: "check two things".into() },
+            LlmMessage::Assistant {
+                content: None,
+                tool_calls: vec![
+                    ToolCall { id: "t1".into(), name: "a".into(), arguments: serde_json::json!({}) },
+                    ToolCall { id: "t2".into(), name: "b".into(), arguments: serde_json::json!({}) },
+                ],
+            },
+            LlmMessage::ToolResult { tool_call_id: "t1".into(), content: "result-a".into(), is_error: false },
+            LlmMessage::ToolResult { tool_call_id: "t2".into(), content: "result-b".into(), is_error: false },
+        ];
+        let response = client.send_message("sys", &messages, &[], "claude-opus-5", "test-key").await.unwrap();
+        assert!(matches!(response, ProviderResponse::Text(t) if t == "done"));
     }
 }

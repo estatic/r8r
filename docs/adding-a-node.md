@@ -40,16 +40,23 @@ pub trait Node: Send + Sync {
 
 ### `NodeExecutionContext`
 
-Defined at `src/node.rs:5-10`:
+Defined at `src/node.rs:5-11`:
 
 ```rust
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct NodeExecutionContext {
     pub parameters: serde_json::Value,
     pub input_items: Vec<Item>,
     pub credentials: std::collections::HashMap<uuid::Uuid, serde_json::Value>,
+    pub tool_executor: Option<std::sync::Arc<dyn ToolExecutor>>,
 }
 ```
+
+Note the derive is only `Clone, Default` — `Debug` is hand-written separately
+(`src/node.rs:13-22`) rather than derived, because `tool_executor`'s type
+(`Option<Arc<dyn ToolExecutor>>`) doesn't implement `Debug` on its own; the
+hand-written impl prints a placeholder (`"<tool_executor>"`) for that field
+instead of the trait object itself.
 
 - **`parameters`** — the node's configured parameters as a `serde_json::Value`
   (already expression-resolved, unless `resolves_parameters()` was overridden
@@ -60,11 +67,18 @@ pub struct NodeExecutionContext {
 - **`credentials`** — a map from credential UUID to the credential's decrypted
   data (`serde_json::Value`), pre-populated for the whole run before any node
   executes. See §4 below for how this gets filled in and how to use it.
+- **`tool_executor`** — an optional handle letting a node invoke another
+  registered node type mid-execution (used only by `ai.agent`, the mechanism
+  behind its tool-calling loop; see `src/node.rs:24-30` for the full rationale).
+  Every other node type ignores this field entirely. When constructing a
+  `NodeExecutionContext` in a test, pass `tool_executor: None` explicitly or
+  use `..Default::default()`, which sets it to `None` for you.
 
-The struct derives `Default`, so tests that don't need credentials can build a
-context with `..Default::default()` — every test in `telegram_send_message.rs`
-that doesn't set `credentials` explicitly uses this pattern (e.g.
-`missing_chat_id_returns_error` at `src/nodes/telegram_send_message.rs:200-210`).
+The struct derives `Default`, so tests that don't need credentials (or a
+`tool_executor`) can build a context with `..Default::default()` — every test
+in `telegram_send_message.rs` that doesn't set `credentials` explicitly uses
+this pattern (e.g. `missing_chat_id_returns_error` at
+`src/nodes/telegram_send_message.rs:200-210`).
 
 ### `NodeOutput`
 

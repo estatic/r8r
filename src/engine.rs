@@ -869,22 +869,11 @@ mod tests {
         assert!(spy2.calls()[3].starts_with("errored:set1:"));
     }
 
-    struct SpyToolExecutor {
-        calls: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
-    }
-
-    impl SpyToolExecutor {
-        fn new() -> Self {
-            Self { calls: std::sync::Mutex::new(Vec::new()) }
-        }
-    }
-
-    #[async_trait::async_trait]
-    impl ToolExecutor for SpyToolExecutor {
-        async fn call_tool(&self, node_type: &str, parameters: serde_json::Value) -> Result<crate::node::NodeOutput, crate::node::NodeError> {
-            self.calls.lock().unwrap().push((node_type.to_string(), parameters.clone()));
-            Ok(vec![vec![Item { json: serde_json::json!({"tool": "called"}), binary: serde_json::json!({}) }]])
-        }
+    #[tokio::test]
+    async fn engine_tool_executor_errors_on_an_unknown_node_type() {
+        let tool_executor = EngineToolExecutor::new(registry(), HashMap::new());
+        let result = tool_executor.call_tool("does.not.exist", serde_json::json!({})).await;
+        assert!(matches!(result, Err(crate::node::NodeError::ExecutionFailed(_))));
     }
 
     #[tokio::test]

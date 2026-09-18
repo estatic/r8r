@@ -139,7 +139,8 @@ impl ProviderClient for OpenAiClient {
                         }
                     })
                     .collect();
-                return Ok(ProviderResponse::ToolCalls(tool_calls));
+                let text = message.get("content").and_then(|v| v.as_str()).map(|s| s.to_string());
+                return Ok(ProviderResponse::ToolCalls { text, calls: tool_calls });
             }
         }
 
@@ -252,7 +253,7 @@ mod tests {
             .unwrap();
 
         match response {
-            ProviderResponse::ToolCalls(calls) => {
+            ProviderResponse::ToolCalls { text: _, calls } => {
                 assert_eq!(calls.len(), 1);
                 assert_eq!(calls[0].id, "call_1");
                 assert_eq!(calls[0].name, "fetch_weather");

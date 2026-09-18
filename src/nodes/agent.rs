@@ -155,8 +155,8 @@ pub(crate) async fn run_agent_loop(
                     binary: serde_json::json!({}),
                 }]]);
             }
-            ProviderResponse::ToolCalls(calls) => {
-                messages.push(LlmMessage::Assistant { content: None, tool_calls: calls.clone() });
+            ProviderResponse::ToolCalls { text, calls } => {
+                messages.push(LlmMessage::Assistant { content: text, tool_calls: calls.clone() });
                 for call in &calls {
                     tool_calls_made += 1;
                     let Some(decl) = tool_decls.iter().find(|t| t.name == call.name) else {
@@ -343,7 +343,7 @@ mod tests {
     async fn a_successful_tool_call_feeds_its_result_back_and_the_loop_continues() {
         let provider = ScriptedProvider {
             responses: Mutex::new(vec![
-                ProviderResponse::ToolCalls(vec![ToolCall { id: "t1".into(), name: "fetch".into(), arguments: serde_json::json!({"x": 1}) }]),
+                ProviderResponse::ToolCalls { text: None, calls: vec![ToolCall { id: "t1".into(), name: "fetch".into(), arguments: serde_json::json!({"x": 1}) }] },
                 ProviderResponse::Text("Done.".into()),
             ]),
         };
@@ -355,7 +355,7 @@ mod tests {
         let tools = serde_json::json!([{
             "name": "fetch", "description": "fetch a thing", "node_type": "core.httpRequest",
             "argument_schema": {"type": "object", "properties": {"x": {"type": "integer"}}, "required": ["x"]},
-            "base_parameters": {"method": "GET"}
+            "base_parameters": {"method": "GET", "x": 0}
         }]);
 
         let output = run_agent_loop(&provider, "claude-opus-5", "key", "You are helpful.", "go".into(), &tools, 10, None, &ctx)
@@ -374,7 +374,7 @@ mod tests {
     async fn a_failing_tool_call_becomes_a_tool_result_and_the_run_continues() {
         let provider = ScriptedProvider {
             responses: Mutex::new(vec![
-                ProviderResponse::ToolCalls(vec![ToolCall { id: "t1".into(), name: "fetch".into(), arguments: serde_json::json!({}) }]),
+                ProviderResponse::ToolCalls { text: None, calls: vec![ToolCall { id: "t1".into(), name: "fetch".into(), arguments: serde_json::json!({}) }] },
                 ProviderResponse::Text("I couldn't fetch that.".into()),
             ]),
         };
@@ -400,7 +400,7 @@ mod tests {
 
     #[tokio::test]
     async fn exceeding_max_iterations_without_a_final_response_is_a_hard_error() {
-        let always_tool_calls = ProviderResponse::ToolCalls(vec![ToolCall { id: "t1".into(), name: "fetch".into(), arguments: serde_json::json!({}) }]);
+        let always_tool_calls = ProviderResponse::ToolCalls { text: None, calls: vec![ToolCall { id: "t1".into(), name: "fetch".into(), arguments: serde_json::json!({}) }] };
         let provider = ScriptedProvider {
             responses: Mutex::new(vec![always_tool_calls; 3]),
         };
@@ -441,7 +441,7 @@ mod tests {
     async fn an_unknown_tool_name_becomes_a_tool_result_not_a_hard_failure() {
         let provider = ScriptedProvider {
             responses: Mutex::new(vec![
-                ProviderResponse::ToolCalls(vec![ToolCall { id: "t1".into(), name: "does_not_exist".into(), arguments: serde_json::json!({}) }]),
+                ProviderResponse::ToolCalls { text: None, calls: vec![ToolCall { id: "t1".into(), name: "does_not_exist".into(), arguments: serde_json::json!({}) }] },
                 ProviderResponse::Text("Never mind.".into()),
             ]),
         };
@@ -483,8 +483,8 @@ mod tests {
 
         let provider = CountingProvider {
             responses: Mutex::new(vec![
-                ProviderResponse::ToolCalls(vec![ToolCall { id: "t1".into(), name: "fetch".into(), arguments: serde_json::json!({}) }]),
-                ProviderResponse::ToolCalls(vec![ToolCall { id: "t2".into(), name: "fetch".into(), arguments: serde_json::json!({}) }]),
+                ProviderResponse::ToolCalls { text: None, calls: vec![ToolCall { id: "t1".into(), name: "fetch".into(), arguments: serde_json::json!({}) }] },
+                ProviderResponse::ToolCalls { text: None, calls: vec![ToolCall { id: "t2".into(), name: "fetch".into(), arguments: serde_json::json!({}) }] },
                 ProviderResponse::Text("Done.".into()),
             ]),
             counts_seen: Mutex::new(Vec::new()),
@@ -514,5 +514,56 @@ mod tests {
         assert!(counts.contains(&30), "expected an over-budget reading triggering a trim, got {counts:?}");
         assert_eq!(*counts.last().unwrap(), 10, "history must be back under budget by the final pre-turn check; got {counts:?}");
         assert!(counts.len() >= 4, "expected repeated count_tokens calls as trimming re-checks after each drop, got {counts:?}");
+    }
+
+    #[tokio::test]
+    async fn assistant_text_accompanying_a_tool_call_is_preserved_in_history() {
+        struct CapturingProvider {
+            responses: Mutex<Vec<ProviderResponse>>,
+            seen_messages: Mutex<Vec<Vec<LlmMessage>>>,
+        }
+        #[async_trait::async_trait]
+        impl ProviderClient for CapturingProvider {
+            async fn send_message(&self, _: &str, messages: &[LlmMessage], _: &[ToolDefinition], _: &str, _: &str) -> Result<ProviderResponse, NodeError> {
+                self.seen_messages.lock().unwrap().push(messages.to_vec());
+                Ok(self.responses.lock().unwrap().remove(0))
+            }
+            async fn count_tokens(&self, _: &str, _: &[LlmMessage], _: &str, _: &str) -> Result<usize, NodeError> {
+                Ok(0)
+            }
+        }
+
+        let provider = CapturingProvider {
+            responses: Mutex::new(vec![
+                ProviderResponse::ToolCalls {
+                    text: Some("Let me check that for you.".into()),
+                    calls: vec![ToolCall { id: "t1".into(), name: "fetch".into(), arguments: serde_json::json!({}) }],
+                },
+                ProviderResponse::Text("Done.".into()),
+            ]),
+            seen_messages: Mutex::new(Vec::new()),
+        };
+        let spy = std::sync::Arc::new(SpyToolExecutor {
+            calls: Mutex::new(Vec::new()),
+            result: Ok(vec![vec![]]),
+        });
+        let ctx = ctx_with_tool_executor(spy);
+        let tools = serde_json::json!([{
+            "name": "fetch", "description": "fetch", "node_type": "core.httpRequest",
+            "argument_schema": {"type": "object", "properties": {}}, "base_parameters": {}
+        }]);
+
+        run_agent_loop(&provider, "claude-opus-5", "key", "sys", "go".into(), &tools, 10, None, &ctx)
+            .await
+            .unwrap();
+
+        // The second send_message call's message history must contain the
+        // assistant's text from the first turn, not None.
+        let seen = provider.seen_messages.lock().unwrap();
+        let second_call_messages = &seen[1];
+        let has_preserved_text = second_call_messages.iter().any(|m| {
+            matches!(m, LlmMessage::Assistant { content: Some(text), .. } if text == "Let me check that for you.")
+        });
+        assert!(has_preserved_text, "assistant's accompanying text must survive into the next turn's history, got: {second_call_messages:?}");
     }
 }
