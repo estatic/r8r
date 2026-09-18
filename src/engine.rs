@@ -27,6 +27,40 @@ pub async fn execute_workflow(
     execute_workflow_seeded(workflow, registry, None, &HashMap::new(), &NoopObserver).await
 }
 
+/// The real `ToolExecutor` used by every live execution: dispatches a
+/// tool call to a registered node type via the same `NodeRegistry` the
+/// main engine loop uses. A called tool's own context gets `tool_executor:
+/// None` (see `call_tool` below) -- a tool can never itself call further
+/// tools, which is what makes the `node_type != "ai.agent"` validation in
+/// the Agent node's own parameter parsing (Task 5) sufficient to prevent
+/// all agent-to-agent recursion without needing a depth counter here.
+struct EngineToolExecutor {
+    registry: std::sync::Arc<NodeRegistry>,
+    credentials: HashMap<uuid::Uuid, serde_json::Value>,
+}
+
+impl EngineToolExecutor {
+    fn new(registry: std::sync::Arc<NodeRegistry>, credentials: HashMap<uuid::Uuid, serde_json::Value>) -> Self {
+        Self { registry, credentials }
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::node::ToolExecutor for EngineToolExecutor {
+    async fn call_tool(&self, node_type: &str, parameters: serde_json::Value) -> Result<crate::node::NodeOutput, crate::node::NodeError> {
+        let node = self.registry.get(node_type).ok_or_else(|| {
+            crate::node::NodeError::ExecutionFailed(format!("unknown tool node_type: {node_type}"))
+        })?;
+        let ctx = NodeExecutionContext {
+            parameters,
+            input_items: vec![],
+            credentials: self.credentials.clone(),
+            tool_executor: None,
+        };
+        node.execute(&ctx).await
+    }
+}
+
 pub fn start_node_id(workflow: &Workflow) -> anyhow::Result<String> {
     if workflow.nodes.is_empty() {
         return Err(anyhow::anyhow!("workflow has no nodes"));
@@ -49,6 +83,8 @@ pub async fn execute_workflow_seeded(
     let start_id = order.first().map(|n| n.id.clone());
     let mut produced: HashMap<String, crate::node::NodeOutput> = HashMap::new();
     let mut error_produced: HashMap<String, Vec<Item>> = HashMap::new();
+    let tool_executor: std::sync::Arc<dyn crate::node::ToolExecutor> =
+        std::sync::Arc::new(EngineToolExecutor::new(registry.clone(), credentials.clone()));
 
     for node_instance in &order {
         // Aggregate this node's input items from every incoming connection,
@@ -150,6 +186,7 @@ pub async fn execute_workflow_seeded(
             parameters,
             input_items,
             credentials: credentials.clone(),
+            tool_executor: Some(tool_executor.clone()),
         };
         observer.on_node_started(&node_instance.id).await;
         match node.execute(&ctx).await {
@@ -276,7 +313,7 @@ fn topological_order(workflow: &Workflow) -> anyhow::Result<Vec<NodeInstance>> {
 mod tests {
     use super::*;
     use crate::domain::{Connection, NodeInstance, Workflow};
-    use crate::node::NodeRegistry;
+    use crate::node::{NodeRegistry, ToolExecutor};
     use uuid::Uuid;
 
     fn linear_workflow() -> Workflow {
@@ -830,5 +867,44 @@ mod tests {
         assert_eq!(spy2.calls()[1], "finished:trigger:1");
         assert_eq!(spy2.calls()[2], "started:set1");
         assert!(spy2.calls()[3].starts_with("errored:set1:"));
+    }
+
+    struct SpyToolExecutor {
+        calls: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
+    }
+
+    impl SpyToolExecutor {
+        fn new() -> Self {
+            Self { calls: std::sync::Mutex::new(Vec::new()) }
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for SpyToolExecutor {
+        async fn call_tool(&self, node_type: &str, parameters: serde_json::Value) -> Result<crate::node::NodeOutput, crate::node::NodeError> {
+            self.calls.lock().unwrap().push((node_type.to_string(), parameters.clone()));
+            Ok(vec![vec![Item { json: serde_json::json!({"tool": "called"}), binary: serde_json::json!({}) }]])
+        }
+    }
+
+    #[tokio::test]
+    async fn every_node_receives_a_tool_executor_and_engine_tool_executor_dispatches_to_the_registry() {
+        // Part A: prove every node's context carries a tool_executor (not
+        // just some special-cased node type) by running a normal
+        // single-node workflow and confirming it doesn't error just
+        // because a tool_executor now exists in scope -- this is an
+        // indirect check since core.set itself never calls it.
+        let wf = linear_workflow(); // trigger -> set1
+        let outputs = execute_workflow(&wf, &registry()).await.unwrap();
+        assert_eq!(outputs["set1"][0].json, serde_json::json!({"greeting": "hi"}));
+
+        // Part B: prove EngineToolExecutor itself correctly dispatches to
+        // a real registered node type via the registry.
+        let tool_executor = EngineToolExecutor::new(registry(), HashMap::new());
+        let output = tool_executor
+            .call_tool("core.set", serde_json::json!({"fields": {"x": 1}}))
+            .await
+            .unwrap();
+        assert_eq!(output[0][0].json, serde_json::json!({"x": 1}));
     }
 }

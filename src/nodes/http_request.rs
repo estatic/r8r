@@ -206,6 +206,7 @@ mod tests {
             }),
             input_items: vec![],
             credentials,
+            tool_executor: None,
         };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result[0][0].json, serde_json::json!({"authed": true}));

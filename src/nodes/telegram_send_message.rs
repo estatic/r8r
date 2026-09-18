@@ -169,6 +169,7 @@ mod tests {
             }),
             input_items: vec![],
             credentials,
+            tool_executor: None,
         };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result[0][0].json["result"]["message_id"], 42);
@@ -201,6 +202,7 @@ mod tests {
             }),
             input_items: vec![],
             credentials,
+            tool_executor: None,
         };
         let result = node.execute(&ctx).await;
         match result {
@@ -263,6 +265,7 @@ mod tests {
             }),
             input_items: vec![],
             credentials,
+            tool_executor: None,
         };
         let result = node.execute(&ctx).await;
         match result {

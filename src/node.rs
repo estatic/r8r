@@ -2,11 +2,38 @@ use crate::domain::Item;
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Clone, Default)]
 pub struct NodeExecutionContext {
     pub parameters: serde_json::Value,
     pub input_items: Vec<Item>,
     pub credentials: std::collections::HashMap<uuid::Uuid, serde_json::Value>,
+    pub tool_executor: Option<std::sync::Arc<dyn ToolExecutor>>,
+}
+
+impl std::fmt::Debug for NodeExecutionContext {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeExecutionContext")
+            .field("parameters", &self.parameters)
+            .field("input_items", &self.input_items)
+            .field("credentials", &self.credentials)
+            .field("tool_executor", &self.tool_executor.as_ref().map(|_| "<tool_executor>"))
+            .finish()
+    }
+}
+
+/// Lets a node (in practice, only `ai.agent`) invoke another registered
+/// node type mid-execution -- the mechanism behind tool-calling. Kept
+/// deliberately narrow (one method, no registry/workflow access exposed
+/// directly) so every other node type is completely unaffected by its
+/// existence; see `docs/superpowers/specs/2026-09-18-r8r-plan5-ai-agent-design.md`
+/// section 3 for the full rationale, including why this is `Arc<dyn
+/// ToolExecutor>` (a 'static trait object) rather than a borrowed
+/// reference: a borrowed reference would need a lifetime parameter on
+/// `NodeExecutionContext` itself, which would then need to appear on
+/// every `Node::execute()` signature across all existing node types.
+#[async_trait::async_trait]
+pub trait ToolExecutor: Send + Sync {
+    async fn call_tool(&self, node_type: &str, parameters: serde_json::Value) -> Result<NodeOutput, NodeError>;
 }
 
 #[derive(Debug, thiserror::Error)]
