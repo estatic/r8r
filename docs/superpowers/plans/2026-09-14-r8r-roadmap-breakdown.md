@@ -247,9 +247,42 @@ spec/plan-doc threshold): `GET /rest/workflows/:id/executions?limit=N`
 (newest-first, default 50, capped at 200 server-side) plus an index on
 `executions.workflow_id`, and a "History" selector in
 `ExecutionResultsPanel` that swaps between past runs' already-fetched
-per-node output. 6.3.1 (live execution status) is the sole remaining
-gap — still blocked on Plan 7's WebSocket push per the sequencing note
-below.
+per-node output. 6.3.1 (live execution status) shipped as "Plan 7.1"
+(`docs/superpowers/specs/2026-09-17-r8r-plan7-live-execution-design.md`,
+`docs/superpowers/plans/2026-09-17-r8r-plan7-live-execution.md`): a
+`GET /ws/workflows/:id/executions` WebSocket, authenticated via a
+first-message `{"token": "<jwt>"}` handshake, streams per-node
+started/finished/errored/skipped events plus a final `execution_finished`
+event over a single global broadcast channel filtered by `workflow_id`.
+`WorkflowEditorView` opens the socket on mount and fills in
+`ExecutionResultsPanel` live, with the existing synchronous
+`POST .../execute` response still landing as the authoritative final
+state. §7.1.2 (incremental per-node persistence, the other half of the
+same plan) shipped alongside it — `LiveExecutionTracker` now writes
+`node_outputs` to storage as each node completes, not only once at the
+very end, closing that half of Foundation's known gap.
+
+Plan 7.1's final whole-branch review (Opus, independently re-ran the full
+backend/frontend suites and `cargo clippy` rather than trusting the
+per-task reviews) found 4 Important issues before merge, all fixed in one
+wave and re-verified clean: a frontend identity bug where a live event
+could silently mutate a user-selected *historical* execution object (a
+live reference into the Pinia store's cached history, not just the
+in-flight one) because execution identity was tracked via a closure
+variable that could desync from the actual displayed ref; no test proved
+the single global broadcast channel's per-workflow filter actually
+isolated workflows (a real cross-workflow data-leak risk with one
+process-wide channel); the WebSocket test asserted event `type` but never
+the payload fields (`execution_id`, `node_id`, `items`) the frontend
+actually consumes; and an undocumented HTTP-contract change where
+`execute`/`webhook` now return `200` (not the prior `500`) if the run
+succeeded but the final DB persist failed — ruled to keep deliberately
+(the workflow's real side effects already happened either way) and
+documented rather than reverted. One Minor was parked, not fixed: closing
+the live results panel (`@close`) during an in-flight run can have it
+silently reappear on a later stray event, since the fix only treats
+*object* reassignment of the ref as a respected external change, not
+reassignment to `null` — cosmetic, no data loss, worth a follow-up.
 
 Plan 6a's final whole-branch review (browser-verified with Playwright
 against the built binary) found and fixed 7 issues before merge, folded
@@ -283,8 +316,8 @@ key). All fixes verified in a real browser, not just unit tests.
   - 6.2.3.1 UI to select/create a Credential for nodes that need one
 
 ### 6.3 Execution View
-- 6.3.1 Live execution status
-  - 6.3.1.1 WebSocket client subscribing to execution progress (depends on Plan 7's WebSocket push)
+- 6.3.1 Live execution status — **shipped** (Plan 7.1)
+  - 6.3.1.1 WebSocket client subscribing to execution progress (depends on Plan 7's WebSocket push) — done
 - 6.3.2 Inline JSON data preview
   - 6.3.2.1 Per-node input/output item viewer
 - 6.3.3 Execution log/replay — **shipped** (Plan 6b)
@@ -304,11 +337,11 @@ errors, and the access-control composition risk flagged during that
 review (spec §8's single-shared-workspace model plus open
 self-registration).
 
-### 7.1 Live Execution Status
-- 7.1.1 WebSocket endpoint
-  - 7.1.1.1 Push per-node start/finish/error events during a run
-- 7.1.2 Incremental persistence
-  - 7.1.2.1 Persist execution data per-node as it completes, not only the final snapshot (Foundation's known gap)
+### 7.1 Live Execution Status — **shipped**
+- 7.1.1 WebSocket endpoint — done
+  - 7.1.1.1 Push per-node start/finish/error events during a run — done (`GET /ws/workflows/:id/executions`, first-message JWT handshake, single global broadcast channel filtered by `workflow_id`)
+- 7.1.2 Incremental persistence — done
+  - 7.1.2.1 Persist execution data per-node as it completes, not only the final snapshot (Foundation's known gap) — done (`LiveExecutionTracker` in `src/execution_runner.rs`)
 
 ### 7.2 Retry Semantics
 - 7.2.1 Retry-from-failed-node
