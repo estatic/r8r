@@ -19,7 +19,13 @@ async function onSubmit() {
     await auth.register(email.value, password.value)
     router.push({ name: 'workflows' })
   } catch (e) {
-    error.value = e instanceof ApiError && e.status === 409 ? 'That email is already registered.' : 'Something went wrong. Try again.'
+    if (e instanceof ApiError && e.status === 409) {
+      error.value = 'That email is already registered.'
+    } else if (e instanceof ApiError && e.status === 403) {
+      error.value = 'Registration is closed. Ask an existing user to invite you.'
+    } else {
+      error.value = 'Something went wrong. Try again.'
+    }
   } finally {
     submitting.value = false
   }
