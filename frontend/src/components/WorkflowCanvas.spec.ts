@@ -74,7 +74,7 @@ describe('WorkflowCanvas', () => {
     expect(ids).toEqual(['0', 'error'])
   })
 
-  it('emits error: true when connecting from the error handle, error: false otherwise', async () => {
+  it('mounts successfully with a pre-loaded error-routed connection', async () => {
     stubFetch(NODE_TYPES, ['true', 'false'])
     const nodes: NodeInstance[] = [
       { id: 'a', node_type: 'core.if', position: [0, 0], parameters: {}, disabled: false },
@@ -83,7 +83,6 @@ describe('WorkflowCanvas', () => {
     const wrapper = mount(WorkflowCanvas, { props: { nodes, connections: [] } })
     await flush()
 
-    const vm = wrapper.vm as unknown as { $options: unknown }
     // Simulate VueFlow's onConnect callback directly via the exposed handler
     // is not accessible from outside; instead assert via a loaded connection
     // round-trip, which exercises the same mapping logic in flowEdges.
@@ -116,5 +115,22 @@ describe('WorkflowCanvas', () => {
     const sourceHandles = wrapper.findAll('.vue-flow__handle.source')
     // Falls back to 1 main port + 1 error handle = 2, not 2 declared + 1 = 3.
     expect(sourceHandles.length).toBe(2)
+  })
+
+  it("renders each node's icon and display name, with the raw type as a tooltip", async () => {
+    stubFetch()
+    const nodes: NodeInstance[] = [{ id: 'a', node_type: 'core.manualTrigger', position: [0, 0], parameters: {}, disabled: false }]
+    const wrapper = mount(WorkflowCanvas, { props: { nodes, connections: [] } })
+    await flush()
+    expect(wrapper.text()).toContain('🖱️ Manual Trigger')
+    expect(wrapper.find('[title="core.manualTrigger"]').exists()).toBe(true)
+  })
+
+  it('falls back to the raw type_name for an unknown node type', async () => {
+    stubFetch()
+    const nodes: NodeInstance[] = [{ id: 'a', node_type: 'does.not.exist', position: [0, 0], parameters: {}, disabled: false }]
+    const wrapper = mount(WorkflowCanvas, { props: { nodes, connections: [] } })
+    await flush()
+    expect(wrapper.text()).toContain('does.not.exist')
   })
 })
