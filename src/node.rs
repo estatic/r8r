@@ -44,11 +44,6 @@ pub enum NodeError {
 
 pub type NodeOutput = Vec<Vec<Item>>;
 
-/// Sentinel `Connection.from_output` value identifying a node's error output.
-/// Never a valid index into a `NodeOutput`'s ports — routed separately by the
-/// engine (see Task 6), not looked up via `NodeOutput`'s `Vec` indexing.
-pub const ERROR_OUTPUT: usize = usize::MAX;
-
 /// Groups node types for the add-node menu and canvas styling.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -191,13 +186,6 @@ mod tests {
     fn registry_returns_none_for_unknown_type() {
         let registry = NodeRegistry::new();
         assert!(registry.get("does.not.exist").is_none());
-    }
-
-    #[test]
-    fn error_output_is_distinct_from_any_real_port_index() {
-        // ERROR_OUTPUT must never collide with a legitimate small port index like 0, 1, 2.
-        assert_ne!(ERROR_OUTPUT, 0);
-        assert_ne!(ERROR_OUTPUT, 1);
     }
 
     #[test]

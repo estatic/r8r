@@ -449,7 +449,7 @@ mod poller_tests {
                 },
                 downstream,
             ],
-            connections: vec![Connection { from_node: "trigger".into(), from_output: 0, to_node: connect_to.into(), to_input: 0 }],
+            connections: vec![Connection { from_node: "trigger".into(), from_output: 0, to_node: connect_to.into(), to_input: 0, error: false }],
             created_at: now,
             updated_at: now,
         }

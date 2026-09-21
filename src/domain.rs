@@ -19,6 +19,8 @@ pub struct Connection {
     pub from_output: usize,
     pub to_node: String,
     pub to_input: usize,
+    #[serde(default)]
+    pub error: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -166,5 +168,17 @@ mod tests {
         // The actual secret value must never appear anywhere in the serialized summary.
         let serialized = serde_json::to_string(&summary).unwrap();
         assert!(!serialized.contains("super-secret-value"));
+    }
+
+    #[test]
+    fn connection_without_an_error_field_deserializes_as_false() {
+        let json = serde_json::json!({
+            "from_node": "a",
+            "from_output": 0,
+            "to_node": "b",
+            "to_input": 0
+        });
+        let conn: Connection = serde_json::from_value(json).unwrap();
+        assert!(!conn.error);
     }
 }

@@ -150,7 +150,7 @@ mod tests {
                     disabled: false,
                 },
             ],
-            connections: vec![Connection { from_node: "trigger".into(), from_output: 0, to_node: "set1".into(), to_input: 0 }],
+            connections: vec![Connection { from_node: "trigger".into(), from_output: 0, to_node: "set1".into(), to_input: 0, error: false }],
             created_at: now,
             updated_at: now,
         }
@@ -293,7 +293,7 @@ mod tests {
                     disabled: false,
                 },
             ],
-            connections: vec![Connection { from_node: "trigger".into(), from_output: 0, to_node: "set1".into(), to_input: 0 }],
+            connections: vec![Connection { from_node: "trigger".into(), from_output: 0, to_node: "set1".into(), to_input: 0, error: false }],
             created_at: now,
             updated_at: now,
         }

@@ -195,6 +195,7 @@ mod tests {
                 from_output: 0,
                 to_node: "set1".into(),
                 to_input: 0,
+                error: false,
             }],
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),

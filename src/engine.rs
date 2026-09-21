@@ -90,15 +90,15 @@ pub async fn execute_workflow_seeded(
         // Aggregate this node's input items from every incoming connection,
         // pulling each upstream node's items from the SPECIFIC from_output
         // port index that connection names (not just port 0). A connection
-        // whose from_output is ERROR_OUTPUT is routed via the separate
-        // error_produced side-map instead, since ERROR_OUTPUT (usize::MAX)
-        // can never be a valid Vec index into a NodeOutput.
+        // marked `error` is routed via the separate error_produced side-map
+        // instead, since error output isn't a real port index into a
+        // NodeOutput.
         let mut input_items: Vec<Item> = Vec::new();
         for conn in &workflow.connections {
             if conn.to_node != node_instance.id {
                 continue;
             }
-            if conn.from_output == crate::node::ERROR_OUTPUT {
+            if conn.error {
                 if let Some(items) = error_produced.get(&conn.from_node) {
                     input_items.extend(items.iter().cloned());
                 }
@@ -196,9 +196,10 @@ pub async fn execute_workflow_seeded(
                 produced.insert(node_instance.id.clone(), output);
             }
             Err(e) => {
-                let has_error_route = workflow.connections.iter().any(|c| {
-                    c.from_node == node_instance.id && c.from_output == crate::node::ERROR_OUTPUT
-                });
+                let has_error_route = workflow
+                    .connections
+                    .iter()
+                    .any(|c| c.from_node == node_instance.id && c.error);
                 observer.on_node_errored(&node_instance.id, &e.to_string()).await;
                 if has_error_route {
                     error_produced.insert(
@@ -342,6 +343,7 @@ mod tests {
                 from_output: 0,
                 to_node: "set1".into(),
                 to_input: 0,
+                error: false,
             }],
             created_at: chrono::Utc::now(),
             updated_at: chrono::Utc::now(),
@@ -412,6 +414,7 @@ mod tests {
             from_output: 0,
             to_node: "set2".into(),
             to_input: 0,
+            error: false,
         });
         let order = topological_order(&wf).unwrap();
         assert_eq!(order[0].id, "trigger");
@@ -431,9 +434,9 @@ mod tests {
             disabled: false,
         });
         wf.connections.clear();
-        wf.connections.push(Connection { from_node: "trigger".into(), from_output: 0, to_node: "b".into(), to_input: 0 });
-        wf.connections.push(Connection { from_node: "b".into(), from_output: 0, to_node: "c".into(), to_input: 0 });
-        wf.connections.push(Connection { from_node: "c".into(), from_output: 0, to_node: "b".into(), to_input: 0 });
+        wf.connections.push(Connection { from_node: "trigger".into(), from_output: 0, to_node: "b".into(), to_input: 0, error: false });
+        wf.connections.push(Connection { from_node: "b".into(), from_output: 0, to_node: "c".into(), to_input: 0, error: false });
+        wf.connections.push(Connection { from_node: "c".into(), from_output: 0, to_node: "b".into(), to_input: 0, error: false });
 
         let result = topological_order(&wf);
         assert!(result.is_err());
@@ -442,7 +445,7 @@ mod tests {
     #[test]
     fn topological_order_rejects_dangling_connection_endpoints() {
         let mut wf = linear_workflow();
-        wf.connections.push(Connection { from_node: "ghost".into(), from_output: 0, to_node: "set1".into(), to_input: 0 });
+        wf.connections.push(Connection { from_node: "ghost".into(), from_output: 0, to_node: "set1".into(), to_input: 0, error: false });
         let result = topological_order(&wf);
         assert!(result.is_err());
     }
@@ -511,6 +514,7 @@ mod tests {
             from_output: 0,
             to_node: "set2".into(),
             to_input: 0,
+            error: false,
         });
         let outputs = execute_workflow(&wf, &registry()).await.unwrap();
         assert_eq!(outputs["set1"][0].json, serde_json::json!({"greeting": "hi"}));
@@ -537,9 +541,9 @@ mod tests {
             parameters: serde_json::json!({}),
             disabled: false,
         });
-        wf.connections.push(Connection { from_node: "trigger".into(), from_output: 0, to_node: "set2".into(), to_input: 0 });
-        wf.connections.push(Connection { from_node: "set1".into(), from_output: 0, to_node: "set3".into(), to_input: 0 });
-        wf.connections.push(Connection { from_node: "set2".into(), from_output: 0, to_node: "set3".into(), to_input: 0 });
+        wf.connections.push(Connection { from_node: "trigger".into(), from_output: 0, to_node: "set2".into(), to_input: 0, error: false });
+        wf.connections.push(Connection { from_node: "set1".into(), from_output: 0, to_node: "set3".into(), to_input: 0, error: false });
+        wf.connections.push(Connection { from_node: "set2".into(), from_output: 0, to_node: "set3".into(), to_input: 0, error: false });
 
         let outputs = execute_workflow(&wf, &registry()).await.unwrap();
         // set3 received one item from each upstream branch.
@@ -577,6 +581,7 @@ mod tests {
             from_output: 0,
             to_node: "set2".into(),
             to_input: 0,
+            error: false,
         });
         let result = execute_workflow(&wf, &registry()).await;
         assert!(result.is_err());
@@ -603,18 +608,21 @@ mod tests {
             from_output: 0,
             to_node: "b".into(),
             to_input: 0,
+            error: false,
         });
         wf.connections.push(Connection {
             from_node: "b".into(),
             from_output: 0,
             to_node: "c".into(),
             to_input: 0,
+            error: false,
         });
         wf.connections.push(Connection {
             from_node: "c".into(),
             from_output: 0,
             to_node: "b".into(),
             to_input: 0,
+            error: false,
         });
 
         // Race the call against a short timeout: a regression that reintroduces
@@ -643,6 +651,7 @@ mod tests {
             from_output: 0,
             to_node: "b".into(),
             to_input: 0,
+            error: false,
         });
 
         let result = execute_workflow(&wf, &registry()).await;
@@ -672,6 +681,7 @@ mod tests {
             from_output: 0,
             to_node: "set_final".into(),
             to_input: 0,
+            error: false,
         });
 
         let outputs = execute_workflow(&wf, &registry()).await.unwrap();
@@ -754,9 +764,10 @@ mod tests {
         });
         wf.connections.push(Connection {
             from_node: "set1".into(),
-            from_output: crate::node::ERROR_OUTPUT,
+            from_output: 0,
             to_node: "error_handler".into(),
             to_input: 0,
+            error: true,
         });
 
         let outputs = execute_workflow(&wf, &registry_with_failing_node()).await.unwrap();
@@ -815,6 +826,7 @@ mod tests {
             from_output: 0,
             to_node: "set_final".into(),
             to_input: 0,
+            error: false,
         });
 
         let spy = SpyObserver::new();
@@ -846,9 +858,10 @@ mod tests {
         });
         wf.connections.push(Connection {
             from_node: "set1".into(),
-            from_output: crate::node::ERROR_OUTPUT,
+            from_output: 0,
             to_node: "error_handler".into(),
             to_input: 0,
+            error: true,
         });
 
         let spy = SpyObserver::new();
