@@ -1852,6 +1852,21 @@ async fn websocket_streams_node_events_during_a_run_and_a_bad_token_closes_it() 
         .unwrap();
     ws.send(WsMessage::Text(serde_json::json!({"token": token}).to_string())).await.unwrap();
 
+    // `handle_execution_socket` (src/api/executions.rs) only calls
+    // `state.execution_events.subscribe()` AFTER verifying this auth frame --
+    // there's no ack sent back over the socket confirming the subscription is
+    // live. Without this wait, spawning the execute() call immediately below
+    // races that server-side subscribe(): under load (e.g. many tests
+    // running in parallel), the trivial workflow below can finish and
+    // broadcast its events before the server has subscribed, and this test
+    // then waits forever for events that already happened and were never
+    // delivered to this receiver (tokio::sync::broadcast only delivers
+    // events sent after a receiver subscribes). A short wait here is
+    // overwhelmingly longer than the actual auth-verify-then-subscribe path
+    // takes, and keeps this test decoupled from adding a new WS protocol
+    // message just to fix its own synchronization.
+    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+
     let exec_app = app.clone();
     let exec_token = token.clone();
     let exec_workflow_id = workflow_id.clone();
