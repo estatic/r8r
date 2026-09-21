@@ -226,4 +226,22 @@ mod tests {
         assert!(node.credential_types().is_empty());
         assert_eq!(node.output_ports(&serde_json::json!({})), vec!["main".to_string()]);
     }
+
+    #[test]
+    fn every_registered_node_has_non_empty_metadata_and_a_unique_display_name() {
+        let mut registry = NodeRegistry::new();
+        crate::nodes::register_all(&mut registry);
+        let mut seen_display_names = std::collections::HashSet::new();
+        for type_name in registry.type_names() {
+            let node = registry.get(type_name).expect("type_names() and get() must agree");
+            assert!(!node.display_name().is_empty(), "{type_name} has an empty display_name");
+            assert!(!node.description().is_empty(), "{type_name} has an empty description");
+            assert!(!node.icon().is_empty(), "{type_name} has an empty icon");
+            assert!(
+                seen_display_names.insert(node.display_name()),
+                "{type_name}'s display_name \"{}\" collides with another node type's",
+                node.display_name()
+            );
+        }
+    }
 }

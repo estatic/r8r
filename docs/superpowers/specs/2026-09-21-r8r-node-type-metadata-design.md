@@ -250,13 +250,17 @@ Both endpoints require auth (existing `AuthUser` extractor, matching
 
 ## 8. Testing
 
-- Per-node unit tests (colocated in each node's existing `#[cfg(test)]`
-  module) asserting `display_name()`, `category()`, and default
-  `output_ports()` — a single new test per file for the 13 nodes using
-  the trait default, plus dedicated tests for `core.if`'s fixed
-  `["true", "false"]` and `core.switch`'s case-count-dependent list
+- One registry-wide invariant test in `src/node.rs`
+  (`every_registered_node_has_non_empty_metadata_and_a_unique_display_name`)
+  iterating every type in `register_all()`, asserting non-empty
+  `display_name()`/`description()`/`icon()` and that every `display_name`
+  is unique across all types — chosen over 13 per-file tests that would
+  each just echo a string constant back at itself; this catches a real
+  bug class (copy-paste a node file, forget to change the display name)
+  that per-file tests would not. Dedicated tests for `core.if`'s fixed
+  `["true", "false"]` list and `core.switch`'s case-count-dependent list
   (empty cases → `["default"]`; 2 cases → `["case 0", "case 1",
-  "default"]`).
+  "default"]`) still live per-file in `if_node.rs`/`switch.rs`, unchanged.
 - `src/api/node_types.rs`: integration test confirming the enriched
   `/rest/node-types` response shape.
 - New integration test for `POST /rest/node-types/:type_name/output-ports`

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useCredentialsStore } from '../stores/credentials'
 import { useNodeTypesStore } from '../stores/nodeTypes'
 import type { CredentialSummary } from '../types/domain'
@@ -26,6 +26,14 @@ if (!nodeTypesStore.loaded) {
 
 const acceptedTypes = computed(
   () => nodeTypesStore.types.find((t) => t.type_name === props.nodeType)?.credential_types ?? [],
+)
+
+watch(
+  () => props.nodeType,
+  () => {
+    creating.value = false
+    newType.value = ''
+  },
 )
 
 function toggleCreating() {
