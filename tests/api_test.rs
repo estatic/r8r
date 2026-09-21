@@ -1701,7 +1701,7 @@ async fn deleting_an_executed_workflow_succeeds() {
 }
 
 #[tokio::test]
-async fn node_types_lists_registered_types() {
+async fn node_types_lists_registered_types_with_metadata() {
     let app = test_app().await;
     let token = register_and_get_token(&app, "node-types@example.com").await;
 
@@ -1718,13 +1718,60 @@ async fn node_types_lists_registered_types() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let types: Vec<String> = serde_json::from_slice(&bytes).unwrap();
-    assert!(types.contains(&"core.manualTrigger".to_string()));
-    assert!(types.contains(&"telegram.sendMessage".to_string()));
-    // Sorted.
-    let mut sorted = types.clone();
-    sorted.sort();
-    assert_eq!(types, sorted);
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let types = json.as_array().unwrap();
+    assert!(!types.is_empty());
+    let agent = types.iter().find(|t| t["type_name"] == "ai.agent").expect("ai.agent should be listed");
+    assert_eq!(agent["display_name"], "AI Agent");
+    assert_eq!(agent["category"], "ai");
+    assert_eq!(agent["credential_types"], serde_json::json!(["anthropicApi", "openaiApi"]));
+    let if_node = types.iter().find(|t| t["type_name"] == "core.if").expect("core.if should be listed");
+    assert_eq!(if_node["output_ports"], serde_json::json!(["true", "false"]));
+}
+
+#[tokio::test]
+async fn output_ports_for_switch_reflects_case_count() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "ports@example.com").await;
+
+    let body = serde_json::json!({"parameters": {"cases": [1, 2, 3]}});
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/node-types/core.switch/output-ports")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(json["output_ports"], serde_json::json!(["case 0", "case 1", "case 2", "default"]));
+}
+
+#[tokio::test]
+async fn output_ports_for_unknown_type_returns_404() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "ports2@example.com").await;
+
+    let body = serde_json::json!({"parameters": {}});
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/node-types/does.not.exist/output-ports")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
 }
 
 #[tokio::test]
