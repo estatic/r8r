@@ -7,6 +7,7 @@ export const useNodeTypesStore = defineStore('nodeTypes', {
     types: [] as NodeTypeMeta[],
     loaded: false,
     portsCache: {} as Record<string, string[]>,
+    portsInFlight: {} as Record<string, Promise<string[]>>,
   }),
   actions: {
     async fetchAll() {
@@ -18,9 +19,21 @@ export const useNodeTypesStore = defineStore('nodeTypes', {
       const key = `${typeName}:${JSON.stringify(parameters)}`
       const cached = this.portsCache[key]
       if (cached) return cached
-      const result = await api.post<{ output_ports: string[] }>(`/rest/node-types/${typeName}/output-ports`, { parameters })
-      this.portsCache[key] = result.output_ports
-      return result.output_ports
+      const inFlight = this.portsInFlight[key]
+      if (inFlight) return inFlight
+      const request = api
+        .post<{ output_ports: string[] }>(`/rest/node-types/${encodeURIComponent(typeName)}/output-ports`, { parameters })
+        .then((result) => {
+          this.portsCache[key] = result.output_ports
+          delete this.portsInFlight[key]
+          return result.output_ports
+        })
+        .catch((e) => {
+          delete this.portsInFlight[key]
+          throw e
+        })
+      this.portsInFlight[key] = request
+      return request
     },
   },
 })
