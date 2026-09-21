@@ -24,6 +24,9 @@ async fn main() -> anyhow::Result<()> {
         .ok()
         .and_then(|p| p.parse().ok())
         .unwrap_or(3000);
+    let open_registration = std::env::var("R8R_ALLOW_OPEN_REGISTRATION")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false);
 
     let storage = SqliteStorage::new(&database_url, credentials_key).await?;
     let mut registry = NodeRegistry::new();
@@ -37,6 +40,7 @@ async fn main() -> anyhow::Result<()> {
         scheduler: Arc::new(scheduler),
         trigger_registry: Arc::new(TriggerRegistry::new()),
         execution_events: tokio::sync::broadcast::channel(r8r::execution_runner::EXECUTION_EVENTS_CAPACITY).0,
+        open_registration,
     };
 
     if let Err(e) = r8r::triggers::reactivate_all(&state).await {

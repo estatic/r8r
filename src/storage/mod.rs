@@ -23,6 +23,9 @@ pub trait Storage: Send + Sync {
 
     async fn create_user(&self, user: &User) -> anyhow::Result<()>;
     async fn get_user_by_email(&self, email: &str) -> anyhow::Result<Option<User>>;
+    /// True once at least one user has ever been created -- used to gate
+    /// self-registration after the first (owner) account exists.
+    async fn any_user_exists(&self) -> anyhow::Result<bool>;
 
     async fn create_credential(&self, credential: &Credential) -> anyhow::Result<()>;
     async fn get_credential(&self, id: Uuid) -> anyhow::Result<Option<Credential>>;

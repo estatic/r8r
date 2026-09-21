@@ -21,11 +21,20 @@ async fn test_state() -> AppState {
         scheduler: Arc::new(r8r::scheduler::Scheduler::new().await.unwrap()),
         trigger_registry: Arc::new(r8r::trigger_registry::TriggerRegistry::new()),
         execution_events: tokio::sync::broadcast::channel(16).0,
+        open_registration: false,
     }
 }
 
 async fn test_app() -> axum::Router {
     r8r::api::build_router(test_state().await)
+}
+
+/// Same as `test_app()`, but with `open_registration: true` -- registration
+/// stays open even after a user already exists.
+async fn test_app_with_open_registration() -> axum::Router {
+    let mut state = test_state().await;
+    state.open_registration = true;
+    r8r::api::build_router(state)
 }
 
 /// Same as `test_app()`, but also hands back the `AppState` so a test can
@@ -92,6 +101,9 @@ impl Storage for FailingUpdateStorage {
     async fn get_user_by_email(&self, email: &str) -> anyhow::Result<Option<r8r::domain::User>> {
         self.inner.get_user_by_email(email).await
     }
+    async fn any_user_exists(&self) -> anyhow::Result<bool> {
+        self.inner.any_user_exists().await
+    }
     async fn create_credential(&self, credential: &r8r::domain::Credential) -> anyhow::Result<()> {
         self.inner.create_credential(credential).await
     }
@@ -126,6 +138,7 @@ async fn test_app_with_failing_update() -> (axum::Router, AppState, Arc<AtomicBo
         scheduler: Arc::new(r8r::scheduler::Scheduler::new().await.unwrap()),
         trigger_registry: Arc::new(r8r::trigger_registry::TriggerRegistry::new()),
         execution_events: tokio::sync::broadcast::channel(16).0,
+        open_registration: false,
     };
     (r8r::api::build_router(state.clone()), state, fail_update, fail_execution_update)
 }
@@ -164,6 +177,46 @@ async fn register_then_login_returns_tokens() {
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::OK);
+}
+
+#[tokio::test]
+async fn second_registration_is_rejected_by_default() {
+    let app = test_app().await;
+    register_and_get_token(&app, "first@example.com").await;
+
+    let register_body = serde_json::json!({"email": "second@example.com", "password": "hunter2"});
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/auth/register")
+                .header("content-type", "application/json")
+                .body(Body::from(register_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::FORBIDDEN);
+}
+
+#[tokio::test]
+async fn second_registration_succeeds_when_open_registration_is_enabled() {
+    let app = test_app_with_open_registration().await;
+    register_and_get_token(&app, "first@example.com").await;
+
+    let register_body = serde_json::json!({"email": "second@example.com", "password": "hunter2"});
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/auth/register")
+                .header("content-type", "application/json")
+                .body(Body::from(register_body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CREATED);
 }
 
 #[tokio::test]

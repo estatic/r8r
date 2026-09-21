@@ -124,6 +124,7 @@ mod tests {
             scheduler: Arc::new(crate::scheduler::Scheduler::new().await.unwrap()),
             trigger_registry: Arc::new(crate::trigger_registry::TriggerRegistry::new()),
             execution_events: tokio::sync::broadcast::channel(16).0,
+            open_registration: false,
         }
     }
 

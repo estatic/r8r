@@ -13,4 +13,9 @@ pub struct AppState {
     pub scheduler: Arc<Scheduler>,
     pub trigger_registry: Arc<TriggerRegistry>,
     pub execution_events: tokio::sync::broadcast::Sender<ExecutionEvent>,
+    /// When false (the default), `POST /rest/auth/register` refuses to
+    /// create a second user once any user already exists -- see
+    /// `api::auth::register`. Set from `R8R_ALLOW_OPEN_REGISTRATION` at
+    /// startup; never re-read per request.
+    pub open_registration: bool,
 }

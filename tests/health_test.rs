@@ -16,6 +16,7 @@ async fn test_app() -> axum::Router {
         scheduler: Arc::new(r8r::scheduler::Scheduler::new().await.unwrap()),
         trigger_registry: Arc::new(r8r::trigger_registry::TriggerRegistry::new()),
         execution_events: tokio::sync::broadcast::channel(16).0,
+        open_registration: false,
     };
     r8r::api::build_router(state)
 }

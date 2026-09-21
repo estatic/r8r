@@ -242,6 +242,9 @@ mod tests {
         async fn get_user_by_email(&self, email: &str) -> anyhow::Result<Option<crate::domain::User>> {
             self.inner.get_user_by_email(email).await
         }
+        async fn any_user_exists(&self) -> anyhow::Result<bool> {
+            self.inner.any_user_exists().await
+        }
         async fn create_credential(&self, credential: &crate::domain::Credential) -> anyhow::Result<()> {
             self.inner.create_credential(credential).await
         }

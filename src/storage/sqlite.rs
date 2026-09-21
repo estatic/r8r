@@ -195,6 +195,13 @@ impl Storage for SqliteStorage {
         .transpose()
     }
 
+    async fn any_user_exists(&self) -> anyhow::Result<bool> {
+        let exists: i64 = sqlx::query_scalar("SELECT EXISTS(SELECT 1 FROM users)")
+            .fetch_one(&self.pool)
+            .await?;
+        Ok(exists != 0)
+    }
+
     async fn create_credential(&self, credential: &Credential) -> anyhow::Result<()> {
         let plaintext = serde_json::to_string(&credential.data)?;
         let encrypted = crate::crypto::encrypt(&self.encryption_key, &plaintext)?;
@@ -513,6 +520,16 @@ mod tests {
     async fn get_user_by_email_returns_none_when_missing() {
         let storage = SqliteStorage::new("sqlite::memory:", test_key()).await.unwrap();
         assert!(storage.get_user_by_email("nobody@example.com").await.unwrap().is_none());
+    }
+
+    #[tokio::test]
+    async fn any_user_exists_reflects_whether_a_user_has_been_created() {
+        let storage = SqliteStorage::new("sqlite::memory:", test_key()).await.unwrap();
+        assert!(!storage.any_user_exists().await.unwrap());
+
+        storage.create_user(&sample_user()).await.unwrap();
+
+        assert!(storage.any_user_exists().await.unwrap());
     }
 
     #[tokio::test]

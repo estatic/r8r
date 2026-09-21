@@ -38,6 +38,16 @@ pub async fn register(
     State(state): State<AppState>,
     Json(payload): Json<Credentials>,
 ) -> impl IntoResponse {
+    if !state.open_registration {
+        match state.storage.any_user_exists().await {
+            Ok(true) => return (StatusCode::FORBIDDEN, "registration is closed").into_response(),
+            Ok(false) => {}
+            Err(e) => {
+                tracing::error!(error = %e, "failed to check for existing users during registration");
+                return (StatusCode::INTERNAL_SERVER_ERROR, "registration check failed").into_response();
+            }
+        }
+    }
     let password_hash = match crate::auth::hash_password(&payload.password) {
         Ok(h) => h,
         Err(e) => {
