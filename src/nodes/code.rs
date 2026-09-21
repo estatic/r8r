@@ -4,7 +4,13 @@ use crate::node::{Node, NodeError, NodeExecutionContext, NodeOutput};
 use async_trait::async_trait;
 use std::collections::HashMap;
 
-const CODE_TIMEOUT_SECS: u64 = 2;
+/// A backstop, not the primary deadline: `eval_js` (`src/expr.rs`) enforces
+/// its own 2s timeout via QuickJS's interrupt handler, which reliably
+/// returns control even from inside a tight infinite loop. This value is
+/// kept comfortably above that inner deadline so the inner one always
+/// fires first in the ordinary case; this only matters for a pathological
+/// script the interrupt handler can't reach.
+const CODE_TIMEOUT_SECS: u64 = 5;
 
 pub struct CodeNode;
 
@@ -55,11 +61,17 @@ impl Node for CodeNode {
         // borrowing from `ctx`; `EvalContext` is constructed entirely inside
         // the closure so its borrowed fields reference only closure-local data.
         //
-        // Known limitation: if the blocking thread is still running when the
-        // timeout fires, there is no safe way in Rust to forcibly kill it — the
-        // thread is abandoned (orphaned) and keeps running to completion in the
-        // background, consuming a blocking-pool slot until it finishes. This is
-        // an accepted limitation, not something this fix attempts to solve.
+        // `eval_js` enforces its own 2s deadline internally via QuickJS's
+        // interrupt handler (checked during bytecode execution, including
+        // inside a tight loop), so it reliably returns on its own well
+        // before this outer timeout -- unlike an external OS-level
+        // mechanism, this actually stops a runaway script rather than
+        // merely abandoning a thread that keeps running in the background.
+        // The remaining known limitation is narrower: only a pathological
+        // script whose execution the interrupt handler can't interrupt
+        // between checks (e.g. one dominated by a single very expensive
+        // native call) could still run to completion on an orphaned
+        // blocking-pool thread after this outer timeout fires.
         let handle = tokio::task::spawn_blocking(move || {
             let empty_node_json: HashMap<String, serde_json::Value> = HashMap::new();
             let eval_ctx = EvalContext {
@@ -159,17 +171,13 @@ mod tests {
         assert!(matches!(result, Err(NodeError::ExecutionFailed(_))));
     }
 
-    // Deliberately NOT `#[tokio::test]`: that macro drops its runtime at the
-    // end of the test function, and `Runtime`'s default `Drop` blocks the
-    // *current thread* until every outstanding `spawn_blocking` task
-    // completes — including the never-ending `while (true) {}` this test
-    // spawns. That would hang the test (and the whole suite) even though
-    // `execute()`'s own `tokio::time::timeout` correctly returns at ~2s. So
-    // this test builds its own runtime and explicitly calls
-    // `shutdown_timeout` afterwards, which abandons the still-running
-    // blocking thread after a short grace period instead of waiting on it
-    // forever — the same orphaned-thread limitation documented in
-    // `execute()`, just made non-fatal for the test process too.
+    // Built manually (not `#[tokio::test]`) and explicitly shut down below.
+    // `eval_js`'s own interrupt handler now reliably returns control from
+    // the `while (true) {}` script within ~2s, so the spawn_blocking task
+    // actually completes rather than running forever -- but
+    // `shutdown_timeout` (rather than an implicit `#[tokio::test]` runtime
+    // drop) is kept as a defensive bound against a hang if that assumption
+    // is ever wrong, rather than risking the whole suite blocking on it.
     #[test]
     fn runaway_script_is_preempted_by_timeout() {
         let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();

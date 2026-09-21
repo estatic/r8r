@@ -23,19 +23,43 @@ pub struct EvalContext<'a> {
     pub workflow_name: &'a str,
 }
 
+/// Wall-clock deadline for a single `eval_js` call, enforced via QuickJS's
+/// own interrupt handler (checked periodically during bytecode execution,
+/// including inside a tight loop) rather than an external OS-level
+/// mechanism -- this is what lets a runaway script actually stop, instead
+/// of merely being abandoned on a background thread. Applies uniformly to
+/// every `eval_js` caller: both `core.code` scripts and every `{{ }}`
+/// parameter expression across all node types, the latter of which
+/// previously had no timeout protection at all.
+const SCRIPT_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Memory ceiling for a single `eval_js` call's QuickJS runtime. Generous
+/// for any legitimate transform script; bounds a runaway allocation loop
+/// (e.g. repeated string/array doubling) well short of exhausting real
+/// process memory.
+const SCRIPT_MEMORY_LIMIT_BYTES: usize = 64 * 1024 * 1024;
+
 #[derive(Debug, thiserror::Error)]
 pub enum ExprError {
     #[error("expression runtime error: {0}")]
     Runtime(String),
     #[error("expression value conversion error: {0}")]
     Conversion(String),
+    #[error("script execution timed out")]
+    Timeout,
 }
 
 /// Evaluates `script` as JavaScript in a fresh QuickJS context, with
 /// `$json`, `$items`, `$node`, `$now`, and `$workflow` bound as globals from
 /// `ctx`, and converts the script's result back to a [`serde_json::Value`].
+///
+/// Bounded by [`SCRIPT_TIMEOUT`] and [`SCRIPT_MEMORY_LIMIT_BYTES`] -- see
+/// their docs.
 pub fn eval_js(script: &str, ctx: &EvalContext) -> Result<serde_json::Value, ExprError> {
     let runtime = rquickjs::Runtime::new().map_err(|e| ExprError::Runtime(e.to_string()))?;
+    runtime.set_memory_limit(SCRIPT_MEMORY_LIMIT_BYTES);
+    let start = std::time::Instant::now();
+    runtime.set_interrupt_handler(Some(Box::new(move || start.elapsed() >= SCRIPT_TIMEOUT)));
     let js_context =
         rquickjs::Context::full(&runtime).map_err(|e| ExprError::Runtime(e.to_string()))?;
 
@@ -79,9 +103,19 @@ pub fn eval_js(script: &str, ctx: &EvalContext) -> Result<serde_json::Value, Exp
             .set("$workflow", workflow_val)
             .map_err(|e| ExprError::Runtime(e.to_string()))?;
 
-        let result: rquickjs::Value = js
-            .eval(script)
-            .map_err(|e| ExprError::Runtime(e.to_string()))?;
+        let result: rquickjs::Value = match js.eval(script) {
+            Ok(v) => v,
+            Err(e) => {
+                // The interrupt handler's own exception carries no
+                // reliable, stable message text -- detect the timeout by
+                // elapsed time instead, so callers get a clean, predictable
+                // error regardless of QuickJS's internal wording.
+                if start.elapsed() >= SCRIPT_TIMEOUT {
+                    return Err(ExprError::Timeout);
+                }
+                return Err(ExprError::Runtime(e.to_string()));
+            }
+        };
         js_to_json(&js, result)
     })
 }
@@ -267,6 +301,44 @@ mod tests {
     fn malformed_script_returns_err_not_panic() {
         let result = eval_js("this is not valid js (((", &empty_ctx());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_runaway_loop_is_interrupted_within_the_deadline_not_left_to_run_forever() {
+        let start = std::time::Instant::now();
+        let result = eval_js("while (true) {}", &empty_ctx());
+        let elapsed = start.elapsed();
+
+        match result {
+            Err(ExprError::Timeout) => {}
+            other => panic!("expected ExprError::Timeout, got {other:?}"),
+        }
+        // Bounded by the interrupt handler's own deadline (a few seconds),
+        // not left to spin -- this call is fully synchronous, so a real
+        // interruption (rather than merely abandoning a background thread,
+        // as core.code's outer async timeout does) is the only way this
+        // test returns at all within a sane bound.
+        assert!(elapsed < std::time::Duration::from_secs(4), "expected the interrupt handler to cut the loop short, took {elapsed:?}");
+    }
+
+    #[test]
+    fn a_memory_exhausting_script_is_rejected_rather_than_exhausting_real_memory() {
+        // Repeatedly doubles a string, doubling memory use each iteration --
+        // an unbounded version of this allocates far more than physical
+        // memory within a few dozen iterations. The loop count (1000) is
+        // far beyond what the memory limit allows, so this proves the
+        // limit -- not the loop finishing -- is what stops it.
+        let script = "let s = 'x'; for (let i = 0; i < 1000; i++) { s = s + s; } s.length;";
+        let result = eval_js(script, &empty_ctx());
+        assert!(result.is_err(), "expected the memory limit to reject this script, got {result:?}");
+    }
+
+    #[test]
+    fn an_ordinary_fast_expression_is_unaffected_by_the_new_limits() {
+        // Guards against a regression where the timeout/memory limit are so
+        // tight they break normal usage, not just pathological scripts.
+        let result = eval_js("({a: 1, b: [1, 2, 3]})", &empty_ctx()).unwrap();
+        assert_eq!(result, serde_json::json!({"a": 1, "b": [1, 2, 3]}));
     }
 
     #[test]
