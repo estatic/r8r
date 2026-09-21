@@ -9,6 +9,18 @@ impl Node for ScheduleNode {
     fn type_name(&self) -> &'static str {
         "core.schedule"
     }
+    fn display_name(&self) -> &'static str {
+        "Schedule"
+    }
+    fn description(&self) -> &'static str {
+        "Starts a run on a cron schedule."
+    }
+    fn category(&self) -> crate::node::NodeCategory {
+        crate::node::NodeCategory::Trigger
+    }
+    fn icon(&self) -> &'static str {
+        "⏰"
+    }
 
     async fn execute(&self, _ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
         Ok(vec![vec![Item { json: serde_json::json!({}), binary: serde_json::json!({}) }]])

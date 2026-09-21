@@ -9,6 +9,25 @@ impl Node for SwitchNode {
     fn type_name(&self) -> &'static str {
         "core.switch"
     }
+    fn display_name(&self) -> &'static str {
+        "Switch"
+    }
+    fn description(&self) -> &'static str {
+        "Routes items to one of several outputs based on matching a value against a list of cases."
+    }
+    fn category(&self) -> crate::node::NodeCategory {
+        crate::node::NodeCategory::FlowControl
+    }
+    fn icon(&self) -> &'static str {
+        "🔀"
+    }
+    fn output_ports(&self, parameters: &serde_json::Value) -> Vec<String> {
+        let case_count = parameters.get("cases").and_then(|v| v.as_array()).map(|a| a.len()).unwrap_or(0);
+        (0..case_count)
+            .map(|i| format!("case {i}"))
+            .chain(std::iter::once("default".to_string()))
+            .collect()
+    }
 
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
         let value = ctx
@@ -71,5 +90,18 @@ mod tests {
         assert!(result[0].is_empty());
         assert!(result[1].is_empty());
         assert_eq!(result[2], items());
+    }
+
+    #[test]
+    fn output_ports_with_no_cases_is_just_default() {
+        let node = SwitchNode;
+        assert_eq!(node.output_ports(&serde_json::json!({})), vec!["default".to_string()]);
+    }
+
+    #[test]
+    fn output_ports_reflects_case_count() {
+        let node = SwitchNode;
+        let params = serde_json::json!({"cases": ["a", "b"]});
+        assert_eq!(node.output_ports(&params), vec!["case 0".to_string(), "case 1".to_string(), "default".to_string()]);
     }
 }

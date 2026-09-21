@@ -18,6 +18,21 @@ impl Node for TelegramTriggerNode {
     fn type_name(&self) -> &'static str {
         "telegram.trigger"
     }
+    fn display_name(&self) -> &'static str {
+        "Telegram Trigger"
+    }
+    fn description(&self) -> &'static str {
+        "Fires when a message arrives for the configured Telegram bot."
+    }
+    fn category(&self) -> crate::node::NodeCategory {
+        crate::node::NodeCategory::Trigger
+    }
+    fn icon(&self) -> &'static str {
+        "📨"
+    }
+    fn credential_types(&self) -> &'static [&'static str] {
+        &["telegramApi"]
+    }
 
     async fn execute(&self, _ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
         Ok(vec![vec![Item { json: serde_json::json!({}), binary: serde_json::json!({}) }]])

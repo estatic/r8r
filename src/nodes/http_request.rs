@@ -38,6 +38,18 @@ impl Node for HttpRequestNode {
     fn type_name(&self) -> &'static str {
         "core.httpRequest"
     }
+    fn display_name(&self) -> &'static str {
+        "HTTP Request"
+    }
+    fn description(&self) -> &'static str {
+        "Makes an HTTP request to an external URL."
+    }
+    fn category(&self) -> crate::node::NodeCategory {
+        crate::node::NodeCategory::Action
+    }
+    fn icon(&self) -> &'static str {
+        "🌐"
+    }
 
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
         execute_with_client(http_client()?, ctx).await

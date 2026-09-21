@@ -19,6 +19,18 @@ impl Node for CodeNode {
     fn type_name(&self) -> &'static str {
         "core.code"
     }
+    fn display_name(&self) -> &'static str {
+        "Code"
+    }
+    fn description(&self) -> &'static str {
+        "Runs custom JavaScript to transform items."
+    }
+    fn category(&self) -> crate::node::NodeCategory {
+        crate::node::NodeCategory::Action
+    }
+    fn icon(&self) -> &'static str {
+        "💻"
+    }
 
     // core.code's "parameter" IS the script to run, not a value to
     // interpolate. Running it through `expr::resolve_parameters` would
@@ -125,6 +137,15 @@ mod tests {
         impl Node for DefaultNode {
             fn type_name(&self) -> &'static str {
                 "test.default"
+            }
+            fn display_name(&self) -> &'static str {
+                "Default"
+            }
+            fn description(&self) -> &'static str {
+                "Test-only node used to verify the trait's resolves_parameters default."
+            }
+            fn category(&self) -> crate::node::NodeCategory {
+                crate::node::NodeCategory::Action
             }
             async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
                 Ok(vec![ctx.input_items.clone()])

@@ -9,6 +9,18 @@ impl Node for MergeNode {
     fn type_name(&self) -> &'static str {
         "core.merge"
     }
+    fn display_name(&self) -> &'static str {
+        "Merge"
+    }
+    fn description(&self) -> &'static str {
+        "Combines items from multiple incoming connections."
+    }
+    fn category(&self) -> crate::node::NodeCategory {
+        crate::node::NodeCategory::FlowControl
+    }
+    fn icon(&self) -> &'static str {
+        "🔗"
+    }
 
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
         let mode = ctx.parameters.get("mode").and_then(|v| v.as_str()).unwrap_or("append");

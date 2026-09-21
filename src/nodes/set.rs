@@ -9,6 +9,18 @@ impl Node for SetNode {
     fn type_name(&self) -> &'static str {
         "core.set"
     }
+    fn display_name(&self) -> &'static str {
+        "Set"
+    }
+    fn description(&self) -> &'static str {
+        "Adds or overwrites fields on each item."
+    }
+    fn category(&self) -> crate::node::NodeCategory {
+        crate::node::NodeCategory::Action
+    }
+    fn icon(&self) -> &'static str {
+        "📝"
+    }
 
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
         let fields = ctx.parameters.get("fields").cloned().unwrap_or(serde_json::json!({}));

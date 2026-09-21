@@ -8,6 +8,18 @@ impl Node for NoOpNode {
     fn type_name(&self) -> &'static str {
         "core.noop"
     }
+    fn display_name(&self) -> &'static str {
+        "No-Op"
+    }
+    fn description(&self) -> &'static str {
+        "Passes items through unchanged."
+    }
+    fn category(&self) -> crate::node::NodeCategory {
+        crate::node::NodeCategory::Action
+    }
+    fn icon(&self) -> &'static str {
+        "⚪"
+    }
 
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
         Ok(vec![ctx.input_items.clone()])

@@ -8,6 +8,18 @@ impl Node for FilterNode {
     fn type_name(&self) -> &'static str {
         "core.filter"
     }
+    fn display_name(&self) -> &'static str {
+        "Filter"
+    }
+    fn description(&self) -> &'static str {
+        "Keeps only items where a boolean condition is true."
+    }
+    fn category(&self) -> crate::node::NodeCategory {
+        crate::node::NodeCategory::FlowControl
+    }
+    fn icon(&self) -> &'static str {
+        "🚦"
+    }
 
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
         let condition = match ctx.parameters.get("condition") {

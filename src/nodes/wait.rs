@@ -8,6 +8,18 @@ impl Node for WaitNode {
     fn type_name(&self) -> &'static str {
         "core.wait"
     }
+    fn display_name(&self) -> &'static str {
+        "Wait"
+    }
+    fn description(&self) -> &'static str {
+        "Pauses execution for a fixed number of seconds."
+    }
+    fn category(&self) -> crate::node::NodeCategory {
+        crate::node::NodeCategory::Action
+    }
+    fn icon(&self) -> &'static str {
+        "⏳"
+    }
 
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
         let seconds = ctx.parameters.get("seconds").and_then(|v| v.as_f64()).unwrap_or(0.0).max(0.0);

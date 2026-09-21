@@ -9,6 +9,18 @@ impl Node for WebhookNode {
     fn type_name(&self) -> &'static str {
         "core.webhook"
     }
+    fn display_name(&self) -> &'static str {
+        "Webhook"
+    }
+    fn description(&self) -> &'static str {
+        "Starts a run when an HTTP request hits this workflow's webhook URL."
+    }
+    fn category(&self) -> crate::node::NodeCategory {
+        crate::node::NodeCategory::Trigger
+    }
+    fn icon(&self) -> &'static str {
+        "🌍"
+    }
 
     async fn execute(&self, _ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
         Ok(vec![vec![Item { json: serde_json::json!({}), binary: serde_json::json!({}) }]])

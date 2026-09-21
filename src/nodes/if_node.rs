@@ -8,6 +8,21 @@ impl Node for IfNode {
     fn type_name(&self) -> &'static str {
         "core.if"
     }
+    fn display_name(&self) -> &'static str {
+        "If"
+    }
+    fn description(&self) -> &'static str {
+        "Routes items to a \"true\" or \"false\" output based on a boolean condition."
+    }
+    fn category(&self) -> crate::node::NodeCategory {
+        crate::node::NodeCategory::FlowControl
+    }
+    fn icon(&self) -> &'static str {
+        "❓"
+    }
+    fn output_ports(&self, _parameters: &serde_json::Value) -> Vec<String> {
+        vec!["true".to_string(), "false".to_string()]
+    }
 
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
         let condition = match ctx.parameters.get("condition") {
@@ -86,5 +101,15 @@ mod tests {
         };
         let result = node.execute(&ctx).await;
         assert!(matches!(result, Err(NodeError::ExecutionFailed(_))));
+    }
+
+    #[test]
+    fn output_ports_are_fixed_true_false_regardless_of_parameters() {
+        let node = IfNode;
+        assert_eq!(node.output_ports(&serde_json::json!({})), vec!["true".to_string(), "false".to_string()]);
+        assert_eq!(
+            node.output_ports(&serde_json::json!({"condition": true})),
+            vec!["true".to_string(), "false".to_string()]
+        );
     }
 }

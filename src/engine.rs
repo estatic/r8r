@@ -691,6 +691,15 @@ mod tests {
         fn type_name(&self) -> &'static str {
             "test.alwaysFails"
         }
+        fn display_name(&self) -> &'static str {
+            "Always Fails"
+        }
+        fn description(&self) -> &'static str {
+            "Test-only node that always returns an execution error."
+        }
+        fn category(&self) -> crate::node::NodeCategory {
+            crate::node::NodeCategory::Action
+        }
         async fn execute(&self, _ctx: &crate::node::NodeExecutionContext) -> Result<crate::node::NodeOutput, crate::node::NodeError> {
             Err(crate::node::NodeError::ExecutionFailed("boom".into()))
         }

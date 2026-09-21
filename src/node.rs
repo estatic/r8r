@@ -49,6 +49,16 @@ pub type NodeOutput = Vec<Vec<Item>>;
 /// engine (see Task 6), not looked up via `NodeOutput`'s `Vec` indexing.
 pub const ERROR_OUTPUT: usize = usize::MAX;
 
+/// Groups node types for the add-node menu and canvas styling.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub enum NodeCategory {
+    Trigger,
+    Action,
+    FlowControl,
+    Ai,
+}
+
 #[async_trait]
 pub trait Node: Send + Sync {
     fn type_name(&self) -> &'static str;
@@ -65,6 +75,43 @@ pub trait Node: Send + Sync {
     /// `{{ }}` text with no relation to r8r's expression syntax.
     fn resolves_parameters(&self) -> bool {
         true
+    }
+
+    /// Human-readable name shown in the canvas and add-node menu, e.g.
+    /// "Telegram Trigger" for `telegram.trigger`. No default -- every node
+    /// type must declare one.
+    fn display_name(&self) -> &'static str;
+
+    /// One sentence describing what the node does, shown in the add-node
+    /// menu. No default.
+    fn description(&self) -> &'static str;
+
+    /// Groups this node type in the add-node menu and drives canvas
+    /// styling. No default.
+    fn category(&self) -> NodeCategory;
+
+    /// A single emoji shown next to the node's name.
+    fn icon(&self) -> &'static str {
+        "⚙️"
+    }
+
+    /// Credential type string(s) this node's `auth.credential_id` accepts,
+    /// e.g. `&["telegramApi"]`. Empty means "no credential" for a node with
+    /// no `auth` parameter, or "any credential" for one (like
+    /// `core.httpRequest`) whose own `auth.type` parameter picks the shape
+    /// at runtime -- the credential picker treats an empty list as "don't
+    /// filter", not "don't allow".
+    fn credential_types(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// This node instance's current output ports, labeled. Takes
+    /// `parameters` because a port count can be data-dependent (see
+    /// `core.switch`'s override in Task 1); every other node type ignores
+    /// the argument and returns a fixed list.
+    fn output_ports(&self, parameters: &serde_json::Value) -> Vec<String> {
+        let _ = parameters;
+        vec!["main".to_string()]
     }
 
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError>;
@@ -109,6 +156,15 @@ mod tests {
     impl Node for EchoNode {
         fn type_name(&self) -> &'static str {
             "test.echo"
+        }
+        fn display_name(&self) -> &'static str {
+            "Echo"
+        }
+        fn description(&self) -> &'static str {
+            "Test-only node that returns its input unchanged."
+        }
+        fn category(&self) -> NodeCategory {
+            NodeCategory::Action
         }
         async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
             Ok(vec![ctx.input_items.clone()])
@@ -159,5 +215,15 @@ mod tests {
         let mut registry = NodeRegistry::new();
         registry.register(Box::new(EchoNode));
         assert_eq!(registry.type_names(), vec!["test.echo"]);
+    }
+
+    #[test]
+    fn node_metadata_defaults_are_correct() {
+        // EchoNode doesn't override icon/credential_types/output_ports, so this
+        // proves the trait's own defaults, not any node's override.
+        let node = EchoNode;
+        assert_eq!(node.icon(), "⚙️");
+        assert!(node.credential_types().is_empty());
+        assert_eq!(node.output_ports(&serde_json::json!({})), vec!["main".to_string()]);
     }
 }

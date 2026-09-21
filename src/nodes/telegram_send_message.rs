@@ -47,6 +47,21 @@ impl Node for TelegramSendMessageNode {
     fn type_name(&self) -> &'static str {
         "telegram.sendMessage"
     }
+    fn display_name(&self) -> &'static str {
+        "Send Telegram Message"
+    }
+    fn description(&self) -> &'static str {
+        "Sends a message via the configured Telegram bot."
+    }
+    fn category(&self) -> crate::node::NodeCategory {
+        crate::node::NodeCategory::Action
+    }
+    fn icon(&self) -> &'static str {
+        "📤"
+    }
+    fn credential_types(&self) -> &'static [&'static str] {
+        &["telegramApi"]
+    }
 
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
         execute_with_client(http_client()?, ctx).await

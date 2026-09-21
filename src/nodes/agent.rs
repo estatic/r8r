@@ -226,6 +226,21 @@ impl Node for AgentNode {
     fn type_name(&self) -> &'static str {
         "ai.agent"
     }
+    fn display_name(&self) -> &'static str {
+        "AI Agent"
+    }
+    fn description(&self) -> &'static str {
+        "Runs an LLM-backed agent loop that can call other nodes as tools."
+    }
+    fn category(&self) -> crate::node::NodeCategory {
+        crate::node::NodeCategory::Ai
+    }
+    fn icon(&self) -> &'static str {
+        "🤖"
+    }
+    fn credential_types(&self) -> &'static [&'static str] {
+        &["anthropicApi", "openaiApi"]
+    }
 
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
         let provider_name = ctx

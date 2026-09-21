@@ -9,6 +9,18 @@ impl Node for ManualTriggerNode {
     fn type_name(&self) -> &'static str {
         "core.manualTrigger"
     }
+    fn display_name(&self) -> &'static str {
+        "Manual Trigger"
+    }
+    fn description(&self) -> &'static str {
+        "Starts a workflow run manually, e.g. from the editor's Execute button."
+    }
+    fn category(&self) -> crate::node::NodeCategory {
+        crate::node::NodeCategory::Trigger
+    }
+    fn icon(&self) -> &'static str {
+        "🖱️"
+    }
 
     async fn execute(&self, _ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
         Ok(vec![vec![Item { json: serde_json::json!({}), binary: serde_json::json!({}) }]])
