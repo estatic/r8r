@@ -58,7 +58,7 @@ function apply() {
       </label>
       <div>
         <label class="block text-sm text-gray-600 mb-1">Credential (for nodes that need auth)</label>
-        <CredentialPicker v-model="credentialId" />
+        <CredentialPicker v-model="credentialId" :node-type="node.node_type" />
       </div>
       <div>
         <label class="block text-sm text-gray-600 mb-1">Parameters (JSON)</label>
