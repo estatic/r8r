@@ -38,6 +38,38 @@ pub trait Node: Send + Sync {
 - **`execute()`** does the actual work and is the method you'll spend most of
   your time implementing.
 
+### Node-type metadata
+
+Five more methods, added for the node-type metadata system
+(`docs/superpowers/specs/2026-09-21-r8r-node-type-metadata-design.md`):
+
+- **`display_name()`**, **`description()`**, **`category()`** — no default,
+  every node type must implement these three. `display_name` is what the
+  canvas and add-node menu show instead of the raw `type_name()` string;
+  `description` is one sentence shown in the add-node menu; `category` is
+  one of `NodeCategory::{Trigger, Action, FlowControl, Ai}`.
+- **`icon()`** — defaults to `"⚙️"`; override with a single emoji specific
+  to your node.
+- **`credential_types()`** — defaults to `&[]`. If your node reads
+  `parameters.auth.credential_id` (see §4 below), declare the credential
+  type string(s) it expects, e.g. `&["telegramApi"]` — this drives the
+  credential picker's type dropdown. Leave it at the default `&[]` if your
+  node accepts any credential shape (like `core.httpRequest`, which picks
+  the shape from its own `auth.type` parameter) or needs no credential at
+  all — the picker treats an empty list as "don't filter", not "don't
+  allow".
+- **`output_ports()`** — takes `parameters: &serde_json::Value` and
+  defaults to `vec!["main".to_string()]`, correct for any node with a
+  single, fixed output port. Override it only if your node has more than
+  one output port (like `core.if`'s `["true", "false"]`) or a
+  data-dependent port count (like `core.switch`, which reads its own
+  `cases` parameter the same way `execute()` does — see
+  `src/nodes/switch.rs` for the pattern).
+
+Every one of these except `output_ports()` is a small, fixed addition —
+copy the shape from any existing node in `src/nodes/` (e.g.
+`src/nodes/telegram_send_message.rs`) rather than writing it from scratch.
+
 ### `NodeExecutionContext`
 
 Defined at `src/node.rs:5-11`:
@@ -449,3 +481,8 @@ When adding a new node, confirm:
 - [ ] **Registration** — `pub mod your_node;` added to `src/nodes/mod.rs`, and
       `registry.register(Box::new(your_node::YourNode));` added inside
       `register_all()`.
+- [ ] **Metadata** — `display_name()`, `description()`, `category()`
+      implemented (required); `icon()` and `credential_types()` overridden
+      if the defaults (`"⚙️"`, no credential) aren't right for this node;
+      `output_ports()` overridden if this node has more than one output
+      port or a data-dependent port count.
