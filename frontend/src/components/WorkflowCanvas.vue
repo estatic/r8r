@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed } from 'vue'
-import { VueFlow, Handle, Position, useVueFlow, type Node as FlowNode, type Edge as FlowEdge } from '@vue-flow/core'
+import { VueFlow, Handle, Position, MarkerType, useVueFlow, type Node as FlowNode, type Edge as FlowEdge } from '@vue-flow/core'
 import '@vue-flow/core/dist/style.css'
 import type { NodeInstance, Connection } from '../types/domain'
 
@@ -33,6 +33,7 @@ const flowEdges = computed<FlowEdge[]>(() =>
     target: c.to_node,
     sourceHandle: String(c.from_output),
     targetHandle: String(c.to_input),
+    markerEnd: MarkerType.ArrowClosed,
   })),
 )
 

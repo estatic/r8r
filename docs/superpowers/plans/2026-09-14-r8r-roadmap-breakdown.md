@@ -443,6 +443,23 @@ self-registration).
 - 7.7.9 Remove unused `rand` direct dependency from `Cargo.toml`
 - 7.7.10 Give `Credential` a hand-written `Debug` impl that redacts `data`
 
+## Plan 8 — UI/UX Hardening
+*(identified from a hands-on manual trial of the running app, first real end-user pass since Plan 6a shipped the frontend)*
+
+Six sub-projects, decomposed and prioritized by dependency analysis
+(full reasoning: `docs/superpowers/specs/2026-09-21-r8r-node-type-metadata-design.md`
+§1). Two — multi-port canvas and structured credential forms — hard-depend
+on node-type metadata existing first (both would otherwise need to
+duplicate per-node-type logic in the frontend, which the metadata system
+exists to eliminate); the rest are structurally independent.
+
+- 8.1 Connection arrows — zero dependencies, trivial (VueFlow `markerEnd`)
+- 8.2 Node-type metadata system — **in progress**, spec approved (`docs/superpowers/specs/2026-09-21-r8r-node-type-metadata-design.md`). Foundational: display name/icon/category/description/credential-type/output-port metadata on the `Node` trait, richer `/rest/node-types`, a new per-instance output-ports endpoint. Unlocks 8.3 and 8.4.
+- 8.3 Multi-port canvas + error routing — depends on 8.2. Render N output handles per node (not the hardcoded single handle today), expose the already-fully-working `ERROR_OUTPUT` engine mechanism as a connectable port. Highest end-user impact: today there is no way to wire `core.if`'s false branch or `core.switch`'s cases at all.
+- 8.4 Structured credential forms — depends on 8.2's `credential_types`. Per-credential-type field schema (e.g. `telegramApi` → a labeled "Bot Token" input) replacing the raw-JSON data textarea; type becomes a dropdown filtered to what the node accepts instead of free text.
+- 8.5 Per-node retry/timeout/continue-on-fail — independent. New `NodeInstance` fields, an engine execution-loop retry/timeout wrapper, and a config-panel UI section. A real production-readiness gap: today nothing is configurable per node beyond raw parameters.
+- 8.6 AI Agent UX — independent, but needs its own dedicated brainstorm before implementation. Two parts: (a) small — surface provider/model in the canvas label/panel; (b) large, open design fork — whether/how `ai.agent`'s tools and model config become reusable across multiple agent nodes rather than inlined per-node (deliberate Plan 5 v1 scope decision, revisited here). Least urgent: affects one node type, not the whole canvas.
+
 ---
 
 ## Sequencing Notes
@@ -452,3 +469,4 @@ self-registration).
 - **5 depends on 4** (the Agent node's tool-exposure story is cleanest once the HTTP Request node and Credential storage already exist as the pattern to follow).
 - **6 depends on 2 and 3 at minimum** for a genuinely useful editor (branching nodes and triggers are core to what a workflow editor needs to display); **6.3.1 (live status)** specifically depends on **7.1** (WebSocket push).
 - **7** is mostly independent and could be pulled earlier — 7.3 and 7.4 in particular are already-known gaps, not new discovery, so they could be scheduled right after Plan 2 if hardening is prioritized over new features.
+- **8.1 has no dependencies** and can land whenever, independent of everything else in Plan 8 or elsewhere. **8.3 and 8.4 depend on 8.2.** **8.5 and 8.6 are independent** of the rest of Plan 8 and of each other — either could be pulled earlier or later without disrupting 8.1-8.4's sequence.
