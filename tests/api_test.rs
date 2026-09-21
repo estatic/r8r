@@ -2171,3 +2171,31 @@ async fn agent_node_calls_a_tool_then_returns_a_final_response_end_to_end() {
     assert_eq!(execution["node_outputs"]["agent1"][0]["json"]["response"], "The status is ok.");
     assert_eq!(execution["node_outputs"]["agent1"][0]["json"]["tool_calls_made"], 1);
 }
+
+#[tokio::test]
+async fn credential_types_lists_all_known_schemas() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "cred-types@example.com").await;
+
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method("GET")
+                .uri("/rest/credential-types")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let types = json.as_array().unwrap();
+    assert_eq!(types.len(), 6);
+    let telegram = types.iter().find(|t| t["credential_type"] == "telegramApi").expect("telegramApi should be listed");
+    assert_eq!(telegram["generic"], false);
+    assert_eq!(telegram["fields"][0]["name"], "bot_token");
+    let bearer = types.iter().find(|t| t["credential_type"] == "bearerToken").expect("bearerToken should be listed");
+    assert_eq!(bearer["generic"], true);
+}
