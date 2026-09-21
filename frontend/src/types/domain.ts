@@ -1,3 +1,15 @@
+export type NodeCategory = 'trigger' | 'action' | 'flowControl' | 'ai'
+
+export interface NodeTypeMeta {
+  type_name: string
+  display_name: string
+  icon: string
+  category: NodeCategory
+  description: string
+  credential_types: string[]
+  output_ports: string[]
+}
+
 export interface NodeInstance {
   id: string
   node_type: string

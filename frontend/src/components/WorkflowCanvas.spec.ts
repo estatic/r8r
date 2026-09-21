@@ -1,13 +1,10 @@
-import { describe, it, expect, beforeAll } from 'vitest'
+import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
+import { createPinia, setActivePinia } from 'pinia'
 import WorkflowCanvas from './WorkflowCanvas.vue'
 import type { NodeInstance } from '../types/domain'
 
-// jsdom does not implement ResizeObserver, which @vue-flow/core relies on to
-// measure node dimensions. Vue Flow only needs the constructor to exist and
-// observe/unobserve to be callable; it doesn't depend on entries firing for
-// nodes to render with their labels.
 beforeAll(() => {
   class ResizeObserverStub {
     observe() {}
@@ -17,18 +14,44 @@ beforeAll(() => {
   ;(globalThis as unknown as { ResizeObserver: typeof ResizeObserverStub }).ResizeObserver = ResizeObserverStub
 })
 
+const NODE_TYPES = [
+  { type_name: 'core.manualTrigger', display_name: 'Manual Trigger', icon: '🖱️', category: 'trigger', description: '', credential_types: [], output_ports: ['main'] },
+  { type_name: 'core.set', display_name: 'Set', icon: '📝', category: 'action', description: '', credential_types: [], output_ports: ['main'] },
+]
+
+async function flushFetch() {
+  await new Promise((r) => setTimeout(r, 0))
+  await nextTick()
+}
+
 describe('WorkflowCanvas', () => {
-  it('renders one canvas node per workflow node', async () => {
+  beforeEach(() => {
+    setActivePinia(createPinia())
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => NODE_TYPES }),
+    )
+  })
+
+  it("renders each node's icon and display name, with the raw type as a tooltip", async () => {
     const nodes: NodeInstance[] = [
       { id: 'a', node_type: 'core.manualTrigger', position: [0, 0], parameters: {}, disabled: false },
       { id: 'b', node_type: 'core.set', position: [200, 0], parameters: {}, disabled: false },
     ]
     const wrapper = mount(WorkflowCanvas, { props: { nodes, connections: [] } })
-    // Vue Flow creates its ResizeObserver in onMounted and only then renders
-    // its node list, so wait a tick for that post-mount update to flush.
     await nextTick()
-    expect(wrapper.text()).toContain('core.manualTrigger')
-    expect(wrapper.text()).toContain('core.set')
+    await flushFetch()
+    expect(wrapper.text()).toContain('🖱️ Manual Trigger')
+    expect(wrapper.text()).toContain('📝 Set')
+    expect(wrapper.find('[title="core.manualTrigger"]').exists()).toBe(true)
+  })
+
+  it('falls back to the raw type_name for an unknown node type', async () => {
+    const nodes: NodeInstance[] = [{ id: 'a', node_type: 'does.not.exist', position: [0, 0], parameters: {}, disabled: false }]
+    const wrapper = mount(WorkflowCanvas, { props: { nodes, connections: [] } })
+    await nextTick()
+    await flushFetch()
+    expect(wrapper.text()).toContain('does.not.exist')
   })
 
   it('renders a source and a target connection handle on every node', async () => {
@@ -39,17 +62,10 @@ describe('WorkflowCanvas', () => {
     const wrapper = mount(WorkflowCanvas, { props: { nodes, connections: [] } })
     await nextTick()
 
-    // Our #node-default slot replaces Vue Flow's DefaultNode, which is what
-    // would otherwise render the handles a user drags a connection from. Two
-    // handles per node (one target, one source) must exist in the DOM, or
-    // connecting nodes is impossible in a real browser.
     const handles = wrapper.findAll('.vue-flow__handle')
     expect(handles.length).toBe(4)
     expect(wrapper.findAll('.vue-flow__handle.target').length).toBe(2)
     expect(wrapper.findAll('.vue-flow__handle.source').length).toBe(2)
-    // Handle ids must match the `sourceHandle`/`targetHandle` strings that
-    // flowEdges derives from from_output/to_input, so existing connections
-    // attach to the handle elements themselves.
     expect(handles.every((h) => h.attributes('data-handleid') === '0')).toBe(true)
   })
 })

@@ -3,6 +3,7 @@ import { computed } from 'vue'
 import { VueFlow, Handle, Position, MarkerType, useVueFlow, type Node as FlowNode, type Edge as FlowEdge } from '@vue-flow/core'
 import '@vue-flow/core/dist/style.css'
 import type { NodeInstance, Connection } from '../types/domain'
+import { useNodeTypesStore } from '../stores/nodeTypes'
 
 const props = defineProps<{
   nodes: NodeInstance[]
@@ -17,11 +18,21 @@ const emit = defineEmits<{
 
 const { onConnect, onNodeDragStop, onNodeClick } = useVueFlow()
 
+const nodeTypesStore = useNodeTypesStore()
+if (!nodeTypesStore.loaded) {
+  nodeTypesStore.fetchAll().catch(() => {})
+}
+
+function labelFor(nodeType: string): string {
+  const meta = nodeTypesStore.types.find((t) => t.type_name === nodeType)
+  return meta ? `${meta.icon} ${meta.display_name}` : nodeType
+}
+
 const flowNodes = computed<FlowNode[]>(() =>
   props.nodes.map((n) => ({
     id: n.id,
     position: { x: n.position[0], y: n.position[1] },
-    label: `${n.id}\n${n.node_type}`,
+    label: labelFor(n.node_type),
     data: { nodeType: n.node_type, disabled: n.disabled },
   })),
 )
@@ -73,7 +84,11 @@ onConnect((connection) => {
         <!-- Vue Flow's optional theme-default.css isn't imported, so give the
              handles their own visible size/colour here. -->
         <Handle id="0" type="target" :position="Position.Top" class="w-2.5 h-2.5 rounded-full bg-gray-500 border border-white" />
-        <div class="px-3 py-2 rounded border bg-white shadow text-xs whitespace-pre-line" :class="{ 'opacity-50': data.disabled }">
+        <div
+          class="px-3 py-2 rounded border bg-white shadow text-xs whitespace-pre-line"
+          :class="{ 'opacity-50': data.disabled }"
+          :title="data.nodeType"
+        >
           {{ label }}
         </div>
         <Handle id="0" type="source" :position="Position.Bottom" class="w-2.5 h-2.5 rounded-full bg-gray-500 border border-white" />
