@@ -23,6 +23,7 @@ export interface Connection {
   from_output: number
   to_node: string
   to_input: number
+  error: boolean
 }
 
 export interface Workflow {
