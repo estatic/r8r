@@ -427,8 +427,8 @@ self-registration).
   - 7.6.1.1 Replace the sequential topological walk in `execute_workflow` with `tokio::spawn`/`JoinSet` for independent branches (Plan 2's engine already computes each node's inputs from a `produced` map before running it, independent of iteration order beyond dependency order, so nothing blocks this later)
 - 7.6.2 Per-item expression evaluation
   - 7.6.2.1 Let `$json` (and per-item evaluation generally) see each item's own data within one node's execution, instead of only the first input item — needed for a genuinely per-item Filter condition and a richer Set node
-- 7.6.3 Code node sandbox hardening
-  - 7.6.3.1 Add `rquickjs::Runtime::set_memory_limit` and a deadline-based `set_interrupt_handler` in `eval_js`, superseding the current `spawn_blocking`-based timeout (which leaves a script's thread running/allocating in the background after a 2s timeout — bounded by tokio's blocking-pool cap, but unbounded in wall-clock/RAM until then)
+- 7.6.3 Code node sandbox hardening — **shipped** (commit `c03fa28`)
+  - 7.6.3.1 Add `rquickjs::Runtime::set_memory_limit` and a deadline-based `set_interrupt_handler` in `eval_js`, superseding the current `spawn_blocking`-based timeout (which leaves a script's thread running/allocating in the background after a 2s timeout — bounded by tokio's blocking-pool cap, but unbounded in wall-clock/RAM until then) — done. `eval_js` now self-bounds every call (both `core.code` scripts and every `{{ }}` parameter expression, which previously had no timeout at all) to a 2s wall-clock deadline enforced by QuickJS's own interrupt handler, plus a 64MB memory ceiling. `core.code`'s outer `spawn_blocking` + `tokio::time::timeout` (raised to 5s) is now a rarely-hit backstop rather than the primary mechanism — the inner deadline reliably interrupts even a tight infinite loop from inside the interpreter, so the blocking thread now actually returns instead of being abandoned.
 
 ### 7.7 Credential/HTTP Request hardening
 *(parked by Plan 4a's final whole-branch review — none individually blocking, none exploitable under the current single-shared-workspace trust model, but a coherent hardening batch)*
