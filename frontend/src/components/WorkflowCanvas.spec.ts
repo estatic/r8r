@@ -2,7 +2,7 @@ import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import { nextTick } from 'vue'
 import { createPinia, setActivePinia } from 'pinia'
-import WorkflowCanvas from './WorkflowCanvas.vue'
+import WorkflowCanvas, { connectionFromVueFlow, edgeSourceHandle, edgeStyle } from './WorkflowCanvas.vue'
 import type { NodeInstance, Connection } from '../types/domain'
 
 beforeAll(() => {
@@ -12,6 +12,17 @@ beforeAll(() => {
     disconnect() {}
   }
   ;(globalThis as unknown as { ResizeObserver: typeof ResizeObserverStub }).ResizeObserver = ResizeObserverStub
+
+  // jsdom has no DOMMatrixReadOnly; Vue Flow's updateNodeInternals /
+  // updateNodeDimensions path (triggered by our own updateNodeInternals()
+  // calls after ports resolve) reads `.m22` off one to compute zoom. A
+  // minimal identity-matrix stub is enough for tests to exercise that path
+  // without throwing.
+  class DOMMatrixReadOnlyStub {
+    m22 = 1
+    constructor(_transform?: string) {}
+  }
+  ;(globalThis as unknown as { DOMMatrixReadOnly: typeof DOMMatrixReadOnlyStub }).DOMMatrixReadOnly = DOMMatrixReadOnlyStub
 })
 
 const NODE_TYPES = [
@@ -89,12 +100,11 @@ describe('WorkflowCanvas', () => {
     const errorConnection: Connection = { from_node: 'a', from_output: 0, to_node: 'b', to_input: 0, error: true }
     await wrapper.setProps({ connections: [errorConnection] })
     await flush()
-    // No direct DOM assertion for edge color in jsdom (VueFlow renders edges
-    // via SVG paths without a stable test hook) -- this test's purpose is to
-    // confirm mounting with an error connection doesn't throw and the
-    // component accepts the shape; the onConnect mapping itself is covered
-    // by reading the source in review, matching this file's existing
-    // precedent of not deep-testing VueFlow's own internals.
+    // This test only confirms mounting with an error connection doesn't
+    // throw and the component accepts the shape. The actual routing/mapping
+    // logic (error connections attaching to the "error" handle with a red
+    // stroke) is covered directly and deterministically by the
+    // connectionFromVueFlow / edgeSourceHandle / edgeStyle unit tests below.
     expect(wrapper.exists()).toBe(true)
   })
 
@@ -132,5 +142,43 @@ describe('WorkflowCanvas', () => {
     const wrapper = mount(WorkflowCanvas, { props: { nodes, connections: [] } })
     await flush()
     expect(wrapper.text()).toContain('does.not.exist')
+  })
+
+  it('a dynamic-port-count node (core.switch) renders one handle per resolved port', async () => {
+    stubFetch(NODE_TYPES, ['case 0', 'case 1', 'case 2', 'default'])
+    const nodes: NodeInstance[] = [{ id: 'a', node_type: 'core.if', position: [0, 0], parameters: { cases: ['x', 'y', 'z'] }, disabled: false }]
+    const wrapper = mount(WorkflowCanvas, { props: { nodes, connections: [] } })
+    await flush()
+    const sourceHandles = wrapper.findAll('.vue-flow__handle.source')
+    // 4 declared ports + 1 universal error handle = 5.
+    expect(sourceHandles.length).toBe(5)
+    expect(wrapper.text()).toContain('case 0')
+    expect(wrapper.text()).toContain('default')
+  })
+})
+
+describe('connectionFromVueFlow', () => {
+  it('maps a normal numbered source handle to error: false', () => {
+    const result = connectionFromVueFlow({ source: 'a', sourceHandle: '1', target: 'b', targetHandle: '0' })
+    expect(result).toEqual({ from_node: 'a', from_output: 1, to_node: 'b', to_input: 0, error: false })
+  })
+
+  it('maps the error handle to error: true, from_output: 0', () => {
+    const result = connectionFromVueFlow({ source: 'a', sourceHandle: 'error', target: 'b', targetHandle: '0' })
+    expect(result).toEqual({ from_node: 'a', from_output: 0, to_node: 'b', to_input: 0, error: true })
+  })
+})
+
+describe('edgeSourceHandle / edgeStyle', () => {
+  it('a normal connection maps to its numbered handle with no special style', () => {
+    const c: Connection = { from_node: 'a', from_output: 2, to_node: 'b', to_input: 0, error: false }
+    expect(edgeSourceHandle(c)).toBe('2')
+    expect(edgeStyle(c)).toBeUndefined()
+  })
+
+  it('an error-routed connection maps to the error handle with a red stroke style', () => {
+    const c: Connection = { from_node: 'a', from_output: 0, to_node: 'b', to_input: 0, error: true }
+    expect(edgeSourceHandle(c)).toBe('error')
+    expect(edgeStyle(c)).toEqual({ stroke: '#dc2626' })
   })
 })

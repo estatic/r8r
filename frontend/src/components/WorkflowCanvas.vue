@@ -1,8 +1,36 @@
+<script lang="ts">
+import type { Connection } from '../types/domain'
+
+export function edgeSourceHandle(c: Connection): string {
+  return c.error ? 'error' : String(c.from_output)
+}
+
+export function edgeStyle(c: Connection): { stroke: string } | undefined {
+  return c.error ? { stroke: '#dc2626' } : undefined
+}
+
+export function connectionFromVueFlow(connection: {
+  source: string
+  sourceHandle?: string | null
+  target: string
+  targetHandle?: string | null
+}): Connection {
+  const isError = connection.sourceHandle === 'error'
+  return {
+    from_node: connection.source,
+    from_output: isError ? 0 : Number(connection.sourceHandle ?? 0),
+    to_node: connection.target,
+    to_input: Number(connection.targetHandle ?? 0),
+    error: isError,
+  }
+}
+</script>
+
 <script setup lang="ts">
-import { computed, reactive, watch } from 'vue'
+import { computed, reactive, watch, nextTick } from 'vue'
 import { VueFlow, Handle, Position, MarkerType, useVueFlow, type Node as FlowNode, type Edge as FlowEdge } from '@vue-flow/core'
 import '@vue-flow/core/dist/style.css'
-import type { NodeInstance, Connection } from '../types/domain'
+import type { NodeInstance } from '../types/domain'
 import { useNodeTypesStore } from '../stores/nodeTypes'
 
 const props = defineProps<{
@@ -16,7 +44,7 @@ const emit = defineEmits<{
   connect: [connection: Connection]
 }>()
 
-const { onConnect, onNodeDragStop, onNodeClick } = useVueFlow()
+const { onConnect, onNodeDragStop, onNodeClick, updateNodeInternals } = useVueFlow()
 
 const nodeTypesStore = useNodeTypesStore()
 if (!nodeTypesStore.loaded) {
@@ -47,9 +75,11 @@ watch(
         .portsFor(n.node_type, n.parameters)
         .then((ports) => {
           portsByNodeId[n.id] = ports
+          nextTick(() => updateNodeInternals([n.id]))
         })
         .catch(() => {
           portsByNodeId[n.id] = ['main']
+          nextTick(() => updateNodeInternals([n.id]))
         })
     }
   },
@@ -70,10 +100,10 @@ const flowEdges = computed<FlowEdge[]>(() =>
     id: `${c.from_node}:${c.error ? 'error' : c.from_output}->${c.to_node}:${c.to_input}`,
     source: c.from_node,
     target: c.to_node,
-    sourceHandle: c.error ? 'error' : String(c.from_output),
+    sourceHandle: edgeSourceHandle(c),
     targetHandle: String(c.to_input),
     markerEnd: MarkerType.ArrowClosed,
-    style: c.error ? { stroke: '#dc2626' } : undefined,
+    style: edgeStyle(c),
   })),
 )
 
@@ -86,14 +116,7 @@ onNodeDragStop((event) => {
 })
 
 onConnect((connection) => {
-  const isError = connection.sourceHandle === 'error'
-  emit('connect', {
-    from_node: connection.source,
-    from_output: isError ? 0 : Number(connection.sourceHandle ?? 0),
-    to_node: connection.target,
-    to_input: Number(connection.targetHandle ?? 0),
-    error: isError,
-  })
+  emit('connect', connectionFromVueFlow(connection))
 })
 
 function handlePosition(index: number, total: number): string {
