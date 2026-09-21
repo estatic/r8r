@@ -46,14 +46,30 @@ fn parse_tools(tools_param: &serde_json::Value) -> Result<Vec<ToolDecl>, NodeErr
     Ok(decls)
 }
 
-/// Shallow validation: every property the schema marks `required` is
-/// present, and each present property's JSON type matches the schema's
-/// declared `type` (`"string"`, `"number"`/`"integer"`, `"boolean"`,
-/// `"object"`, `"array"`). Not full JSON Schema (no `pattern`, no
-/// `minimum`, no nested-schema checks) -- this exists only to catch an
-/// obviously malformed tool call before it reaches a real node's own
-/// `execute()`, which does its own validation regardless.
+/// Argument keys the model may never supply, regardless of whether a tool
+/// author declares them in `argument_schema` -- these configure a tool
+/// call's infrastructure (which credential, which host, what code runs),
+/// not its task-level input, so they must stay under the workflow author's
+/// control alone. See the merge in `run_agent_loop` below, which relies on
+/// this same deny-list holding for every tool dispatch.
+const DENIED_ARGUMENT_KEYS: [&str; 6] = ["auth", "credential_id", "api_base_url", "base_url", "headers", "script"];
+
+/// Shallow validation: no argument key is one of `DENIED_ARGUMENT_KEYS`;
+/// every property the schema marks `required` is present; and each present
+/// property's JSON type matches the schema's declared `type` (`"string"`,
+/// `"number"`/`"integer"`, `"boolean"`, `"object"`, `"array"`). Not full
+/// JSON Schema (no `pattern`, no `minimum`, no nested-schema checks) --
+/// this exists only to catch an obviously malformed tool call before it
+/// reaches a real node's own `execute()`, which does its own validation
+/// regardless.
 fn validate_arguments(schema: &serde_json::Value, arguments: &serde_json::Value) -> Result<(), String> {
+    if let Some(args_obj) = arguments.as_object() {
+        for key in args_obj.keys() {
+            if DENIED_ARGUMENT_KEYS.contains(&key.as_str()) {
+                return Err(format!("argument \"{key}\" may not be set by the model"));
+            }
+        }
+    }
     let required = schema.get("required").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     for req in &required {
         let Some(key) = req.as_str() else { continue };
@@ -173,8 +189,16 @@ pub(crate) async fn run_agent_loop(
                     }
                     let mut merged_parameters = decl.base_parameters.clone();
                     if let (Some(merged_obj), Some(args_obj)) = (merged_parameters.as_object_mut(), call.arguments.as_object()) {
+                        let declared = decl.argument_schema.get("properties").and_then(|v| v.as_object());
                         for (k, v) in args_obj {
-                            merged_obj.insert(k.clone(), v.clone());
+                            // Only a key the tool author explicitly declared
+                            // may override base_parameters -- an undeclared
+                            // key is silently dropped rather than merged, so
+                            // the model can never inject configuration the
+                            // author never opted the tool into.
+                            if declared.is_some_and(|d| d.contains_key(k)) {
+                                merged_obj.insert(k.clone(), v.clone());
+                            }
                         }
                     }
                     match tool_executor.call_tool(&decl.node_type, merged_parameters).await {
@@ -368,6 +392,73 @@ mod tests {
         assert_eq!(calls[0].0, "core.httpRequest");
         // base_parameters merged with the model's own arguments (arguments win).
         assert_eq!(calls[0].1, serde_json::json!({"method": "GET", "x": 1}));
+    }
+
+    #[tokio::test]
+    async fn an_undeclared_argument_key_is_not_merged_into_tool_parameters() {
+        let provider = ScriptedProvider {
+            responses: Mutex::new(vec![
+                ProviderResponse::ToolCalls {
+                    text: None,
+                    calls: vec![ToolCall { id: "t1".into(), name: "fetch".into(), arguments: serde_json::json!({"x": 1, "url": "https://attacker.example"}) }],
+                },
+                ProviderResponse::Text("Done.".into()),
+            ]),
+        };
+        let spy = std::sync::Arc::new(SpyToolExecutor {
+            calls: Mutex::new(Vec::new()),
+            result: Ok(vec![vec![Item { json: serde_json::json!({"ok": true}), binary: serde_json::json!({}) }]]),
+        });
+        let ctx = ctx_with_tool_executor(spy.clone());
+        let tools = serde_json::json!([{
+            "name": "fetch", "description": "fetch a thing", "node_type": "core.httpRequest",
+            // "url" is deliberately NOT declared in argument_schema.
+            "argument_schema": {"type": "object", "properties": {"x": {"type": "integer"}}, "required": ["x"]},
+            "base_parameters": {"method": "GET", "x": 0, "url": "https://pinned.example"}
+        }]);
+
+        let output = run_agent_loop(&provider, "claude-opus-5", "key", "You are helpful.", "go".into(), &tools, 10, None, &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(output[0][0].json["response"], "Done.");
+        let calls = spy.calls.lock().unwrap();
+        // The model's "url" argument was never declared, so it is dropped --
+        // the author's pinned base_parameters value survives untouched.
+        assert_eq!(calls[0].1, serde_json::json!({"method": "GET", "x": 1, "url": "https://pinned.example"}));
+    }
+
+    #[tokio::test]
+    async fn a_denied_argument_key_is_rejected_even_when_declared_in_the_schema() {
+        let provider = ScriptedProvider {
+            responses: Mutex::new(vec![
+                ProviderResponse::ToolCalls {
+                    text: None,
+                    calls: vec![ToolCall {
+                        id: "t1".into(),
+                        name: "fetch".into(),
+                        arguments: serde_json::json!({"auth": {"credential_id": "11111111-1111-1111-1111-111111111111"}}),
+                    }],
+                },
+                ProviderResponse::Text("Okay.".into()),
+            ]),
+        };
+        let spy = std::sync::Arc::new(SpyToolExecutor { calls: Mutex::new(Vec::new()), result: Ok(vec![vec![]]) });
+        let ctx = ctx_with_tool_executor(spy.clone());
+        let tools = serde_json::json!([{
+            "name": "fetch", "description": "fetch a thing", "node_type": "core.httpRequest",
+            // The author even declared "auth" in the schema -- still denied.
+            "argument_schema": {"type": "object", "properties": {"auth": {"type": "object"}}},
+            "base_parameters": {"auth": {"credential_id": "22222222-2222-2222-2222-222222222222"}}
+        }]);
+
+        let output = run_agent_loop(&provider, "claude-opus-5", "key", "You are helpful.", "go".into(), &tools, 10, None, &ctx)
+            .await
+            .unwrap();
+
+        assert_eq!(output[0][0].json["response"], "Okay.");
+        // Rejected before dispatch -- the tool executor never sees the model's auth override.
+        assert!(spy.calls.lock().unwrap().is_empty());
     }
 
     #[tokio::test]
