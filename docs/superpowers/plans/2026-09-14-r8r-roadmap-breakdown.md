@@ -238,6 +238,23 @@ scaffolding that was the repo's only two compiler warnings. One residual
 fixed directly post-review rather than spending a second review round on
 a docs-only, zero-code-impact correction.
 
+A follow-up `/security-review` pass (3-candidate Step 1, parallel
+false-positive filtering in Step 2, ≥8/10 threshold in Step 3) confirmed
+one High finding at 8/10: the tool-call argument merge in
+`src/nodes/agent.rs` let model-controlled `call.arguments` overwrite any
+key in a tool's `base_parameters`, including keys never declared in
+`argument_schema` (e.g. `api_base_url`, `auth.credential_id`, `script`)
+— an indirect-prompt-injection path to credential exfiltration or SSRF
+via a Telegram-triggered workflow. Fixed (commit `1645c65`): the merge
+now only applies keys present in `argument_schema.properties`, and
+`validate_arguments` hard-denies `auth`/`credential_id`/`api_base_url`/
+`base_url`/`headers`/`script` regardless of schema declaration. Two
+related candidates did not clear the threshold and were left as-is: a
+credential-scoping gap in `EngineToolExecutor` (6/10 — real but not
+independently exploitable, already tracked as 7.7.4) and raw tool-error
+text reaching the LLM provider (5/10 — mostly duplicates what the
+success path already sends by design).
+
 ### 5.1 LLM Provider Clients — **shipped**
 - 5.1.1 Anthropic-compatible HTTP client — done (`src/llm/anthropic.rs`)
   - 5.1.1.1 Request/response types for the Messages API — done (raw `serde_json::Value` navigation, matching this codebase's existing HTTP-node convention — no typed API structs anywhere)
@@ -392,9 +409,9 @@ self-registration).
 
 ### 7.4 Access Control Hardening
 *(carried over from Foundation's final review, Important #3 — documented but not fixed there)*
-- 7.4.1 First-run owner claim or registration gate
-  - 7.4.1.1 Block/gate self-registration after the first user, or an env-flag toggle, consistent with spec's single-shared-workspace v1 model
-- 7.4.2 Per-workflow ACL (stretch — may move to a later plan)
+- 7.4.1 First-run owner claim or registration gate — **shipped** (commit `aec7496`)
+  - 7.4.1.1 Block/gate self-registration after the first user, or an env-flag toggle, consistent with spec's single-shared-workspace v1 model — done. `POST /rest/auth/register` always succeeds for the first user; once any user exists, further registrations return 403 unless `R8R_ALLOW_OPEN_REGISTRATION` is set. New `Storage::any_user_exists` (SQLite: `SELECT EXISTS(...)`) and `AppState.open_registration` (read once at startup, not per-request, to keep the check deterministic under parallel tests instead of mutating process env vars).
+- 7.4.2 Per-workflow ACL (stretch — may move to a later plan) — not started
   - 7.4.2.1 Revisit whether v1's "no per-workflow permissions" decision still holds once real multi-user usage exists
 
 ### 7.5 Operational Polish
