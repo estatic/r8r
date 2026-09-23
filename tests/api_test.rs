@@ -2393,3 +2393,116 @@ async fn webhook_with_unrecognised_respond_value_waits_like_the_default() {
     assert_eq!(execution["status"], "Success");
     assert_eq!(execution["node_outputs"]["set1"][0]["json"]["received"], "Ada");
 }
+
+async fn send(app: &axum::Router, method: &str, uri: &str, token: &str, body: Option<serde_json::Value>) -> (StatusCode, serde_json::Value) {
+    let mut req = Request::builder().method(method).uri(uri).header("authorization", format!("Bearer {token}"));
+    let body = match body {
+        Some(b) => {
+            req = req.header("content-type", "application/json");
+            Body::from(b.to_string())
+        }
+        None => Body::empty(),
+    };
+    let response = app.clone().oneshot(req.body(body).unwrap()).await.unwrap();
+    let status = response.status();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null))
+}
+
+async fn create_cred(app: &axum::Router, token: &str, name: &str, ty: &str, data: serde_json::Value) -> String {
+    let (status, body) = send(app, "POST", "/rest/credentials", token, Some(serde_json::json!({"name": name, "credential_type": ty, "data": data}))).await;
+    assert_eq!(status, StatusCode::CREATED);
+    body["id"].as_str().unwrap().to_string()
+}
+
+#[tokio::test]
+async fn get_credential_by_id_returns_text_fields_but_never_secrets() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "cred-get@example.com").await;
+    let id = create_cred(&app, &token, "hdr", "apiKeyHeader", serde_json::json!({"header_name": "X-Key", "value": "top-secret"})).await;
+    let (status, body) = send(&app, "GET", &format!("/rest/credentials/{id}"), &token, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["fields"]["header_name"], "X-Key");
+    assert!(body["fields"].get("value").is_none());
+    assert!(!body.to_string().contains("top-secret"));
+    assert_eq!(body["used_by"], 0);
+    let (status, _) = send(&app, "GET", &format!("/rest/credentials/{}", uuid::Uuid::new_v4()), &token, None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn patch_name_only_keeps_secret() {
+    let (app, state) = test_app_with_state().await;
+    let token = register_and_get_token(&app, "cred-rename@example.com").await;
+    let id = create_cred(&app, &token, "bot", "telegramApi", serde_json::json!({"bot_token": "123:ABC"})).await;
+    let (status, body) = send(&app, "PATCH", &format!("/rest/credentials/{id}"), &token, Some(serde_json::json!({"name": "  renamed bot  "}))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], "renamed bot");
+    let stored = state.storage.get_credential(id.parse().unwrap()).await.unwrap().unwrap();
+    assert_eq!(stored.data, serde_json::json!({"bot_token": "123:ABC"}));
+    assert_eq!(stored.credential_type, "telegramApi");
+}
+
+#[tokio::test]
+async fn patch_merges_typed_data_and_replaces_untyped_data() {
+    let (app, state) = test_app_with_state().await;
+    let token = register_and_get_token(&app, "cred-patch@example.com").await;
+    let typed = create_cred(&app, &token, "bot", "telegramApi", serde_json::json!({"bot_token": "old"})).await;
+    let (s, _) = send(&app, "PATCH", &format!("/rest/credentials/{typed}"), &token, Some(serde_json::json!({"data": {"bot_token": ""}}))).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(state.storage.get_credential(typed.parse().unwrap()).await.unwrap().unwrap().data, serde_json::json!({"bot_token": "old"}));
+    let (s, _) = send(&app, "PATCH", &format!("/rest/credentials/{typed}"), &token, Some(serde_json::json!({"data": {"bot_token": "new"}, "credential_type": "bearerToken"}))).await;
+    assert_eq!(s, StatusCode::OK);
+    let stored = state.storage.get_credential(typed.parse().unwrap()).await.unwrap().unwrap();
+    assert_eq!(stored.data, serde_json::json!({"bot_token": "new"}));
+    assert_eq!(stored.credential_type, "telegramApi");
+
+    let untyped = create_cred(&app, &token, "custom", "myCustomThing", serde_json::json!({"a": 1})).await;
+    let (s, _) = send(&app, "PATCH", &format!("/rest/credentials/{untyped}"), &token, Some(serde_json::json!({"data": {"b": 2}}))).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(state.storage.get_credential(untyped.parse().unwrap()).await.unwrap().unwrap().data, serde_json::json!({"b": 2}));
+}
+
+#[tokio::test]
+async fn patch_rejects_blank_name_bad_data_and_missing_ids() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "cred-bad@example.com").await;
+    let id = create_cred(&app, &token, "bot", "telegramApi", serde_json::json!({"bot_token": "x"})).await;
+    let (s, _) = send(&app, "PATCH", &format!("/rest/credentials/{id}"), &token, Some(serde_json::json!({"name": "   "}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = send(&app, "PATCH", &format!("/rest/credentials/{id}"), &token, Some(serde_json::json!({"data": "not an object"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = send(&app, "PATCH", &format!("/rest/credentials/{}", uuid::Uuid::new_v4()), &token, Some(serde_json::json!({"name": "x"}))).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn delete_is_refused_while_a_workflow_uses_the_credential() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "cred-del@example.com").await;
+    let id = create_cred(&app, &token, "bearer", "bearerToken", serde_json::json!({"token": "t"})).await;
+    let wf_body = serde_json::json!({
+        "name": "uses-cred",
+        "nodes": [{"id": "h", "node_type": "core.httpRequest", "position": [0.0, 0.0], "parameters": {"url": "https://example.com", "auth": {"type": "bearer", "credential_id": id}}}],
+        "connections": []
+    });
+    let (s, wf) = send(&app, "POST", "/rest/workflows", &token, Some(wf_body)).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let wf_id = wf["id"].as_str().unwrap().to_string();
+
+    let (s, list) = send(&app, "GET", "/rest/credentials", &token, None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(list.as_array().unwrap().iter().find(|c| c["id"] == id.as_str()).unwrap()["used_by"], 1);
+
+    let (s, body) = send(&app, "DELETE", &format!("/rest/credentials/{id}"), &token, None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(body["error"], "credential is in use");
+    assert_eq!(body["workflows"][0]["name"], "uses-cred");
+
+    let (s, _) = send(&app, "DELETE", &format!("/rest/workflows/{wf_id}"), &token, None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _) = send(&app, "DELETE", &format!("/rest/credentials/{id}"), &token, None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+    let (s, _) = send(&app, "DELETE", &format!("/rest/credentials/{id}"), &token, None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}

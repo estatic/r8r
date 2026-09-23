@@ -31,6 +31,12 @@ pub fn build_router(state: AppState) -> Router {
         .route("/rest/executions/:id", get(executions::get_execution))
         .route("/rest/credentials", post(credentials::create_credential).get(credentials::list_credentials))
         .route(
+            "/rest/credentials/:id",
+            get(credentials::get_credential)
+                .patch(credentials::update_credential)
+                .delete(credentials::delete_credential),
+        )
+        .route(
             "/webhook/:workflow_id/:path",
             axum::routing::get(webhook::handle_webhook).post(webhook::handle_webhook),
         )
