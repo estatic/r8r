@@ -4,6 +4,7 @@ import { useRoute } from 'vue-router'
 import { api, ApiError } from '../api/client'
 import { useExecutionsStore } from '../stores/executions'
 import { useLiveExecutionSocket } from '../composables/useLiveExecutionSocket'
+import { useWorkflowRun } from '../composables/useWorkflowRun'
 import type { Workflow, Connection, NodeInstance, Execution } from '../types/domain'
 import WorkflowCanvas from '../components/WorkflowCanvas.vue'
 import AddNodeMenu from '../components/AddNodeMenu.vue'
@@ -17,10 +18,11 @@ const executionsStore = useExecutionsStore()
 const workflow = ref<Workflow | null>(null)
 const selectedNodeId = ref<string | null>(null)
 const saving = ref(false)
-const executing = ref(false)
 const loadingHistory = ref(false)
 const live = useLiveExecutionSocket(workflowId)
 const execution = live.execution
+const run = useWorkflowRun(workflowId, execution)
+const executing = run.executing
 const loadError = ref('')
 const actionError = ref('')
 
@@ -116,13 +118,10 @@ async function save() {
 
 async function execute() {
   actionError.value = ''
-  executing.value = true
   try {
-    execution.value = await api.post<Execution>(`/rest/workflows/${workflowId}/execute`)
+    await run.execute()
   } catch (e) {
     actionError.value = messageFor(e, 'Failed to execute workflow.')
-  } finally {
-    executing.value = false
   }
 }
 

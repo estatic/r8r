@@ -66,8 +66,8 @@ export function useLiveExecutionSocket(workflowId: string): LiveExecutionSocket 
       try {
         applyEvent(JSON.parse((e as MessageEvent).data as string) as LiveExecutionEvent)
       } catch {
-        // Malformed frame -- ignore. The final REST response from execute()
-        // is still authoritative and will land regardless.
+        // Malformed frame -- ignore. useWorkflowRun's polling fallback
+        // still resolves the run from GET /rest/executions/:id.
       }
     })
   }
