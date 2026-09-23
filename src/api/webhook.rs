@@ -39,20 +39,35 @@ pub async fn handle_webhook(
 
     let trigger_item = build_trigger_item(&headers, &query, &body);
 
-    let execution = match crate::execution_runner::run_and_track_execution(
-        &state.storage,
-        &state.execution_events,
-        &state.registry,
-        &workflow,
+    // The run is always a detached background task (Plan 8.7), so a caller
+    // disconnecting never cancels it; `respond` only decides whether this
+    // handler waits for the result.
+    let respond_immediately =
+        start_node.parameters.get("respond").and_then(|v| v.as_str()) == Some("immediately");
+    let (started, handle) = match crate::execution_runner::start_execution(
+        state.storage.clone(),
+        state.execution_events.clone(),
+        state.registry.clone(),
+        workflow.clone(),
         ExecutionMode::Webhook,
         Some(vec![trigger_item]),
-        &std::collections::HashMap::new(),
+        std::collections::HashMap::new(),
     )
     .await
     {
-        Ok(execution) => execution,
+        Ok(started) => started,
         Err(e) => {
             tracing::error!(error = %e, "webhook: failed to persist new execution");
+            return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+        }
+    };
+    if respond_immediately {
+        return (StatusCode::ACCEPTED, Json(serde_json::json!({ "execution_id": started.id }))).into_response();
+    }
+    let execution = match handle.await {
+        Ok(execution) => execution,
+        Err(e) => {
+            tracing::error!(error = %e, "webhook: execution task failed");
             return StatusCode::INTERNAL_SERVER_ERROR.into_response();
         }
     };

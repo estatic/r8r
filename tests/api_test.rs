@@ -2321,3 +2321,69 @@ async fn node_settings_round_trip_and_invalid_update_leaves_workflow_unchanged()
     let fetched: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     assert_eq!(fetched["nodes"][0]["settings"], settings);
 }
+
+async fn create_active_webhook_workflow(app: &axum::Router, token: &str, hook_path: &str, respond: Option<&str>) -> String {
+    let mut params = serde_json::json!({"path": hook_path, "method": "POST"});
+    if let Some(r) = respond {
+        params["respond"] = serde_json::json!(r);
+    }
+    let workflow_body = serde_json::json!({
+        "name": "webhook-respond",
+        "nodes": [
+            {"id": "hook", "node_type": "core.webhook", "position": [0.0, 0.0], "parameters": params},
+            {"id": "set1", "node_type": "core.set", "position": [1.0, 0.0], "parameters": {"fields": {"received": "{{ $json.body.name }}"}}}
+        ],
+        "connections": [{"from_node": "hook", "from_output": 0, "to_node": "set1", "to_input": 0}]
+    });
+    let response = app.clone()
+        .oneshot(Request::builder().method("POST").uri("/rest/workflows")
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(workflow_body.to_string())).unwrap())
+        .await.unwrap();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let workflow_id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string();
+    let response = app.clone()
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+            .header("content-type", "application/json")
+            .header("authorization", format!("Bearer {token}"))
+            .body(Body::from(serde_json::json!({"active": true}).to_string())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    workflow_id
+}
+
+async fn fire_webhook(app: &axum::Router, workflow_id: &str, hook_path: &str) -> axum::response::Response {
+    app.clone()
+        .oneshot(Request::builder().method("POST").uri(format!("/webhook/{workflow_id}/{hook_path}"))
+            .header("content-type", "application/json")
+            .body(Body::from(serde_json::json!({"name": "Ada"}).to_string())).unwrap())
+        .await.unwrap()
+}
+
+#[tokio::test]
+async fn webhook_respond_immediately_returns_202_with_execution_id() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "webhook-immediate@example.com").await;
+    let workflow_id = create_active_webhook_workflow(&app, &token, "fast-hook", Some("immediately")).await;
+    let response = fire_webhook(&app, &workflow_id, "fast-hook").await;
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let body: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let execution = wait_for_execution(&app, &token, body["execution_id"].as_str().unwrap()).await;
+    assert_eq!(execution["status"], "Success");
+    assert_eq!(execution["node_outputs"]["set1"][0]["json"]["received"], "Ada");
+}
+
+#[tokio::test]
+async fn webhook_with_unrecognised_respond_value_waits_like_the_default() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "webhook-unknown@example.com").await;
+    let workflow_id = create_active_webhook_workflow(&app, &token, "odd-hook", Some("whenever")).await;
+    let response = fire_webhook(&app, &workflow_id, "odd-hook").await;
+    assert_eq!(response.status(), StatusCode::OK);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(execution["status"], "Success");
+    assert_eq!(execution["node_outputs"]["set1"][0]["json"]["received"], "Ada");
+}

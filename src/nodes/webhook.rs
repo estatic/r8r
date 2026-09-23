@@ -13,7 +13,7 @@ impl Node for WebhookNode {
         "Webhook"
     }
     fn description(&self) -> &'static str {
-        "Starts a run when an HTTP request hits this workflow's webhook URL."
+        "Starts a run when an HTTP request hits this workflow's webhook URL. Set `respond` to \"immediately\" to reply 202 at once instead of waiting for the result."
     }
     fn category(&self) -> crate::node::NodeCategory {
         crate::node::NodeCategory::Trigger
