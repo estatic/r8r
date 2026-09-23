@@ -10,12 +10,24 @@ export interface NodeTypeMeta {
   output_ports: string[]
 }
 
+export interface RetryPolicy {
+  max_tries: number
+  wait_ms: number
+}
+
+export interface NodeSettings {
+  retry: RetryPolicy | null
+  timeout_ms: number | null
+  continue_on_fail: boolean
+}
+
 export interface NodeInstance {
   id: string
   node_type: string
   position: [number, number]
   parameters: Record<string, unknown>
   disabled: boolean
+  settings?: NodeSettings
 }
 
 export interface Connection {
