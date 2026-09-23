@@ -12,7 +12,9 @@ async fn main() -> anyhow::Result<()> {
     // production where vars are set directly.
     dotenvy::dotenv().ok();
 
-    tracing_subscriber::fmt::init();
+    let log_file = std::env::var("R8R_LOG_FILE").ok().filter(|v| !v.trim().is_empty());
+    // Held until main returns so the log file's background writer flushes.
+    let _log_guard = r8r::logging::init(log_file.as_deref().map(std::path::Path::new))?;
 
     let database_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite:./r8r.db?mode=rwc".into());
@@ -28,9 +30,22 @@ async fn main() -> anyhow::Result<()> {
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
         .unwrap_or(false);
 
-    let storage = SqliteStorage::new(&database_url, credentials_key).await?;
     let mut registry = NodeRegistry::new();
     r8r::nodes::register_all(&mut registry);
+    for line in r8r::logging::startup_summary(&r8r::logging::StartupInfo {
+        version: env!("CARGO_PKG_VERSION").to_string(),
+        port,
+        database_url: database_url.clone(),
+        open_registration,
+        node_types: registry.type_names().len(),
+        log_file: log_file.clone(),
+    }) {
+        tracing::info!("{line}");
+    }
+
+    let storage = SqliteStorage::new(&database_url, credentials_key)
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot open database {}: {e}", r8r::logging::redact_url(&database_url)))?;
     let scheduler = Scheduler::new().await?;
 
     let state = AppState {
@@ -43,13 +58,29 @@ async fn main() -> anyhow::Result<()> {
         open_registration,
     };
 
-    if let Err(e) = r8r::triggers::reactivate_all(&state).await {
-        tracing::warn!(error = %e, "failed to reactivate workflow triggers on startup");
+    match r8r::triggers::reactivate_all(&state).await {
+        Ok(s) => tracing::info!(
+            "reactivated {} active workflow(s): {} schedule, {} webhook, {} telegram{}",
+            s.schedule + s.webhook + s.telegram,
+            s.schedule,
+            s.webhook,
+            s.telegram,
+            if s.failed > 0 { format!(" ({} failed, see warnings above)", s.failed) } else { String::new() }
+        ),
+        Err(e) => tracing::warn!(error = %e, "failed to reactivate workflow triggers on startup"),
     }
 
     let app = r8r::api::build_router(state);
-    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}")).await?;
-    tracing::info!("r8r listening on :{port}");
-    axum::serve(listener, app).await?;
+    let listener = tokio::net::TcpListener::bind(format!("0.0.0.0:{port}"))
+        .await
+        .map_err(|e| anyhow::anyhow!("cannot listen on port {port}: {e} (set PORT to use another port)"))?;
+    tracing::info!("r8r ready on http://localhost:{port}");
+    axum::serve(listener, app)
+        .with_graceful_shutdown(async {
+            let _ = tokio::signal::ctrl_c().await;
+            tracing::info!("shutdown requested, finishing in-flight requests");
+        })
+        .await?;
+    tracing::info!("r8r stopped");
     Ok(())
 }
