@@ -38,7 +38,9 @@ watch(
 
 // Mirrors the backend's validate_nodes ranges; the backend 400 stays the authority.
 function buildSettings(): NodeSettings | string {
-  const retry = retryEnabled.value ? { max_tries: Number(maxTries.value), wait_ms: Number(waitMs.value) } : null
+  // A cleared field is NaN (rejected below), not Number('') === 0.
+  const num = (v: number | string) => (v === '' ? NaN : Number(v))
+  const retry = retryEnabled.value ? { max_tries: num(maxTries.value), wait_ms: num(waitMs.value) } : null
   if (retry && !(Number.isInteger(retry.max_tries) && retry.max_tries >= 2 && retry.max_tries <= 10)) {
     return 'Max tries must be between 2 and 10.'
   }

@@ -84,6 +84,15 @@ describe('NodeConfigPanel', () => {
     expect(emittedSettings(wrapper)?.retry).toEqual({ max_tries: 4, wait_ms: 0 })
   })
 
+  it('rejects a cleared wait field instead of silently saving 0 ms', async () => {
+    const wrapper = mount(NodeConfigPanel, { props: { node } })
+    await wrapper.find('[data-testid="retry-enabled"]').setValue(true)
+    await wrapper.find('[data-testid="wait-ms"]').setValue('')
+    await clickApply(wrapper)
+    expect(wrapper.text()).toContain('Wait between tries must be between 0 and 60000 ms.')
+    expect(wrapper.emitted('update')).toBeFalsy()
+  })
+
   it('shows an error and emits nothing for out-of-range max tries', async () => {
     const wrapper = mount(NodeConfigPanel, { props: { node } })
     await wrapper.find('[data-testid="retry-enabled"]').setValue(true)
