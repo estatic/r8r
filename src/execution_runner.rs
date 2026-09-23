@@ -103,15 +103,19 @@ impl ExecutionObserver for LiveExecutionTracker {
     }
 }
 
-pub async fn run_and_track_execution(
-    storage: &Arc<dyn Storage>,
-    events: &broadcast::Sender<ExecutionEvent>,
-    registry: &Arc<NodeRegistry>,
-    workflow: &Workflow,
+/// Persists a `Running` execution, then runs the workflow and records its
+/// outcome in a spawned task (Plan 8.7). The returned handle yields the
+/// final `Execution`; dropping it detaches the run, which still completes
+/// -- no caller going away can cancel a run mid-node.
+pub async fn start_execution(
+    storage: Arc<dyn Storage>,
+    events: broadcast::Sender<ExecutionEvent>,
+    registry: Arc<NodeRegistry>,
+    workflow: Workflow,
     mode: ExecutionMode,
     trigger_items: Option<Vec<Item>>,
-    credentials: &HashMap<Uuid, serde_json::Value>,
-) -> anyhow::Result<Execution> {
+    credentials: HashMap<Uuid, serde_json::Value>,
+) -> anyhow::Result<(Execution, tokio::task::JoinHandle<Execution>)> {
     let execution = Execution {
         id: Uuid::new_v4(),
         workflow_id: workflow.id,
@@ -123,32 +127,60 @@ pub async fn run_and_track_execution(
     };
     storage.create_execution(&execution).await?;
 
-    let tracker = LiveExecutionTracker::new(execution, storage.clone(), events.clone());
-    let result = crate::engine::execute_workflow_seeded(workflow, registry, trigger_items, credentials, &tracker).await;
+    let started = execution.clone();
+    let handle = tokio::spawn(async move {
+        let tracker = LiveExecutionTracker::new(execution, storage.clone(), events.clone());
+        let result =
+            crate::engine::execute_workflow_seeded(&workflow, &registry, trigger_items, &credentials, &tracker).await;
 
-    let mut final_execution = tracker.into_execution();
-    match &result {
-        Ok(outputs) => {
-            final_execution.status = ExecutionStatus::Success;
-            final_execution.node_outputs = outputs.clone();
+        let mut final_execution = tracker.into_execution();
+        match &result {
+            Ok(outputs) => {
+                final_execution.status = ExecutionStatus::Success;
+                final_execution.node_outputs = outputs.clone();
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, workflow_id = %workflow.id, "workflow execution failed");
+                final_execution.status = ExecutionStatus::Error;
+            }
         }
-        Err(e) => {
-            tracing::warn!(error = %e, workflow_id = %workflow.id, "workflow execution failed");
-            final_execution.status = ExecutionStatus::Error;
+        final_execution.finished_at = Some(chrono::Utc::now());
+        if let Err(e) = storage.update_execution(&final_execution).await {
+            tracing::error!(error = %e, "failed to persist final execution result");
         }
-    }
-    final_execution.finished_at = Some(chrono::Utc::now());
-    if let Err(e) = storage.update_execution(&final_execution).await {
-        tracing::error!(error = %e, "failed to persist final execution result");
-    }
 
-    let _ = events.send(ExecutionEvent {
-        execution_id: final_execution.id,
-        workflow_id: workflow.id,
-        kind: ExecutionEventKind::ExecutionFinished { status: final_execution.status.clone() },
+        let _ = events.send(ExecutionEvent {
+            execution_id: final_execution.id,
+            workflow_id: workflow.id,
+            kind: ExecutionEventKind::ExecutionFinished { status: final_execution.status.clone() },
+        });
+        final_execution
     });
+    Ok((started, handle))
+}
 
-    Ok(final_execution)
+/// Starts a run and waits for it. Used where the caller wants the result
+/// inline (schedule triggers, tests).
+pub async fn run_and_track_execution(
+    storage: &Arc<dyn Storage>,
+    events: &broadcast::Sender<ExecutionEvent>,
+    registry: &Arc<NodeRegistry>,
+    workflow: &Workflow,
+    mode: ExecutionMode,
+    trigger_items: Option<Vec<Item>>,
+    credentials: &HashMap<Uuid, serde_json::Value>,
+) -> anyhow::Result<Execution> {
+    let (_, handle) = start_execution(
+        storage.clone(),
+        events.clone(),
+        registry.clone(),
+        workflow.clone(),
+        mode,
+        trigger_items,
+        credentials.clone(),
+    )
+    .await?;
+    handle.await.map_err(|e| anyhow::anyhow!("execution task failed: {e}"))
 }
 
 #[cfg(test)]
@@ -317,5 +349,90 @@ mod tests {
             kinds.last().unwrap(),
             ExecutionEventKind::ExecutionFinished { status: ExecutionStatus::Success }
         ));
+    }
+
+    use super::start_execution;
+
+    /// Sleeps `ms` before passing its input through.
+    struct SleepNode {
+        ms: u64,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::node::Node for SleepNode {
+        fn type_name(&self) -> &'static str {
+            "test.sleep"
+        }
+        fn display_name(&self) -> &'static str {
+            "Sleep"
+        }
+        fn description(&self) -> &'static str {
+            "Test-only node that sleeps."
+        }
+        fn category(&self) -> crate::node::NodeCategory {
+            crate::node::NodeCategory::Action
+        }
+        async fn execute(&self, ctx: &crate::node::NodeExecutionContext) -> Result<crate::node::NodeOutput, crate::node::NodeError> {
+            tokio::time::sleep(std::time::Duration::from_millis(self.ms)).await;
+            Ok(vec![ctx.input_items.clone()])
+        }
+    }
+
+    fn sleepy_setup(ms: u64) -> (Arc<NodeRegistry>, Workflow) {
+        let mut r = NodeRegistry::new();
+        crate::nodes::register_all(&mut r);
+        r.register(Box::new(SleepNode { ms }));
+        let mut wf = linear_workflow();
+        wf.nodes[1].node_type = "test.sleep".into();
+        (Arc::new(r), wf)
+    }
+
+    async fn memory_storage() -> Arc<dyn Storage> {
+        Arc::new(SqliteStorage::new("sqlite::memory:", [0u8; 32]).await.unwrap())
+    }
+
+    #[tokio::test]
+    async fn start_execution_returns_while_the_run_is_still_running() {
+        let storage = memory_storage().await;
+        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        let (registry, wf) = sleepy_setup(200);
+        storage.create_workflow(&wf).await.unwrap();
+
+        let (started, handle) = start_execution(storage.clone(), events, registry, wf, ExecutionMode::Manual, None, HashMap::new())
+            .await
+            .unwrap();
+        assert_eq!(started.status, ExecutionStatus::Running);
+        assert_eq!(storage.get_execution(started.id).await.unwrap().unwrap().status, ExecutionStatus::Running);
+
+        let finished = handle.await.unwrap();
+        assert_eq!(finished.id, started.id);
+        assert_eq!(finished.status, ExecutionStatus::Success);
+        assert_eq!(storage.get_execution(started.id).await.unwrap().unwrap().status, ExecutionStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn dropping_the_handle_does_not_cancel_the_run() {
+        let storage = memory_storage().await;
+        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        let (registry, wf) = sleepy_setup(100);
+        storage.create_workflow(&wf).await.unwrap();
+
+        let (started, handle) = start_execution(storage.clone(), events, registry, wf, ExecutionMode::Manual, None, HashMap::new())
+            .await
+            .unwrap();
+        drop(handle);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let status = storage.get_execution(started.id).await.unwrap().unwrap().status;
+                if status != ExecutionStatus::Running {
+                    assert_eq!(status, ExecutionStatus::Success);
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("detached run should still finish");
     }
 }
