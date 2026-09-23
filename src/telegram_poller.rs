@@ -2,7 +2,9 @@ use crate::domain::{ExecutionMode, Item, NodeInstance, Workflow};
 use crate::node::NodeRegistry;
 use crate::state::AppState;
 use crate::storage::Storage;
+use std::collections::HashMap;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use uuid::Uuid;
 
 const DEFAULT_TELEGRAM_API_BASE_URL: &str = "https://api.telegram.org";
@@ -23,6 +25,102 @@ const CLIENT_TIMEOUT_SECS: u64 = GETUPDATES_TIMEOUT_SECS + 5;
 /// workflow re-fetch, so a persistent failure (bad token, network outage)
 /// doesn't spin the loop in a tight, log-flooding retry storm.
 const RETRY_BACKOFF_SECS: u64 = 5;
+
+/// A per-chat worker exits after this long without an update; the poller
+/// spawns a fresh one on that chat's next update.
+const CHAT_WORKER_IDLE: std::time::Duration = std::time::Duration::from_secs(300);
+
+/// Chat id an update belongs to, from whichever update type carries one.
+/// `None` for updates with no chat (polls, inline queries, ...), which
+/// share one queue.
+fn chat_key(update: &serde_json::Value) -> Option<i64> {
+    ["message", "edited_message", "channel_post", "edited_channel_post"]
+        .iter()
+        .find_map(|field| update.get(field))
+        .or_else(|| update.get("callback_query").and_then(|c| c.get("message")))
+        .and_then(|m| m.get("chat"))
+        .and_then(|c| c.get("id"))
+        .and_then(|id| id.as_i64())
+}
+
+/// One update to run, with the workflow and credentials as they were when
+/// its batch was polled.
+struct TelegramJob {
+    item: Item,
+    workflow: Workflow,
+    credentials: HashMap<Uuid, serde_json::Value>,
+}
+
+/// Routes updates to per-chat workers (Plan 8.7): each chat's updates run
+/// one at a time in arrival order, different chats run in parallel, and
+/// the poll loop never waits on a run.
+struct ChatQueues {
+    workers: HashMap<Option<i64>, mpsc::UnboundedSender<TelegramJob>>,
+    storage: Arc<dyn Storage>,
+    events: tokio::sync::broadcast::Sender<crate::execution_runner::ExecutionEvent>,
+    registry: Arc<NodeRegistry>,
+    idle: std::time::Duration,
+}
+
+impl ChatQueues {
+    fn new(
+        storage: Arc<dyn Storage>,
+        events: tokio::sync::broadcast::Sender<crate::execution_runner::ExecutionEvent>,
+        registry: Arc<NodeRegistry>,
+        idle: std::time::Duration,
+    ) -> Self {
+        Self { workers: HashMap::new(), storage, events, registry, idle }
+    }
+
+    fn dispatch(&mut self, key: Option<i64>, job: TelegramJob) {
+        // A worker that idled out has dropped its receiver, so the send
+        // fails and hands the job back: spawn a fresh worker for it.
+        let job = match self.workers.get(&key) {
+            Some(tx) => match tx.send(job) {
+                Ok(()) => return,
+                Err(mpsc::error::SendError(job)) => job,
+            },
+            None => job,
+        };
+        let (tx, rx) = mpsc::unbounded_channel();
+        tokio::spawn(chat_worker(rx, self.storage.clone(), self.events.clone(), self.registry.clone(), self.idle));
+        let _ = tx.send(job);
+        self.workers.insert(key, tx);
+    }
+}
+
+async fn chat_worker(
+    mut rx: mpsc::UnboundedReceiver<TelegramJob>,
+    storage: Arc<dyn Storage>,
+    events: tokio::sync::broadcast::Sender<crate::execution_runner::ExecutionEvent>,
+    registry: Arc<NodeRegistry>,
+    idle: std::time::Duration,
+) {
+    while let Ok(Some(job)) = tokio::time::timeout(idle, rx.recv()).await {
+        let workflow_id = job.workflow.id;
+        match crate::execution_runner::start_execution(
+            storage.clone(),
+            events.clone(),
+            registry.clone(),
+            job.workflow,
+            ExecutionMode::Telegram,
+            Some(vec![job.item]),
+            job.credentials,
+        )
+        .await
+        {
+            // Await before taking the next job: that's the per-chat ordering.
+            Ok((_, handle)) => {
+                if let Err(e) = handle.await {
+                    tracing::error!(error = %e, workflow_id = %workflow_id, "telegram poller: execution task failed");
+                }
+            }
+            Err(e) => {
+                tracing::error!(error = %e, workflow_id = %workflow_id, "telegram poller: failed to persist new execution");
+            }
+        }
+    }
+}
 
 fn build_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
@@ -267,6 +365,7 @@ pub async fn poll_telegram_updates(
     let mut offset: Option<i64> = None;
     let mut current_workflow = workflow;
     let mut first_iteration = true;
+    let mut queues = ChatQueues::new(storage.clone(), events.clone(), registry.clone(), CHAT_WORKER_IDLE);
 
     loop {
         if !first_iteration {
@@ -327,19 +426,11 @@ pub async fn poll_telegram_updates(
 
             let trigger_item = Item { json: update, binary: serde_json::json!({}) };
 
-            if let Err(e) = crate::execution_runner::run_and_track_execution(
-                &storage,
-                &events,
-                &registry,
-                &current_workflow,
-                ExecutionMode::Telegram,
-                Some(vec![trigger_item]),
-                &credentials,
-            )
-            .await
-            {
-                tracing::error!(error = %e, workflow_id = %current_workflow.id, "telegram poller: failed to persist new execution");
-            }
+            let key = chat_key(&trigger_item.json);
+            queues.dispatch(
+                key,
+                TelegramJob { item: trigger_item, workflow: current_workflow.clone(), credentials: credentials.clone() },
+            );
         }
     }
 }
@@ -530,28 +621,24 @@ mod poller_tests {
         let (events, _rx) = tokio::sync::broadcast::channel(16);
         let poll = tokio::spawn(poll_telegram_updates(storage.clone(), registry, events, wf.clone(), "111:AAA".into(), telegram.uri()));
 
-        // Bounded wait: the poller's tight loop against the mock (no real
-        // 30s Telegram-side wait involved) should process the one queued
-        // update well within this window. The outer timeout is a
-        // belt-and-braces bound so a broken poll loop fails the test
-        // instead of hanging the suite, matching the established pattern
-        // in `http_request.rs`'s timeout test. Because
-        // `poll_telegram_updates` processes one batch (get_updates,
-        // resolve credentials, create+execute+update every update in it)
-        // fully before looping around to its next `get_updates` call, by
-        // the time the SECOND getUpdates request is observed here, the
-        // first update's `Execution` row has already been created AND
-        // updated -- no race with the assertions below.
+        // Runs are background tasks since Plan 8.7: wait for the persisted
+        // Telegram-mode execution to reach Success rather than for the
+        // poller's next getUpdates call.
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             loop {
-                if telegram.received_requests().await.unwrap().len() >= 2 {
+                if recorded
+                    .lock()
+                    .unwrap()
+                    .iter()
+                    .any(|e| e.mode == ExecutionMode::Telegram && e.status == ExecutionStatus::Success)
+                {
                     break;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(20)).await;
             }
         })
         .await
-        .expect("poller should have made at least 2 getUpdates calls (one with an update, one empty) within 5s");
+        .expect("a Telegram-mode execution should reach Success within 5s");
 
         poll.abort();
 
@@ -623,5 +710,117 @@ mod poller_tests {
             .await
             .expect("poll task should exit on its own once the workflow is deactivated")
             .expect("poll task must not panic");
+    }
+
+    use std::sync::Mutex as StdMutex;
+
+    #[test]
+    fn chat_key_reads_every_supported_update_shape() {
+        for field in ["message", "edited_message", "channel_post", "edited_channel_post"] {
+            let update = serde_json::json!({"update_id": 1, field: {"chat": {"id": 42}}});
+            assert_eq!(chat_key(&update), Some(42), "{field}");
+        }
+        let callback = serde_json::json!({"update_id": 1, "callback_query": {"message": {"chat": {"id": -7}}}});
+        assert_eq!(chat_key(&callback), Some(-7));
+        let no_chat = serde_json::json!({"update_id": 1, "poll": {"id": "x"}});
+        assert_eq!(chat_key(&no_chat), None);
+    }
+
+    /// Records `json.seq` after sleeping `json.sleep_ms`.
+    struct RecordNode {
+        seen: Arc<StdMutex<Vec<i64>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::node::Node for RecordNode {
+        fn type_name(&self) -> &'static str {
+            "test.record"
+        }
+        fn display_name(&self) -> &'static str {
+            "Record"
+        }
+        fn description(&self) -> &'static str {
+            "Test-only node that records the order items arrive in."
+        }
+        fn category(&self) -> crate::node::NodeCategory {
+            crate::node::NodeCategory::Action
+        }
+        async fn execute(&self, ctx: &crate::node::NodeExecutionContext) -> Result<crate::node::NodeOutput, crate::node::NodeError> {
+            let json = &ctx.input_items[0].json;
+            tokio::time::sleep(std::time::Duration::from_millis(json["sleep_ms"].as_u64().unwrap_or(0))).await;
+            self.seen.lock().unwrap().push(json["seq"].as_i64().unwrap());
+            Ok(vec![ctx.input_items.clone()])
+        }
+    }
+
+    async fn queue_fixture(idle: std::time::Duration) -> (ChatQueues, Workflow, Arc<StdMutex<Vec<i64>>>) {
+        let seen = Arc::new(StdMutex::new(Vec::new()));
+        let mut registry = NodeRegistry::new();
+        crate::nodes::register_all(&mut registry);
+        registry.register(Box::new(RecordNode { seen: seen.clone() }));
+        let storage: Arc<dyn Storage> =
+            Arc::new(crate::storage::sqlite::SqliteStorage::new("sqlite::memory:", [0u8; 32]).await.unwrap());
+        let wf = Workflow {
+            id: Uuid::new_v4(),
+            name: "queue".into(),
+            active: true,
+            nodes: vec![
+                NodeInstance { id: "trigger".into(), node_type: "core.manualTrigger".into(), position: (0.0, 0.0), parameters: serde_json::json!({}), disabled: false, settings: Default::default() },
+                NodeInstance { id: "rec".into(), node_type: "test.record".into(), position: (1.0, 0.0), parameters: serde_json::json!({}), disabled: false, settings: Default::default() },
+            ],
+            connections: vec![Connection { from_node: "trigger".into(), from_output: 0, to_node: "rec".into(), to_input: 0, error: false }],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        storage.create_workflow(&wf).await.unwrap();
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        (ChatQueues::new(storage, events, Arc::new(registry), idle), wf, seen)
+    }
+
+    fn job(wf: &Workflow, seq: i64, sleep_ms: u64) -> TelegramJob {
+        TelegramJob {
+            item: Item { json: serde_json::json!({"seq": seq, "sleep_ms": sleep_ms}), binary: serde_json::json!({}) },
+            workflow: wf.clone(),
+            credentials: HashMap::new(),
+        }
+    }
+
+    async fn wait_until(seen: &Arc<StdMutex<Vec<i64>>>, pred: impl Fn(&[i64]) -> bool) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            while !pred(&seen.lock().unwrap()) {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("condition not reached within 5s");
+    }
+
+    #[tokio::test]
+    async fn same_chat_updates_run_in_arrival_order() {
+        let (mut queues, wf, seen) = queue_fixture(CHAT_WORKER_IDLE).await;
+        queues.dispatch(Some(1), job(&wf, 1, 200));
+        queues.dispatch(Some(1), job(&wf, 2, 0));
+        wait_until(&seen, |s| s.len() == 2).await;
+        assert_eq!(*seen.lock().unwrap(), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn a_slow_chat_does_not_block_another_chat() {
+        let (mut queues, wf, seen) = queue_fixture(CHAT_WORKER_IDLE).await;
+        queues.dispatch(Some(1), job(&wf, 1, 1000));
+        queues.dispatch(Some(2), job(&wf, 2, 0));
+        wait_until(&seen, |s| s.contains(&2)).await;
+        assert!(!seen.lock().unwrap().contains(&1), "chat 2 finished while chat 1 was still running");
+    }
+
+    #[tokio::test]
+    async fn dispatch_after_idle_exit_respawns_worker() {
+        let (mut queues, wf, seen) = queue_fixture(std::time::Duration::from_millis(50)).await;
+        queues.dispatch(Some(1), job(&wf, 1, 0));
+        wait_until(&seen, |s| s.len() == 1).await;
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await; // worker idles out
+        queues.dispatch(Some(1), job(&wf, 2, 0));
+        wait_until(&seen, |s| s.len() == 2).await;
+        assert_eq!(*seen.lock().unwrap(), vec![1, 2]);
     }
 }
