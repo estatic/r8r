@@ -8,6 +8,7 @@ pub mod engine;
 pub mod execution_runner;
 pub mod expr;
 pub mod llm;
+pub mod logging;
 pub mod node;
 pub mod nodes;
 pub mod scheduler;

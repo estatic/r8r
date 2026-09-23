@@ -126,27 +126,50 @@ pub async fn start_execution(
         finished_at: None,
     };
     storage.create_execution(&execution).await?;
+    tracing::info!(
+        execution_id = %execution.id,
+        workflow_id = %workflow.id,
+        workflow_name = %workflow.name,
+        mode = ?execution.mode,
+        "execution started"
+    );
 
     let started = execution.clone();
     let handle = tokio::spawn(async move {
+        let clock = std::time::Instant::now();
         let tracker = LiveExecutionTracker::new(execution, storage.clone(), events.clone());
         let result =
             crate::engine::execute_workflow_seeded(&workflow, &registry, trigger_items, &credentials, &tracker).await;
 
         let mut final_execution = tracker.into_execution();
+        let duration_ms = clock.elapsed().as_millis() as u64;
         match &result {
             Ok(outputs) => {
                 final_execution.status = ExecutionStatus::Success;
                 final_execution.node_outputs = outputs.clone();
+                tracing::info!(
+                    execution_id = %final_execution.id,
+                    workflow_name = %workflow.name,
+                    status = ?final_execution.status,
+                    duration_ms,
+                    "execution finished"
+                );
             }
             Err(e) => {
-                tracing::warn!(error = %e, workflow_id = %workflow.id, "workflow execution failed");
                 final_execution.status = ExecutionStatus::Error;
+                tracing::warn!(
+                    execution_id = %final_execution.id,
+                    workflow_id = %workflow.id,
+                    workflow_name = %workflow.name,
+                    duration_ms,
+                    error = %e,
+                    "execution failed"
+                );
             }
         }
         final_execution.finished_at = Some(chrono::Utc::now());
         if let Err(e) = storage.update_execution(&final_execution).await {
-            tracing::error!(error = %e, "failed to persist final execution result");
+            tracing::error!(error = %e, execution_id = %final_execution.id, "failed to persist final execution result");
         }
 
         let _ = events.send(ExecutionEvent {
@@ -434,5 +457,103 @@ mod tests {
         })
         .await
         .expect("detached run should still finish");
+    }
+
+    /// Captures formatted log output for assertions.
+    #[derive(Clone, Default)]
+    struct LogBuffer(Arc<std::sync::Mutex<Vec<u8>>>);
+
+    impl std::io::Write for LogBuffer {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for LogBuffer {
+        type Writer = LogBuffer;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    impl LogBuffer {
+        fn text(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    #[tokio::test]
+    async fn logs_execution_start_and_successful_finish() {
+        let logs = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let storage = memory_storage().await;
+        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        let (registry, wf) = sleepy_setup(0);
+        storage.create_workflow(&wf).await.unwrap();
+        let (started, handle) = start_execution(storage, events, registry, wf.clone(), ExecutionMode::Manual, None, HashMap::new())
+            .await
+            .unwrap();
+        handle.await.unwrap();
+
+        let text = logs.text();
+        assert!(text.contains("execution started"), "{text}");
+        assert!(text.contains("execution finished"), "{text}");
+        assert!(text.contains(&started.id.to_string()), "{text}");
+        assert!(text.contains("workflow_name=\"linear\"") || text.contains("workflow_name=linear"), "{text}");
+        assert!(text.contains("Manual"), "{text}");
+        assert!(text.contains("Success"), "{text}");
+        assert!(text.contains("duration_ms"), "{text}");
+    }
+
+    struct KaboomNode;
+
+    #[async_trait::async_trait]
+    impl crate::node::Node for KaboomNode {
+        fn type_name(&self) -> &'static str {
+            "test.kaboom"
+        }
+        fn display_name(&self) -> &'static str {
+            "Kaboom"
+        }
+        fn description(&self) -> &'static str {
+            "Test-only node that always fails with \"kaboom\"."
+        }
+        fn category(&self) -> crate::node::NodeCategory {
+            crate::node::NodeCategory::Action
+        }
+        async fn execute(&self, _ctx: &crate::node::NodeExecutionContext) -> Result<crate::node::NodeOutput, crate::node::NodeError> {
+            Err(crate::node::NodeError::ExecutionFailed("kaboom".into()))
+        }
+    }
+
+    #[tokio::test]
+    async fn logs_a_failed_execution_as_a_warning_with_the_error() {
+        let logs = LogBuffer::default();
+        let subscriber = tracing_subscriber::fmt().with_writer(logs.clone()).with_ansi(false).finish();
+        let _guard = tracing::subscriber::set_default(subscriber);
+
+        let storage = memory_storage().await;
+        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        let mut r = NodeRegistry::new();
+        crate::nodes::register_all(&mut r);
+        r.register(Box::new(KaboomNode));
+        let mut wf = linear_workflow();
+        wf.nodes[1].node_type = "test.kaboom".into();
+        storage.create_workflow(&wf).await.unwrap();
+        let (_, handle) = start_execution(storage, events, Arc::new(r), wf, ExecutionMode::Manual, None, HashMap::new())
+            .await
+            .unwrap();
+        handle.await.unwrap();
+
+        let text = logs.text();
+        let line = text.lines().find(|l| l.contains("execution failed")).unwrap_or_else(|| panic!("{text}"));
+        assert!(line.contains("WARN"), "{line}");
+        assert!(line.contains("kaboom"), "{line}");
     }
 }
