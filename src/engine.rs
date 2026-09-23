@@ -329,6 +329,7 @@ mod tests {
                     position: (0.0, 0.0),
                     parameters: serde_json::json!({}),
                     disabled: false,
+                    settings: Default::default(),
                 },
                 NodeInstance {
                     id: "set1".into(),
@@ -336,6 +337,7 @@ mod tests {
                     position: (1.0, 0.0),
                     parameters: serde_json::json!({"fields": {"greeting": "hi"}}),
                     disabled: false,
+                    settings: Default::default(),
                 },
             ],
             connections: vec![Connection {
@@ -408,6 +410,7 @@ mod tests {
             position: (2.0, 0.0),
             parameters: serde_json::json!({}),
             disabled: false,
+            settings: Default::default(),
         });
         wf.connections.push(Connection {
             from_node: "trigger".into(),
@@ -432,6 +435,7 @@ mod tests {
             position: (2.0, 0.0),
             parameters: serde_json::json!({}),
             disabled: false,
+            settings: Default::default(),
         });
         wf.connections.clear();
         wf.connections.push(Connection { from_node: "trigger".into(), from_output: 0, to_node: "b".into(), to_input: 0, error: false });
@@ -459,6 +463,7 @@ mod tests {
             position: (0.0, 1.0),
             parameters: serde_json::json!({}),
             disabled: false,
+            settings: Default::default(),
         });
         let result = topological_order(&wf);
         assert!(result.is_err());
@@ -508,6 +513,7 @@ mod tests {
             position: (2.0, 0.0),
             parameters: serde_json::json!({"fields": {"other": "value"}}),
             disabled: false,
+            settings: Default::default(),
         });
         wf.connections.push(Connection {
             from_node: "trigger".into(),
@@ -533,6 +539,7 @@ mod tests {
             position: (2.0, 0.0),
             parameters: serde_json::json!({"fields": {"other": "value"}}),
             disabled: false,
+            settings: Default::default(),
         });
         wf.nodes.push(NodeInstance {
             id: "set3".into(),
@@ -540,6 +547,7 @@ mod tests {
             position: (3.0, 0.0),
             parameters: serde_json::json!({}),
             disabled: false,
+            settings: Default::default(),
         });
         wf.connections.push(Connection { from_node: "trigger".into(), from_output: 0, to_node: "set2".into(), to_input: 0, error: false });
         wf.connections.push(Connection { from_node: "set1".into(), from_output: 0, to_node: "set3".into(), to_input: 0, error: false });
@@ -568,6 +576,7 @@ mod tests {
             position: (0.0, 1.0),
             parameters: serde_json::json!({}),
             disabled: false,
+            settings: Default::default(),
         });
         wf.nodes.push(NodeInstance {
             id: "set2".into(),
@@ -575,6 +584,7 @@ mod tests {
             position: (1.0, 1.0),
             parameters: serde_json::json!({"fields": {"other": "value"}}),
             disabled: false,
+            settings: Default::default(),
         });
         wf.connections.push(Connection {
             from_node: "trigger2".into(),
@@ -601,6 +611,7 @@ mod tests {
             position: (2.0, 0.0),
             parameters: serde_json::json!({}),
             disabled: false,
+            settings: Default::default(),
         });
         wf.connections.clear();
         wf.connections.push(Connection {
@@ -675,6 +686,7 @@ mod tests {
             position: (2.0, 0.0),
             parameters: serde_json::json!({"fields": {"final": "yes"}}),
             disabled: false,
+            settings: Default::default(),
         });
         wf.connections.push(Connection {
             from_node: "set_disabled".into(),
@@ -761,6 +773,7 @@ mod tests {
             position: (2.0, 0.0),
             parameters: serde_json::json!({"fields": {"handled": true}}),
             disabled: false,
+            settings: Default::default(),
         });
         wf.connections.push(Connection {
             from_node: "set1".into(),
@@ -820,6 +833,7 @@ mod tests {
             position: (2.0, 0.0),
             parameters: serde_json::json!({"fields": {"final": "yes"}}),
             disabled: false,
+            settings: Default::default(),
         });
         wf.connections.push(Connection {
             from_node: "set_disabled".into(),
@@ -855,6 +869,7 @@ mod tests {
             position: (2.0, 0.0),
             parameters: serde_json::json!({"fields": {"handled": true}}),
             disabled: false,
+            settings: Default::default(),
         });
         wf.connections.push(Connection {
             from_node: "set1".into(),

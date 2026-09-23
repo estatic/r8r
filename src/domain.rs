@@ -11,6 +11,32 @@ pub struct NodeInstance {
     pub parameters: serde_json::Value,
     #[serde(default)]
     pub disabled: bool,
+    #[serde(default)]
+    pub settings: NodeSettings,
+}
+
+/// Per-node execution policy (Plan 8.5). Kept out of `parameters` so it is
+/// never expression-resolved and can't collide with a node's own
+/// parameters. Every field defaults, so workflows saved before this
+/// existed load unchanged.
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
+pub struct NodeSettings {
+    /// `None` = exactly one attempt.
+    #[serde(default)]
+    pub retry: Option<RetryPolicy>,
+    /// Per-attempt timeout; `None` = no timeout.
+    #[serde(default)]
+    pub timeout_ms: Option<u64>,
+    /// On final failure with no error connection, emit the error item on
+    /// port 0 instead of failing the workflow.
+    #[serde(default)]
+    pub continue_on_fail: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct RetryPolicy {
+    pub max_tries: u32,
+    pub wait_ms: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -121,6 +147,28 @@ mod tests {
     use super::*;
 
     #[test]
+    fn node_instance_without_settings_deserializes_to_defaults() {
+        let json = r#"{"id":"n1","node_type":"core.set","position":[0.0,0.0],"parameters":{}}"#;
+        let node: NodeInstance = serde_json::from_str(json).unwrap();
+        assert_eq!(node.settings, NodeSettings::default());
+        assert!(node.settings.retry.is_none());
+        assert!(node.settings.timeout_ms.is_none());
+        assert!(!node.settings.continue_on_fail);
+    }
+
+    #[test]
+    fn node_settings_round_trip_through_json() {
+        let settings = NodeSettings {
+            retry: Some(RetryPolicy { max_tries: 3, wait_ms: 500 }),
+            timeout_ms: Some(1000),
+            continue_on_fail: true,
+        };
+        let json = serde_json::to_value(&settings).unwrap();
+        assert_eq!(json, serde_json::json!({"retry": {"max_tries": 3, "wait_ms": 500}, "timeout_ms": 1000, "continue_on_fail": true}));
+        assert_eq!(serde_json::from_value::<NodeSettings>(json).unwrap(), settings);
+    }
+
+    #[test]
     fn workflow_round_trips_through_json() {
         let wf = Workflow {
             id: Uuid::new_v4(),
@@ -132,6 +180,7 @@ mod tests {
                 position: (0.0, 0.0),
                 parameters: serde_json::json!({}),
                 disabled: false,
+                settings: Default::default(),
             }],
             connections: vec![],
             created_at: Utc::now(),

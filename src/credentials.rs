@@ -56,6 +56,7 @@ mod tests {
             position: (0.0, 0.0),
             parameters: serde_json::json!({"auth": {"type": "bearer", "credential_id": id.to_string()}}),
             disabled: false,
+            settings: Default::default(),
         }
     }
 
@@ -95,6 +96,7 @@ mod tests {
             position: (0.0, 0.0),
             parameters: serde_json::json!({}),
             disabled: false,
+            settings: Default::default(),
         }]);
         let resolved = resolve_credentials_for_workflow(&storage, &wf).await.unwrap();
         assert!(resolved.is_empty());

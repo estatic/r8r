@@ -181,6 +181,7 @@ mod tests {
                     position: (0.0, 0.0),
                     parameters: serde_json::json!({}),
                     disabled: false,
+                    settings: Default::default(),
                 },
                 NodeInstance {
                     id: "set1".into(),
@@ -188,6 +189,7 @@ mod tests {
                     position: (1.0, 0.0),
                     parameters: serde_json::json!({"fields": {"greeting": "hi"}}),
                     disabled: false,
+                    settings: Default::default(),
                 },
             ],
             connections: vec![Connection {

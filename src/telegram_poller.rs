@@ -446,6 +446,7 @@ mod poller_tests {
                         "api_base_url": api_base_url,
                     }),
                     disabled: false,
+                    settings: Default::default(),
                 },
                 downstream,
             ],
@@ -520,6 +521,7 @@ mod poller_tests {
                 position: (1.0, 0.0),
                 parameters: serde_json::json!({}),
                 disabled: false,
+                settings: Default::default(),
             },
             "passthrough",
         );
@@ -590,6 +592,7 @@ mod poller_tests {
                 position: (1.0, 0.0),
                 parameters: serde_json::json!({}),
                 disabled: false,
+                settings: Default::default(),
             },
             "passthrough",
         );

@@ -110,6 +110,7 @@ mod tests {
             position: (0.0, 0.0),
             parameters: serde_json::json!({"path": path, "method": method}),
             disabled: false,
+            settings: Default::default(),
         }
     }
 

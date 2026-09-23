@@ -342,6 +342,7 @@ mod tests {
                 position: (0.0, 0.0),
                 parameters: serde_json::json!({}),
                 disabled: false,
+                settings: Default::default(),
             }],
             connections: vec![],
             created_at: Utc::now(),
