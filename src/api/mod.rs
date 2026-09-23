@@ -11,7 +11,7 @@ use axum::routing::{get, post};
 use axum::Router;
 
 pub fn build_router(state: AppState) -> Router {
-    Router::new()
+    let router = Router::new()
         .route("/rest/auth/register", post(auth::register))
         .route("/rest/auth/login", post(auth::login))
         .route("/rest/workflows", post(workflows::create_workflow).get(workflows::list_workflows))
@@ -37,7 +37,28 @@ pub fn build_router(state: AppState) -> Router {
         .route("/health", get(|| async { "ok" }))
         .fallback(crate::static_files::serve_frontend)
         .layer(axum::middleware::from_fn(log_request))
-        .with_state(state)
+        .with_state(state);
+    catch_panics(router)
+}
+
+/// A panicking handler would otherwise drop the connection: the browser
+/// sees a network error and the terminal only a bare panic line. This turns
+/// it into a logged ERROR plus a 500 response.
+pub fn catch_panics(router: Router) -> Router {
+    router.layer(tower_http::catch_panic::CatchPanicLayer::custom(
+        |err: Box<dyn std::any::Any + Send + 'static>| {
+            let message = err
+                .downcast_ref::<String>()
+                .map(String::as_str)
+                .or_else(|| err.downcast_ref::<&str>().copied())
+                .unwrap_or("unknown panic");
+            tracing::error!(panic = %message, "request handler panicked");
+            axum::response::IntoResponse::into_response((
+                axum::http::StatusCode::INTERNAL_SERVER_ERROR,
+                "internal server error",
+            ))
+        },
+    ))
 }
 
 /// Logs every request at debug (`RUST_LOG=r8r=debug` to see them):

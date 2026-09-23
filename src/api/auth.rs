@@ -71,6 +71,7 @@ pub async fn register(
         return (StatusCode::CONFLICT, "user already exists").into_response();
     }
     let token = crate::auth::issue_token(user.id, &state.jwt_secret).unwrap();
+    tracing::info!(email = %user.email, "user registered");
     (StatusCode::CREATED, Json(serde_json::json!({"token": token}))).into_response()
 }
 
@@ -81,14 +82,33 @@ pub async fn login(
     match state.storage.get_user_by_email(&payload.email).await {
         Ok(Some(user)) => {
             match crate::auth::verify_password(&payload.password, &user.password_hash) {
-                Ok(true) => {
-                    let token = crate::auth::issue_token(user.id, &state.jwt_secret).unwrap();
-                    Json(serde_json::json!({"token": token})).into_response()
+                Ok(true) => match crate::auth::issue_token(user.id, &state.jwt_secret) {
+                    Ok(token) => {
+                        tracing::info!(email = %payload.email, "login succeeded");
+                        Json(serde_json::json!({"token": token})).into_response()
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, email = %payload.email, "login failed: could not issue token");
+                        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                    }
+                },
+                Ok(false) => {
+                    tracing::warn!(email = %payload.email, "login failed: wrong password");
+                    StatusCode::UNAUTHORIZED.into_response()
                 }
-                _ => StatusCode::UNAUTHORIZED.into_response(),
+                Err(e) => {
+                    tracing::error!(error = %e, email = %payload.email, "login failed: stored password hash is unreadable");
+                    StatusCode::UNAUTHORIZED.into_response()
+                }
             }
         }
-        _ => {
+        Err(e) => {
+            tracing::error!(error = %e, email = %payload.email, "login failed: user lookup error");
+            let _ = crate::auth::verify_password(&payload.password, dummy_hash());
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+        Ok(None) => {
+            tracing::warn!(email = %payload.email, "login failed: unknown email");
             // No such user: still run a real Argon2 verify (against a fixed dummy
             // hash) so this branch costs the same as the "wrong password" branch
             // above, and the response timing doesn't leak whether the email is

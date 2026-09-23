@@ -164,3 +164,76 @@ async fn api_requests_are_logged_at_debug_with_method_path_and_status() {
     let line = lines.iter().find(|l| l.contains("request")).unwrap_or_else(|| panic!("{lines:?}"));
     assert!(line.contains("DEBUG") && line.contains("GET") && line.contains("401") && line.contains("ms"), "{line}");
 }
+
+async fn post_json(app: axum::Router, path: &str, body: serde_json::Value) -> StatusCode {
+    app.oneshot(
+        Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap(),
+    )
+    .await
+    .unwrap()
+    .status()
+}
+
+async fn fresh_app() -> axum::Router {
+    let storage = SqliteStorage::new("sqlite::memory:", [0u8; 32]).await.unwrap();
+    r8r::api::build_router(AppState {
+        storage: Arc::new(storage),
+        registry: registry(),
+        jwt_secret: "test-secret".into(),
+        scheduler: Arc::new(r8r::scheduler::Scheduler::new().await.unwrap()),
+        trigger_registry: Arc::new(r8r::trigger_registry::TriggerRegistry::new()),
+        execution_events: tokio::sync::broadcast::channel(16).0,
+        open_registration: false,
+    })
+}
+
+#[tokio::test]
+async fn logs_login_outcomes_without_the_password() {
+    lines_mentioning("");
+    let app = fresh_app().await;
+    let email = format!("{}@example.com", Uuid::new_v4());
+    let creds = |pw: &str| serde_json::json!({"email": email, "password": pw});
+
+    assert_eq!(post_json(app.clone(), "/rest/auth/register", creds("right-pass-123")).await, StatusCode::CREATED);
+    assert_eq!(post_json(app.clone(), "/rest/auth/login", creds("wrong-pass-456")).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(post_json(app.clone(), "/rest/auth/login", creds("right-pass-123")).await, StatusCode::OK);
+    let unknown = format!("{}@example.com", Uuid::new_v4());
+    let unknown_body = serde_json::json!({"email": unknown, "password": "x"});
+    assert_eq!(post_json(app, "/rest/auth/login", unknown_body).await, StatusCode::UNAUTHORIZED);
+
+    let lines = lines_mentioning(&email);
+    assert!(lines.iter().any(|l| l.contains("user registered") && l.contains("INFO")), "{lines:?}");
+    assert!(lines.iter().any(|l| l.contains("login failed") && l.contains("wrong password") && l.contains("WARN")), "{lines:?}");
+    assert!(lines.iter().any(|l| l.contains("login succeeded") && l.contains("INFO")), "{lines:?}");
+    let unknown_lines = lines_mentioning(&unknown);
+    assert!(unknown_lines.iter().any(|l| l.contains("login failed") && l.contains("unknown email")), "{unknown_lines:?}");
+    let all = lines_mentioning("");
+    assert!(!all.iter().any(|l| l.contains("right-pass-123") || l.contains("wrong-pass-456")), "password leaked into logs");
+}
+
+#[tokio::test]
+async fn a_panicking_handler_returns_500_and_logs_the_panic() {
+    lines_mentioning("");
+    let marker = format!("boom-{}", Uuid::new_v4());
+    let m = marker.clone();
+    let app = r8r::api::catch_panics(axum::Router::new().route(
+        "/boom",
+        axum::routing::get(move || {
+            let m = m.clone();
+            async move {
+                panic!("{m}");
+                #[allow(unreachable_code)]
+                ""
+            }
+        }),
+    ));
+    let response = app.oneshot(Request::builder().uri("/boom").body(Body::empty()).unwrap()).await.unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let lines = lines_mentioning(&marker);
+    assert!(lines.iter().any(|l| l.contains("ERROR") && l.contains("panicked")), "{lines:?}");
+}

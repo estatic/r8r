@@ -2,7 +2,7 @@
 import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { useAuthStore } from '../stores/auth'
-import { ApiError } from '../api/client'
+import { loginErrorMessage } from '../api/authErrors'
 
 const email = ref('')
 const password = ref('')
@@ -19,7 +19,7 @@ async function onSubmit() {
     await auth.login(email.value, password.value)
     router.push({ name: 'workflows' })
   } catch (e) {
-    error.value = e instanceof ApiError ? 'Invalid email or password.' : 'Something went wrong. Try again.'
+    error.value = loginErrorMessage(e)
   } finally {
     submitting.value = false
   }
