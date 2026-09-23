@@ -285,11 +285,10 @@ mod get_updates_tests {
 /// this workflow. The task's `AbortHandle` is recorded in
 /// `state.trigger_registry` so `deactivate_workflow_triggers` can cancel it
 /// later.
-pub async fn activate_telegram_trigger(
-    state: &AppState,
-    workflow: &Workflow,
-    trigger_node: &NodeInstance,
-) -> anyhow::Result<()> {
+/// The bot token from the credential a `telegram.trigger` node references.
+/// Read at activation and again on every poll iteration, so rotating the
+/// token (editing the credential) takes effect without reactivating.
+async fn trigger_bot_token(storage: &dyn Storage, trigger_node: &NodeInstance) -> anyhow::Result<String> {
     let credential_id_str = trigger_node
         .parameters
         .get("auth")
@@ -298,18 +297,24 @@ pub async fn activate_telegram_trigger(
         .ok_or_else(|| anyhow::anyhow!("telegram.trigger requires parameters.auth.credential_id"))?;
     let credential_id = Uuid::parse_str(credential_id_str)
         .map_err(|e| anyhow::anyhow!("telegram.trigger has an invalid credential_id: {e}"))?;
-
-    let credential = state
-        .storage
+    let credential = storage
         .get_credential(credential_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("credential {credential_id} does not exist"))?;
-    let bot_token = credential
+    Ok(credential
         .data
         .get("bot_token")
         .and_then(|v| v.as_str())
         .ok_or_else(|| anyhow::anyhow!("telegramApi credential {credential_id} is missing \"bot_token\""))?
-        .to_string();
+        .to_string())
+}
+
+pub async fn activate_telegram_trigger(
+    state: &AppState,
+    workflow: &Workflow,
+    trigger_node: &NodeInstance,
+) -> anyhow::Result<()> {
+    let bot_token = trigger_bot_token(state.storage.as_ref(), trigger_node).await?;
 
     let api_base_url = trigger_node
         .parameters
@@ -366,7 +371,7 @@ pub async fn poll_telegram_updates(
     registry: Arc<NodeRegistry>,
     events: tokio::sync::broadcast::Sender<crate::execution_runner::ExecutionEvent>,
     workflow: Workflow,
-    bot_token: String,
+    mut bot_token: String,
     api_base_url: String,
 ) {
     let client = match build_client() {
@@ -396,6 +401,28 @@ pub async fn poll_telegram_updates(
                     continue;
                 }
             };
+            // Re-read the token too, so an edited credential takes effect
+            // on the next poll instead of after a reactivation.
+            let trigger_node = crate::engine::start_node_id(&current_workflow)
+                .ok()
+                .and_then(|id| current_workflow.nodes.iter().find(|n| n.id == id).cloned());
+            let token = match trigger_node {
+                Some(node) => trigger_bot_token(storage.as_ref(), &node).await,
+                None => Err(anyhow::anyhow!("workflow has no start node")),
+            };
+            match token {
+                Ok(token) => {
+                    if token != bot_token {
+                        tracing::info!(workflow_id = %current_workflow.id, "telegram poller: bot token changed, using the updated credential");
+                    }
+                    bot_token = token;
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, workflow_id = %current_workflow.id, "telegram poller: failed to read bot token, retrying after backoff");
+                    tokio::time::sleep(std::time::Duration::from_secs(RETRY_BACKOFF_SECS)).await;
+                    continue;
+                }
+            }
         }
         first_iteration = false;
 
@@ -691,8 +718,36 @@ mod poller_tests {
         crate::nodes::register_all(&mut registry);
         let registry = Arc::new(registry);
 
+        // A real credential: the loop re-reads the bot token each iteration,
+        // and a dangling credential id would make it back off for
+        // RETRY_BACKOFF_SECS before it next checks `active`.
+        let owner_id = Uuid::new_v4();
+        storage
+            .create_user(&User {
+                id: owner_id,
+                email: format!("{owner_id}@example.com"),
+                password_hash: "irrelevant".into(),
+                role: UserRole::Owner,
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        let credential_id = Uuid::new_v4();
+        storage
+            .create_credential(&Credential {
+                id: credential_id,
+                name: "bot".into(),
+                credential_type: "telegramApi".into(),
+                data: serde_json::json!({"bot_token": "111:AAA"}),
+                owner_id,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+
         let wf = trigger_workflow(
-            Uuid::new_v4(),
+            credential_id,
             &telegram.uri(),
             NodeInstance {
                 id: "passthrough".into(),
@@ -865,5 +920,78 @@ mod poller_tests {
         tx.send(job(&wf, 7, 0)).unwrap();
         let got = next_job(&mut rx, std::time::Duration::from_millis(1)).await;
         assert_eq!(got.map(|j| j.item.json["seq"].as_i64().unwrap()), Some(7));
+    }
+
+    #[tokio::test]
+    async fn poll_loop_picks_up_a_rotated_bot_token() {
+        let telegram = MockServer::start().await;
+        for token in ["111:AAA", "222:BBB"] {
+            Mock::given(method("GET"))
+                .and(path(format!("/bot{token}/getUpdates")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "result": []})))
+                .mount(&telegram)
+                .await;
+        }
+        let storage: Arc<dyn Storage> = Arc::new(SqliteStorage::new("sqlite::memory:", [0u8; 32]).await.unwrap());
+        let mut registry = NodeRegistry::new();
+        crate::nodes::register_all(&mut registry);
+        let owner_id = Uuid::new_v4();
+        storage
+            .create_user(&User {
+                id: owner_id,
+                email: format!("{owner_id}@example.com"),
+                password_hash: "irrelevant".into(),
+                role: UserRole::Owner,
+                created_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        let mut credential = Credential {
+            id: Uuid::new_v4(),
+            name: "bot".into(),
+            credential_type: "telegramApi".into(),
+            data: serde_json::json!({"bot_token": "111:AAA"}),
+            owner_id,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        storage.create_credential(&credential).await.unwrap();
+        let noop = NodeInstance {
+            id: "passthrough".into(),
+            node_type: "core.noop".into(),
+            position: (1.0, 0.0),
+            parameters: serde_json::json!({}),
+            disabled: false,
+            settings: Default::default(),
+        };
+        let wf = trigger_workflow(credential.id, &telegram.uri(), noop, "passthrough");
+        storage.create_workflow(&wf).await.unwrap();
+
+        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        let poll = tokio::spawn(poll_telegram_updates(storage.clone(), Arc::new(registry), events, wf, "111:AAA".into(), telegram.uri()));
+
+        let saw = |token: &'static str| {
+            let telegram = &telegram;
+            async move {
+                tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                    loop {
+                        let requests = telegram.received_requests().await.unwrap();
+                        if requests.iter().any(|r| r.url.path() == format!("/bot{token}/getUpdates")) {
+                            break;
+                        }
+                        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+                    }
+                })
+                .await
+                .is_ok()
+            }
+        };
+        assert!(saw("111:AAA").await, "poller never used the original token");
+
+        credential.data = serde_json::json!({"bot_token": "222:BBB"});
+        assert!(storage.update_credential(&credential).await.unwrap());
+        let rotated = saw("222:BBB").await;
+        poll.abort();
+        assert!(rotated, "poller kept using the old bot token after the credential was updated");
     }
 }
