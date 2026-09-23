@@ -235,20 +235,23 @@ pub async fn execute_workflow_seeded(
                 produced.insert(node_instance.id.clone(), output);
             }
             Err(e) => {
+                // Precedence (spec §4): an error connection wins, then
+                // continue_on_fail (error item on port 0 only), else the
+                // whole run fails.
                 let has_error_route = workflow
                     .connections
                     .iter()
                     .any(|c| c.from_node == node_instance.id && c.error);
                 observer.on_node_errored(&node_instance.id, &e.to_string()).await;
+                let error_item = Item {
+                    json: serde_json::json!({ "error": e.to_string() }),
+                    binary: serde_json::json!({}),
+                };
                 if has_error_route {
-                    error_produced.insert(
-                        node_instance.id.clone(),
-                        vec![Item {
-                            json: serde_json::json!({ "error": e.to_string() }),
-                            binary: serde_json::json!({}),
-                        }],
-                    );
+                    error_produced.insert(node_instance.id.clone(), vec![error_item]);
                     produced.insert(node_instance.id.clone(), vec![]);
+                } else if node_instance.settings.continue_on_fail {
+                    produced.insert(node_instance.id.clone(), vec![vec![error_item]]);
                 } else {
                     return Err(anyhow::anyhow!("node {} failed: {e}", node_instance.id));
                 }
@@ -917,6 +920,44 @@ mod tests {
         let elapsed = start.elapsed();
         assert!(elapsed >= std::time::Duration::from_millis(1000), "{elapsed:?}");
         assert!(elapsed < std::time::Duration::from_millis(1500), "{elapsed:?}");
+    }
+
+    fn continue_on_fail() -> NodeSettings {
+        NodeSettings { continue_on_fail: true, ..Default::default() }
+    }
+
+    #[tokio::test]
+    async fn continue_on_fail_delivers_error_item_on_port_zero() {
+        let wf = workflow_with_policy("test.alwaysFails", continue_on_fail());
+        let outputs = execute_workflow(&wf, &registry_with(vec![])).await.unwrap();
+        assert_eq!(outputs["after"][0].json, serde_json::json!({"error": "node execution failed: boom"}));
+        assert_eq!(outputs["set1"][0].json, serde_json::json!({"error": "node execution failed: boom"}));
+    }
+
+    #[tokio::test]
+    async fn error_connection_takes_precedence_over_continue_on_fail() {
+        let mut wf = workflow_with_policy("test.alwaysFails", continue_on_fail());
+        wf.nodes.push(NodeInstance {
+            id: "error_handler".into(),
+            node_type: "core.set".into(),
+            position: (2.0, 1.0),
+            parameters: serde_json::json!({"fields": {"handled": true}}),
+            disabled: false,
+            settings: NodeSettings::default(),
+        });
+        wf.connections.push(Connection { from_node: "set1".into(), from_output: 0, to_node: "error_handler".into(), to_input: 0, error: true });
+        let outputs = execute_workflow(&wf, &registry_with(vec![])).await.unwrap();
+        assert_eq!(outputs["error_handler"][0].json["handled"], serde_json::json!(true));
+        assert!(outputs["after"].is_empty(), "port-0 downstream must be skipped when the error route is taken");
+    }
+
+    #[tokio::test]
+    async fn continue_on_fail_only_feeds_port_zero() {
+        // "after" is rewired to set1's port 1: it must receive nothing.
+        let mut wf = workflow_with_policy("test.alwaysFails", continue_on_fail());
+        wf.connections.last_mut().unwrap().from_output = 1;
+        let outputs = execute_workflow(&wf, &registry_with(vec![])).await.unwrap();
+        assert!(outputs["after"].is_empty());
     }
 
     #[tokio::test]
