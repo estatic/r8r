@@ -238,6 +238,27 @@ impl Storage for SqliteStorage {
         .await?;
         rows.into_iter().map(row_to_credential_summary).collect()
     }
+
+    async fn update_credential(&self, credential: &Credential) -> anyhow::Result<bool> {
+        let plaintext = serde_json::to_string(&credential.data)?;
+        let encrypted = crate::crypto::encrypt(&self.encryption_key, &plaintext)?;
+        let result = sqlx::query("UPDATE credentials SET name = ?, data = ?, updated_at = ? WHERE id = ?")
+            .bind(&credential.name)
+            .bind(encrypted)
+            .bind(credential.updated_at.to_rfc3339())
+            .bind(credential.id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn delete_credential(&self, id: Uuid) -> anyhow::Result<bool> {
+        let result = sqlx::query("DELETE FROM credentials WHERE id = ?")
+            .bind(id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
 }
 
 fn row_to_credential(
@@ -641,5 +662,47 @@ mod tests {
             .await
             .unwrap();
         assert!(!raw.0.contains("abc123secret"));
+    }
+
+    #[tokio::test]
+    async fn update_credential_rewrites_name_and_data_but_not_type_or_created_at() {
+        let storage = storage_with_test_key().await;
+        let user = sample_user();
+        storage.create_user(&user).await.unwrap();
+        let cred = sample_credential(user.id);
+        storage.create_credential(&cred).await.unwrap();
+
+        let mut changed = cred.clone();
+        changed.name = "renamed".into();
+        changed.data = serde_json::json!({"token": "new-secret"});
+        changed.credential_type = "somethingElse".into();
+        changed.updated_at = Utc::now() + chrono::Duration::seconds(5);
+        assert!(storage.update_credential(&changed).await.unwrap());
+
+        let fetched = storage.get_credential(cred.id).await.unwrap().unwrap();
+        assert_eq!(fetched.name, "renamed");
+        assert_eq!(fetched.data, serde_json::json!({"token": "new-secret"}));
+        assert_eq!(fetched.credential_type, cred.credential_type);
+        assert_eq!(fetched.created_at.timestamp(), cred.created_at.timestamp());
+        assert_eq!(fetched.updated_at.timestamp(), changed.updated_at.timestamp());
+    }
+
+    #[tokio::test]
+    async fn update_credential_returns_false_when_missing() {
+        let storage = storage_with_test_key().await;
+        assert!(!storage.update_credential(&sample_credential(Uuid::new_v4())).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn delete_credential_removes_it_and_reports_missing_ids() {
+        let storage = storage_with_test_key().await;
+        let user = sample_user();
+        storage.create_user(&user).await.unwrap();
+        let cred = sample_credential(user.id);
+        storage.create_credential(&cred).await.unwrap();
+
+        assert!(storage.delete_credential(cred.id).await.unwrap());
+        assert!(storage.get_credential(cred.id).await.unwrap().is_none());
+        assert!(!storage.delete_credential(cred.id).await.unwrap());
     }
 }

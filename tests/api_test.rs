@@ -113,6 +113,12 @@ impl Storage for FailingUpdateStorage {
     async fn list_credentials(&self) -> anyhow::Result<Vec<r8r::domain::CredentialSummary>> {
         self.inner.list_credentials().await
     }
+    async fn update_credential(&self, credential: &r8r::domain::Credential) -> anyhow::Result<bool> {
+        self.inner.update_credential(credential).await
+    }
+    async fn delete_credential(&self, id: uuid::Uuid) -> anyhow::Result<bool> {
+        self.inner.delete_credential(id).await
+    }
 }
 
 /// Builds a router backed by `FailingUpdateStorage`, plus the `AppState` (to

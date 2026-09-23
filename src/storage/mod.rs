@@ -30,4 +30,9 @@ pub trait Storage: Send + Sync {
     async fn create_credential(&self, credential: &Credential) -> anyhow::Result<()>;
     async fn get_credential(&self, id: Uuid) -> anyhow::Result<Option<Credential>>;
     async fn list_credentials(&self) -> anyhow::Result<Vec<CredentialSummary>>;
+    /// Rewrites `name`, `data` (re-encrypted) and `updated_at`; never the
+    /// type, owner or `created_at`. `Ok(false)` if no such credential.
+    async fn update_credential(&self, credential: &Credential) -> anyhow::Result<bool>;
+    /// `Ok(false)` if no such credential.
+    async fn delete_credential(&self, id: Uuid) -> anyhow::Result<bool>;
 }

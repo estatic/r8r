@@ -312,6 +312,12 @@ mod tests {
         async fn list_credentials(&self) -> anyhow::Result<Vec<crate::domain::CredentialSummary>> {
             self.inner.list_credentials().await
         }
+        async fn update_credential(&self, credential: &crate::domain::Credential) -> anyhow::Result<bool> {
+            self.inner.update_credential(credential).await
+        }
+        async fn delete_credential(&self, id: Uuid) -> anyhow::Result<bool> {
+            self.inner.delete_credential(id).await
+        }
     }
 
     #[tokio::test]
