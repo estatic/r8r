@@ -42,11 +42,35 @@ pub struct UpdateWorkflowRequest {
     pub connections: Vec<Connection>,
 }
 
+/// Range-checks every node's `settings` (Plan 8.5). Returns the first
+/// violation as a user-facing message naming the node and field.
+fn validate_nodes(nodes: &[NodeInstance]) -> Result<(), String> {
+    for node in nodes {
+        if let Some(retry) = &node.settings.retry {
+            if !(2..=10).contains(&retry.max_tries) {
+                return Err(format!("node {}: retry.max_tries must be between 2 and 10", node.id));
+            }
+            if retry.wait_ms > 60_000 {
+                return Err(format!("node {}: retry.wait_ms must be between 0 and 60000", node.id));
+            }
+        }
+        if let Some(timeout) = node.settings.timeout_ms {
+            if !(1..=3_600_000).contains(&timeout) {
+                return Err(format!("node {}: timeout_ms must be between 1 and 3600000", node.id));
+            }
+        }
+    }
+    Ok(())
+}
+
 pub async fn create_workflow(
     State(state): State<AppState>,
     AuthUser(_user_id): AuthUser,
     Json(payload): Json<CreateWorkflowRequest>,
 ) -> impl IntoResponse {
+    if let Err(msg) = validate_nodes(&payload.nodes) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
     let now = chrono::Utc::now();
     let workflow = Workflow {
         id: Uuid::new_v4(),
@@ -212,6 +236,9 @@ pub async fn update_workflow(
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateWorkflowRequest>,
 ) -> impl IntoResponse {
+    if let Err(msg) = validate_nodes(&payload.nodes) {
+        return (StatusCode::BAD_REQUEST, msg).into_response();
+    }
     let mut workflow = match state.storage.get_workflow(id).await {
         Ok(Some(wf)) => wf,
         Ok(None) => return StatusCode::NOT_FOUND.into_response(),
@@ -258,6 +285,52 @@ pub async fn delete_workflow(
         Err(e) => {
             tracing::error!(error = %e, "failed to delete workflow");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::domain::{NodeSettings, RetryPolicy};
+
+    fn node_with(settings: NodeSettings) -> NodeInstance {
+        NodeInstance {
+            id: "n1".into(),
+            node_type: "core.set".into(),
+            position: (0.0, 0.0),
+            parameters: serde_json::json!({}),
+            disabled: false,
+            settings,
+        }
+    }
+
+    fn retry(max_tries: u32, wait_ms: u64) -> NodeSettings {
+        NodeSettings { retry: Some(RetryPolicy { max_tries, wait_ms }), ..Default::default() }
+    }
+
+    fn timeout(ms: u64) -> NodeSettings {
+        NodeSettings { timeout_ms: Some(ms), ..Default::default() }
+    }
+
+    #[test]
+    fn accepts_defaults_and_boundaries() {
+        for s in [NodeSettings::default(), retry(2, 0), retry(10, 60_000), timeout(1), timeout(3_600_000)] {
+            assert_eq!(validate_nodes(&[node_with(s.clone())]), Ok(()), "{s:?}");
+        }
+    }
+
+    #[test]
+    fn rejects_out_of_range_values_naming_node_and_field() {
+        let cases = [
+            (retry(1, 0), "node n1: retry.max_tries must be between 2 and 10"),
+            (retry(11, 0), "node n1: retry.max_tries must be between 2 and 10"),
+            (retry(3, 60_001), "node n1: retry.wait_ms must be between 0 and 60000"),
+            (timeout(0), "node n1: timeout_ms must be between 1 and 3600000"),
+            (timeout(3_600_001), "node n1: timeout_ms must be between 1 and 3600000"),
+        ];
+        for (s, expected) in cases {
+            assert_eq!(validate_nodes(&[node_with(s)]), Err(expected.to_string()));
         }
     }
 }

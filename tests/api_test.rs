@@ -2210,3 +2210,76 @@ async fn credential_types_lists_all_known_schemas() {
     let bearer = types.iter().find(|t| t["credential_type"] == "bearerToken").expect("bearerToken should be listed");
     assert_eq!(bearer["generic"], true);
 }
+
+async fn post_workflow(app: &axum::Router, token: &str, body: serde_json::Value) -> axum::response::Response {
+    app.clone()
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/rest/workflows")
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(body.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+}
+
+fn settings_workflow(settings: serde_json::Value) -> serde_json::Value {
+    serde_json::json!({
+        "name": "wf-settings",
+        "nodes": [{"id": "n1", "node_type": "core.manualTrigger", "position": [0.0, 0.0], "parameters": {}, "settings": settings}],
+        "connections": []
+    })
+}
+
+#[tokio::test]
+async fn create_workflow_rejects_out_of_range_node_settings() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "settings-bad@example.com").await;
+    let response = post_workflow(&app, &token, settings_workflow(serde_json::json!({"retry": {"max_tries": 11, "wait_ms": 0}}))).await;
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(String::from_utf8_lossy(&bytes), "node n1: retry.max_tries must be between 2 and 10");
+}
+
+#[tokio::test]
+async fn node_settings_round_trip_and_invalid_update_leaves_workflow_unchanged() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "settings-ok@example.com").await;
+    let settings = serde_json::json!({"retry": {"max_tries": 3, "wait_ms": 500}, "timeout_ms": 1000, "continue_on_fail": true});
+    let response = post_workflow(&app, &token, settings_workflow(settings.clone())).await;
+    assert_eq!(response.status(), StatusCode::CREATED);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string();
+
+    let bad = settings_workflow(serde_json::json!({"timeout_ms": 0}));
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .method("PUT")
+                .uri(format!("/rest/workflows/{id}"))
+                .header("content-type", "application/json")
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::from(bad.to_string()))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+
+    let response = app.clone()
+        .oneshot(
+            Request::builder()
+                .uri(format!("/rest/workflows/{id}"))
+                .header("authorization", format!("Bearer {token}"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    let fetched: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(fetched["nodes"][0]["settings"], settings);
+}
