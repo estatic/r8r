@@ -62,3 +62,19 @@ export interface CredentialSummary {
   created_at: string
   updated_at: string
 }
+
+export type CredentialFieldType = 'text' | 'password'
+
+export interface CredentialField {
+  name: string
+  label: string
+  field_type: CredentialFieldType
+  required: boolean
+}
+
+export interface CredentialTypeSchema {
+  credential_type: string
+  display_name: string
+  generic: boolean
+  fields: CredentialField[]
+}
