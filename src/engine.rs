@@ -72,6 +72,45 @@ pub fn start_node_id(workflow: &Workflow) -> anyhow::Result<String> {
         .ok_or_else(|| anyhow::anyhow!("workflow has no nodes"))
 }
 
+/// Runs one node under its `NodeSettings`: each attempt optionally bounded
+/// by `timeout_ms`, retried up to `retry.max_tries` with `retry.wait_ms`
+/// between attempts (never after the last). Default settings = exactly one
+/// untimed `execute()` call, i.e. the pre-Plan-8.5 behavior.
+async fn run_node_with_policy(
+    node: &dyn crate::node::Node,
+    ctx: &NodeExecutionContext,
+    settings: &crate::domain::NodeSettings,
+) -> Result<crate::node::NodeOutput, crate::node::NodeError> {
+    let max_tries = settings.retry.as_ref().map_or(1, |r| r.max_tries);
+    let wait = std::time::Duration::from_millis(settings.retry.as_ref().map_or(0, |r| r.wait_ms));
+    let mut attempt = 1;
+    loop {
+        let result = match settings.timeout_ms {
+            Some(ms) => tokio::time::timeout(std::time::Duration::from_millis(ms), node.execute(ctx))
+                .await
+                .unwrap_or_else(|_| Err(crate::node::NodeError::ExecutionFailed(format!("timed out after {ms}ms")))),
+            None => node.execute(ctx).await,
+        };
+        match result {
+            Ok(output) => return Ok(output),
+            Err(e) if attempt >= max_tries => {
+                if max_tries == 1 {
+                    return Err(e);
+                }
+                // Unwrap the message so the Display prefix ("node execution
+                // failed: ") isn't repeated. NodeError has one variant, so
+                // this let is irrefutable; add match arms if that changes.
+                let crate::node::NodeError::ExecutionFailed(last) = e;
+                return Err(crate::node::NodeError::ExecutionFailed(format!("failed after {max_tries} attempts: {last}")));
+            }
+            Err(_) => {
+                tokio::time::sleep(wait).await;
+                attempt += 1;
+            }
+        }
+    }
+}
+
 pub async fn execute_workflow_seeded(
     workflow: &Workflow,
     registry: &std::sync::Arc<NodeRegistry>,
@@ -189,7 +228,7 @@ pub async fn execute_workflow_seeded(
             tool_executor: Some(tool_executor.clone()),
         };
         observer.on_node_started(&node_instance.id).await;
-        match node.execute(&ctx).await {
+        match run_node_with_policy(node, &ctx, &node_instance.settings).await {
             Ok(output) => {
                 let primary = output.first().cloned().unwrap_or_default();
                 observer.on_node_finished(&node_instance.id, &primary).await;
@@ -732,6 +771,152 @@ mod tests {
         crate::nodes::register_all(&mut r);
         r.register(Box::new(AlwaysFailsNode));
         std::sync::Arc::new(r)
+    }
+
+    use crate::domain::{NodeSettings, RetryPolicy};
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::Arc;
+
+    /// Fails its first `failures` calls, then returns one `{"ok": true}` item.
+    struct FlakyNode {
+        failures: u32,
+        calls: Arc<AtomicU32>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::node::Node for FlakyNode {
+        fn type_name(&self) -> &'static str {
+            "test.flaky"
+        }
+        fn display_name(&self) -> &'static str {
+            "Flaky"
+        }
+        fn description(&self) -> &'static str {
+            "Test-only node that fails a fixed number of times, then succeeds."
+        }
+        fn category(&self) -> crate::node::NodeCategory {
+            crate::node::NodeCategory::Action
+        }
+        async fn execute(&self, _ctx: &crate::node::NodeExecutionContext) -> Result<crate::node::NodeOutput, crate::node::NodeError> {
+            let n = self.calls.fetch_add(1, Ordering::SeqCst) + 1;
+            if n <= self.failures {
+                Err(crate::node::NodeError::ExecutionFailed(format!("flaky failure {n}")))
+            } else {
+                Ok(vec![vec![Item { json: serde_json::json!({"ok": true}), binary: serde_json::json!({}) }]])
+            }
+        }
+    }
+
+    /// Sleeps 10s before succeeding; counts calls.
+    struct SlowNode {
+        calls: Arc<AtomicU32>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::node::Node for SlowNode {
+        fn type_name(&self) -> &'static str {
+            "test.slow"
+        }
+        fn display_name(&self) -> &'static str {
+            "Slow"
+        }
+        fn description(&self) -> &'static str {
+            "Test-only node that takes 10 seconds."
+        }
+        fn category(&self) -> crate::node::NodeCategory {
+            crate::node::NodeCategory::Action
+        }
+        async fn execute(&self, _ctx: &crate::node::NodeExecutionContext) -> Result<crate::node::NodeOutput, crate::node::NodeError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            tokio::time::sleep(std::time::Duration::from_secs(10)).await;
+            Ok(vec![vec![]])
+        }
+    }
+
+    fn registry_with(extra: Vec<Box<dyn crate::node::Node>>) -> Arc<NodeRegistry> {
+        let mut r = NodeRegistry::new();
+        crate::nodes::register_all(&mut r);
+        r.register(Box::new(AlwaysFailsNode));
+        for node in extra {
+            r.register(node);
+        }
+        Arc::new(r)
+    }
+
+    /// linear_workflow() with set1 turned into `node_type` carrying
+    /// `settings`, plus a `core.noop` "after" node on set1's port 0.
+    fn workflow_with_policy(node_type: &str, settings: NodeSettings) -> Workflow {
+        let mut wf = linear_workflow();
+        wf.nodes[1].node_type = node_type.into();
+        wf.nodes[1].settings = settings;
+        wf.nodes.push(NodeInstance {
+            id: "after".into(),
+            node_type: "core.noop".into(),
+            position: (2.0, 0.0),
+            parameters: serde_json::json!({}),
+            disabled: false,
+            settings: NodeSettings::default(),
+        });
+        wf.connections.push(Connection { from_node: "set1".into(), from_output: 0, to_node: "after".into(), to_input: 0, error: false });
+        wf
+    }
+
+    fn retry(max_tries: u32, wait_ms: u64) -> NodeSettings {
+        NodeSettings { retry: Some(RetryPolicy { max_tries, wait_ms }), ..Default::default() }
+    }
+
+    #[tokio::test]
+    async fn retry_succeeds_when_max_tries_exceeds_failures() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let registry = registry_with(vec![Box::new(FlakyNode { failures: 2, calls: calls.clone() })]);
+        let wf = workflow_with_policy("test.flaky", retry(3, 0));
+        let outputs = execute_workflow(&wf, &registry).await.unwrap();
+        assert_eq!(outputs["after"][0].json, serde_json::json!({"ok": true}));
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn exhausted_retries_fail_with_attempt_count() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let registry = registry_with(vec![Box::new(FlakyNode { failures: 5, calls: calls.clone() })]);
+        let wf = workflow_with_policy("test.flaky", retry(3, 0));
+        let err = execute_workflow(&wf, &registry).await.unwrap_err().to_string();
+        assert_eq!(err, "node set1 failed: node execution failed: failed after 3 attempts: flaky failure 3");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_fails_a_slow_node() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let registry = registry_with(vec![Box::new(SlowNode { calls: calls.clone() })]);
+        let settings = NodeSettings { timeout_ms: Some(100), ..Default::default() };
+        let wf = workflow_with_policy("test.slow", settings);
+        let err = execute_workflow(&wf, &registry).await.unwrap_err().to_string();
+        assert!(err.contains("timed out after 100ms"), "{err}");
+        assert_eq!(calls.load(Ordering::SeqCst), 1, "timeout without retry makes exactly one attempt");
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn timeout_is_retried() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let registry = registry_with(vec![Box::new(SlowNode { calls: calls.clone() })]);
+        let settings = NodeSettings { retry: Some(RetryPolicy { max_tries: 3, wait_ms: 0 }), timeout_ms: Some(100), continue_on_fail: false };
+        let wf = workflow_with_policy("test.slow", settings);
+        let err = execute_workflow(&wf, &registry).await.unwrap_err().to_string();
+        assert!(err.contains("failed after 3 attempts") && err.contains("timed out after 100ms"), "{err}");
+        assert_eq!(calls.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn wait_elapses_between_attempts_but_not_after_the_last() {
+        let calls = Arc::new(AtomicU32::new(0));
+        let registry = registry_with(vec![Box::new(FlakyNode { failures: 5, calls: calls.clone() })]);
+        let wf = workflow_with_policy("test.flaky", retry(3, 500));
+        let start = tokio::time::Instant::now();
+        let _ = execute_workflow(&wf, &registry).await;
+        let elapsed = start.elapsed();
+        assert!(elapsed >= std::time::Duration::from_millis(1000), "{elapsed:?}");
+        assert!(elapsed < std::time::Duration::from_millis(1500), "{elapsed:?}");
     }
 
     #[tokio::test]
