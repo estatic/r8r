@@ -36,5 +36,24 @@ pub fn build_router(state: AppState) -> Router {
         )
         .route("/health", get(|| async { "ok" }))
         .fallback(crate::static_files::serve_frontend)
+        .layer(axum::middleware::from_fn(log_request))
         .with_state(state)
+}
+
+/// Logs every request at debug (`RUST_LOG=r8r=debug` to see them):
+/// method, path, status, and latency. Kept below info so normal output
+/// shows what the app is doing, not every asset and poll.
+async fn log_request(req: axum::extract::Request, next: axum::middleware::Next) -> axum::response::Response {
+    let method = req.method().clone();
+    let path = req.uri().path().to_string();
+    let clock = std::time::Instant::now();
+    let response = next.run(req).await;
+    tracing::debug!(
+        %method,
+        %path,
+        status = response.status().as_u16(),
+        latency = %format!("{}ms", clock.elapsed().as_millis()),
+        "request"
+    );
+    response
 }

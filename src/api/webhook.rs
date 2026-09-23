@@ -37,6 +37,13 @@ pub async fn handle_webhook(
         return StatusCode::NOT_FOUND.into_response();
     }
 
+    tracing::info!(
+        workflow_id = %workflow.id,
+        workflow_name = %workflow.name,
+        %method,
+        path = %format!("/webhook/{workflow_id}/{path}"),
+        "webhook received"
+    );
     let trigger_item = build_trigger_item(&headers, &query, &body);
 
     // The run is always a detached background task (Plan 8.7), so a caller

@@ -2,6 +2,28 @@ use crate::domain::ExecutionMode;
 use crate::state::AppState;
 use uuid::Uuid;
 
+/// Which kind of trigger a workflow's start node is, for logging; `None`
+/// for workflows that only run manually.
+pub fn trigger_kind(workflow: &crate::domain::Workflow) -> Option<&'static str> {
+    let start_id = crate::engine::start_node_id(workflow).ok()?;
+    let start = workflow.nodes.iter().find(|n| n.id == start_id)?;
+    match start.node_type.as_str() {
+        "core.schedule" => Some("schedule"),
+        "core.webhook" => Some("webhook"),
+        "telegram.trigger" => Some("telegram"),
+        _ => None,
+    }
+}
+
+/// What `reactivate_all` brought back up at startup.
+#[derive(Debug, Default, PartialEq)]
+pub struct ReactivationSummary {
+    pub schedule: usize,
+    pub webhook: usize,
+    pub telegram: usize,
+    pub failed: usize,
+}
+
 pub async fn activate_workflow_triggers(
     state: &AppState,
     workflow: &crate::domain::Workflow,
@@ -14,10 +36,31 @@ pub async fn activate_workflow_triggers(
         .ok_or_else(|| anyhow::anyhow!("start node {start_id} not found"))?;
 
     match start_node.node_type.as_str() {
-        "core.schedule" => activate_schedule_trigger(state, workflow, start_node).await,
-        "telegram.trigger" => crate::telegram_poller::activate_telegram_trigger(state, workflow, start_node).await,
-        _ => Ok(()),
+        "core.schedule" => activate_schedule_trigger(state, workflow, start_node).await?,
+        "telegram.trigger" => crate::telegram_poller::activate_telegram_trigger(state, workflow, start_node).await?,
+        _ => {}
     }
+    match start_node.node_type.as_str() {
+        "core.schedule" => tracing::info!(
+            workflow_id = %workflow.id,
+            workflow_name = %workflow.name,
+            cron = start_node.parameters.get("cron").and_then(|v| v.as_str()).unwrap_or(""),
+            "schedule trigger activated"
+        ),
+        "core.webhook" => tracing::info!(
+            workflow_id = %workflow.id,
+            workflow_name = %workflow.name,
+            url = %format!("/webhook/{}/{}", workflow.id, start_node.parameters.get("path").and_then(|v| v.as_str()).unwrap_or("")),
+            "webhook trigger active"
+        ),
+        "telegram.trigger" => tracing::info!(
+            workflow_id = %workflow.id,
+            workflow_name = %workflow.name,
+            "telegram trigger activated"
+        ),
+        _ => {}
+    }
+    Ok(())
 }
 
 async fn activate_schedule_trigger(
@@ -62,6 +105,7 @@ pub async fn deactivate_workflow_triggers(state: &AppState, workflow_id: Uuid) {
     if let Some(handle) = state.trigger_registry.take_telegram_poll(workflow_id) {
         handle.abort();
     }
+    tracing::info!(%workflow_id, "workflow triggers deactivated");
 }
 
 pub async fn fire_schedule(
@@ -95,14 +139,24 @@ pub async fn fire_schedule(
     }
 }
 
-pub async fn reactivate_all(state: &AppState) -> anyhow::Result<()> {
+pub async fn reactivate_all(state: &AppState) -> anyhow::Result<ReactivationSummary> {
     let workflows = state.storage.list_workflows().await?;
+    let mut summary = ReactivationSummary::default();
     for workflow in workflows.into_iter().filter(|w| w.active) {
-        if let Err(e) = activate_workflow_triggers(state, &workflow).await {
-            tracing::warn!(error = %e, workflow_id = %workflow.id, "failed to reactivate workflow triggers on startup");
+        match activate_workflow_triggers(state, &workflow).await {
+            Ok(()) => match trigger_kind(&workflow) {
+                Some("schedule") => summary.schedule += 1,
+                Some("webhook") => summary.webhook += 1,
+                Some("telegram") => summary.telegram += 1,
+                _ => {}
+            },
+            Err(e) => {
+                summary.failed += 1;
+                tracing::warn!(error = %e, workflow_id = %workflow.id, workflow_name = %workflow.name, "failed to reactivate workflow triggers on startup");
+            }
         }
     }
-    Ok(())
+    Ok(summary)
 }
 
 #[cfg(test)]
@@ -375,5 +429,36 @@ mod tests {
 
         deactivate_workflow_triggers(&state, wf.id).await;
         assert!(state.trigger_registry.take_telegram_poll(wf.id).is_none());
+    }
+
+    fn with_start(mut wf: Workflow, node_type: &str, parameters: serde_json::Value) -> Workflow {
+        wf.nodes[0].node_type = node_type.into();
+        wf.nodes[0].parameters = parameters;
+        wf
+    }
+
+    #[test]
+    fn trigger_kind_names_the_start_node_trigger() {
+        let wf = schedule_workflow("* * * * * *");
+        assert_eq!(trigger_kind(&wf), Some("schedule"));
+        assert_eq!(trigger_kind(&with_start(wf.clone(), "core.webhook", serde_json::json!({"path": "p"}))), Some("webhook"));
+        assert_eq!(trigger_kind(&with_start(wf.clone(), "telegram.trigger", serde_json::json!({}))), Some("telegram"));
+        assert_eq!(trigger_kind(&with_start(wf, "core.manualTrigger", serde_json::json!({}))), None);
+    }
+
+    #[tokio::test]
+    async fn reactivate_all_reports_what_it_reactivated() {
+        let state = test_state().await;
+        let schedule = schedule_workflow("* * * * * *");
+        let webhook = with_start(schedule_workflow("* * * * * *"), "core.webhook", serde_json::json!({"path": "hook"}));
+        let broken = with_start(schedule_workflow("* * * * * *"), "core.schedule", serde_json::json!({}));
+        let mut inactive = schedule_workflow("* * * * * *");
+        inactive.active = false;
+        for wf in [&schedule, &webhook, &broken, &inactive] {
+            state.storage.create_workflow(wf).await.unwrap();
+        }
+
+        let summary = reactivate_all(&state).await.unwrap();
+        assert_eq!(summary, ReactivationSummary { schedule: 1, webhook: 1, telegram: 0, failed: 1 });
     }
 }
