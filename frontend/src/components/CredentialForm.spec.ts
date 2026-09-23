@@ -51,4 +51,43 @@ describe('CredentialForm', () => {
     expect(wrapper.emitted('saved')).toBeTruthy()
     vi.unstubAllGlobals()
   })
+
+  it('edit mode sends null for a pre-filled optional text field the user cleared', async () => {
+    let patched: unknown = null
+    vi.stubGlobal('fetch', vi.fn((url: string, options?: RequestInit) => {
+      if (url === '/rest/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => [
+        { credential_type: 'openaiApi', display_name: 'OpenAI API', generic: false, fields: [
+          { name: 'api_key', label: 'API Key', field_type: 'password', required: true },
+          { name: 'base_url', label: 'Base URL (optional)', field_type: 'text', required: false },
+        ] },
+      ] })
+      if (url === '/rest/credentials/c1' && !options?.method) return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'c1', name: 'AI', credential_type: 'openaiApi', owner_id: 'u', created_at: '', updated_at: '', used_by: 0, fields: { base_url: 'http://local:8080' } }) })
+      if (url === '/rest/credentials/c1' && options?.method === 'PATCH') {
+        patched = JSON.parse(options.body as string)
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'c1', name: 'AI', credential_type: 'openaiApi', owner_id: 'u', created_at: '', updated_at: '', used_by: 0 }) })
+      }
+      if (url === '/rest/credentials') return Promise.resolve({ ok: true, status: 200, json: async () => [] })
+      return Promise.reject(new Error(`unexpected fetch: ${url}`))
+    }))
+    const wrapper = mount(CredentialForm, { props: { mode: 'edit', credentialId: 'c1' } })
+    await flushPromises()
+    await wrapper.find('input[aria-label="Base URL (optional)"]').setValue('')
+    await wrapper.find('button.bg-blue-600').trigger('click')
+    await flushPromises()
+    expect(patched).toEqual({ name: 'AI', data: { base_url: null } })
+    vi.unstubAllGlobals()
+  })
+
+  it('edit mode refuses to clear a required text field', async () => {
+    let patched = false
+    stub({ id: 'c1', name: 'My header', credential_type: 'apiKeyHeader', owner_id: 'u', created_at: '', updated_at: '', used_by: 0, fields: { header_name: 'X-Key' } }, () => { patched = true })
+    const wrapper = mount(CredentialForm, { props: { mode: 'edit', credentialId: 'c1' } })
+    await flushPromises()
+    await wrapper.find('input[aria-label="Header Name"]').setValue('')
+    await wrapper.find('button.bg-blue-600').trigger('click')
+    await flushPromises()
+    expect(wrapper.text()).toContain('Header Name is required.')
+    expect(patched).toBe(false)
+    vi.unstubAllGlobals()
+  })
 })

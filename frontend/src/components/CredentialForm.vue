@@ -20,6 +20,9 @@ const fieldValues = ref<Record<string, string>>({})
 const newDataText = ref(props.mode === 'create' ? '{}' : '')
 const error = ref('')
 const editing = props.mode === 'edit'
+// Text fields that came back pre-filled in edit mode: emptying one means
+// "clear it" (sent as null), unlike a never-shown secret left blank.
+const prefilled = new Set<string>()
 
 if (!credentialTypesStore.loaded) {
   credentialTypesStore.fetchAll().catch(() => {})
@@ -65,6 +68,7 @@ if (editing && props.credentialId) {
       newName.value = detail.name
       newType.value = detail.credential_type
       fieldValues.value = { ...detail.fields }
+      Object.keys(detail.fields).forEach((k) => prefilled.add(k))
     })
     .catch(() => {
       error.value = 'Failed to load credential.'
@@ -99,7 +103,18 @@ async function submit() {
     }
     const patch: { name: string; data?: Record<string, unknown> } = { name: newName.value.trim() }
     if (schema) {
-      const data = trimmedFieldData(schema.fields)
+      const data: Record<string, unknown> = trimmedFieldData(schema.fields)
+      const clearedRequired: string[] = []
+      for (const f of schema.fields) {
+        if (prefilled.has(f.name) && !(fieldValues.value[f.name] ?? '').trim()) {
+          if (f.required) clearedRequired.push(f.label)
+          else data[f.name] = null
+        }
+      }
+      if (clearedRequired.length > 0) {
+        error.value = `${clearedRequired.join(', ')} ${clearedRequired.length === 1 ? 'is' : 'are'} required.`
+        return
+      }
       if (Object.keys(data).length > 0) patch.data = data
     } else if (newDataText.value.trim()) {
       try {

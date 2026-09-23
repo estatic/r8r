@@ -74,8 +74,11 @@ All endpoints require `AuthUser`, like the existing two.
   - `name`: trimmed, replaces the name.
   - `data`, **typed** credential (schema exists): merged key by key into
     the stored data; a key whose value is `""` or absent is left
-    unchanged ("blank = keep current"); keys not in the schema are
-    ignored. A required field can therefore never be cleared.
+    unchanged ("blank = keep current", which protects secrets the form
+    can't show); `null` removes an **optional** field (the edit form
+    sends it when the user empties a pre-filled text field; added after
+    the final review); keys not in the schema are ignored. A required
+    field can therefore never be cleared.
   - `data`, **untyped** credential (no schema): replaces the stored data
     entirely.
   - `credential_type` in the body is ignored (type is fixed after

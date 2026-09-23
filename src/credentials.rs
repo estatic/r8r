@@ -51,7 +51,8 @@ pub fn workflows_using_credential(workflows: &[crate::domain::Workflow], id: Uui
 
 /// Applies a PATCH body to stored credential data. Typed (schema known):
 /// per schema field, a non-blank patch value replaces the stored one;
-/// blank/absent keeps it; other keys are ignored. Untyped: replace.
+/// `""`/absent keeps it; `null` removes an optional field; other keys are
+/// ignored. Untyped: replace.
 pub fn merge_credential_data(
     schema: Option<&CredentialTypeSchema>,
     stored: &serde_json::Value,
@@ -63,7 +64,14 @@ pub fn merge_credential_data(
     let mut merged = stored.as_object().cloned().unwrap_or_default();
     for field in schema.fields {
         match patch.get(field.name) {
-            None | Some(serde_json::Value::Null) => {}
+            None => {}
+            // Explicit null clears an optional field (the form sends it for
+            // a visible value the user emptied); a required one is kept.
+            Some(serde_json::Value::Null) => {
+                if !field.required {
+                    merged.remove(field.name);
+                }
+            }
             Some(serde_json::Value::String(s)) if s.is_empty() => {}
             Some(v) => {
                 merged.insert(field.name.to_string(), v.clone());
@@ -219,6 +227,16 @@ mod tests {
             merge_credential_data(schema, &stored, &patch),
             serde_json::json!({"header_name": "X-Key", "value": "new-secret"})
         );
+    }
+
+    #[test]
+    fn null_clears_an_optional_field_but_never_a_required_one() {
+        let schema = schema_for("openaiApi");
+        let stored = serde_json::json!({"api_key": "sk-1", "base_url": "http://local:8080"});
+        let patch = serde_json::json!({"base_url": null});
+        assert_eq!(merge_credential_data(schema, &stored, &patch), serde_json::json!({"api_key": "sk-1"}));
+        let patch = serde_json::json!({"api_key": null});
+        assert_eq!(merge_credential_data(schema, &stored, &patch), stored);
     }
 
     #[test]
