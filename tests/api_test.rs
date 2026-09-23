@@ -291,6 +291,33 @@ async fn register_and_get_token(app: &axum::Router, email: &str) -> String {
     json["token"].as_str().unwrap().to_string()
 }
 
+/// Polls GET /rest/executions/:id until the run leaves `Running` (runs are
+/// background tasks since Plan 8.7). Fails the test after 5s.
+async fn wait_for_execution(app: &axum::Router, token: &str, execution_id: &str) -> serde_json::Value {
+    tokio::time::timeout(std::time::Duration::from_secs(5), async {
+        loop {
+            let response = app.clone()
+                .oneshot(
+                    Request::builder()
+                        .uri(format!("/rest/executions/{execution_id}"))
+                        .header("authorization", format!("Bearer {token}"))
+                        .body(Body::empty())
+                        .unwrap(),
+                )
+                .await
+                .unwrap();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+            if execution["status"] != "Running" {
+                return execution;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("execution should finish within 5s")
+}
+
 #[tokio::test]
 async fn create_workflow_requires_auth() {
     let app = test_app().await;
@@ -403,9 +430,11 @@ async fn create_execute_and_fetch_execution_end_to_end() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let started: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    assert_eq!(started["status"], "Running");
+    let execution = wait_for_execution(&app, &token, started["id"].as_str().unwrap()).await;
     assert_eq!(execution["status"], "Success");
     assert_eq!(execution["node_outputs"]["set1"][0]["json"]["greeting"], "hi");
     let execution_id = execution["id"].as_str().unwrap();
@@ -461,9 +490,10 @@ async fn list_executions_for_workflow_returns_newest_first_and_honors_limit() {
             )
             .await
             .unwrap();
-        assert_eq!(response.status(), StatusCode::OK);
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
         let bytes = response.into_body().collect().await.unwrap().to_bytes();
-        let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let started: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        let execution = wait_for_execution(&app, &token, started["id"].as_str().unwrap()).await;
         execution_ids.push(execution["id"].as_str().unwrap().to_string());
     }
 
@@ -543,7 +573,7 @@ async fn branching_workflow_with_if_and_merge_executes_end_to_end() {
     let workflow: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let workflow_id = workflow["id"].as_str().unwrap();
 
-    let response = app
+    let response = app.clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -554,9 +584,10 @@ async fn branching_workflow_with_if_and_merge_executes_end_to_end() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let started: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let execution = wait_for_execution(&app, &token, started["id"].as_str().unwrap()).await;
     assert_eq!(execution["status"], "Success");
 
     // Only the true branch ran (condition is always true), so the merge node's
@@ -1103,7 +1134,7 @@ async fn execute_workflow_with_nonexistent_credential_returns_400_before_touchin
     let workflow_2: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let workflow_2_id = workflow_2["id"].as_str().unwrap();
 
-    let response = app
+    let response = app.clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -1114,9 +1145,10 @@ async fn execute_workflow_with_nonexistent_credential_returns_400_before_touchin
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let started: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let execution = wait_for_execution(&app, &token, started["id"].as_str().unwrap()).await;
     assert_eq!(execution["status"], "Success");
     assert_eq!(execution["node_outputs"]["set1"][0]["json"]["ok"], true);
 }
@@ -1203,7 +1235,7 @@ async fn credential_authenticated_http_request_executes_end_to_end() {
     let workflow: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let workflow_id = workflow["id"].as_str().unwrap();
 
-    let exec_response = app
+    let exec_response = app.clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -1214,9 +1246,10 @@ async fn credential_authenticated_http_request_executes_end_to_end() {
         )
         .await
         .unwrap();
-    assert_eq!(exec_response.status(), StatusCode::OK);
+    assert_eq!(exec_response.status(), StatusCode::ACCEPTED);
     let bytes = exec_response.into_body().collect().await.unwrap().to_bytes();
-    let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let started: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let execution = wait_for_execution(&app, &token, started["id"].as_str().unwrap()).await;
     assert_eq!(execution["status"], "Success");
     assert_eq!(execution["node_outputs"]["http1"][0]["json"], serde_json::json!({"orders": [1, 2, 3]}));
 }
@@ -1287,7 +1320,7 @@ async fn credential_authenticated_telegram_send_message_executes_end_to_end() {
     let workflow: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let workflow_id = workflow["id"].as_str().unwrap();
 
-    let exec_response = app
+    let exec_response = app.clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -1298,9 +1331,10 @@ async fn credential_authenticated_telegram_send_message_executes_end_to_end() {
         )
         .await
         .unwrap();
-    assert_eq!(exec_response.status(), StatusCode::OK);
+    assert_eq!(exec_response.status(), StatusCode::ACCEPTED);
     let bytes = exec_response.into_body().collect().await.unwrap().to_bytes();
-    let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let started: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let execution = wait_for_execution(&app, &token, started["id"].as_str().unwrap()).await;
     assert_eq!(execution["status"], "Success");
     assert_eq!(execution["node_outputs"]["send"][0]["json"]["result"]["message_id"], 7);
 }
@@ -1684,7 +1718,10 @@ async fn deleting_an_executed_workflow_succeeds() {
         )
         .await
         .unwrap();
-    assert_eq!(execute_response.status(), StatusCode::OK);
+    assert_eq!(execute_response.status(), StatusCode::ACCEPTED);
+    let bytes = execute_response.into_body().collect().await.unwrap().to_bytes();
+    let started: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    wait_for_execution(&app, &token, started["id"].as_str().unwrap()).await;
 
     let delete_response = app
         .oneshot(
@@ -2153,7 +2190,7 @@ async fn agent_node_calls_a_tool_then_returns_a_final_response_end_to_end() {
     let bytes = create_response.into_body().collect().await.unwrap().to_bytes();
     let workflow_id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string();
 
-    let response = app
+    let response = app.clone()
         .oneshot(
             Request::builder()
                 .method("POST")
@@ -2164,9 +2201,10 @@ async fn agent_node_calls_a_tool_then_returns_a_final_response_end_to_end() {
         )
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(response.status(), StatusCode::ACCEPTED);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
-    let execution: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let started: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let execution = wait_for_execution(&app, &token, started["id"].as_str().unwrap()).await;
     assert_eq!(execution["status"], "Success");
     assert_eq!(execution["node_outputs"]["agent1"][0]["json"]["response"], "The status is ok.");
     assert_eq!(execution["node_outputs"]["agent1"][0]["json"]["tool_calls_made"], 1);

@@ -205,18 +205,20 @@ pub async fn execute_workflow(
         }
     };
 
-    match crate::execution_runner::run_and_track_execution(
-        &state.storage,
-        &state.execution_events,
-        &state.registry,
-        &workflow,
+    // The run is a detached background task (Plan 8.7): respond at once;
+    // the editor follows progress over the WebSocket.
+    match crate::execution_runner::start_execution(
+        state.storage.clone(),
+        state.execution_events.clone(),
+        state.registry.clone(),
+        workflow,
         ExecutionMode::Manual,
         None,
-        &credentials,
+        credentials,
     )
     .await
     {
-        Ok(execution) => Json(execution).into_response(),
+        Ok((execution, _handle)) => (StatusCode::ACCEPTED, Json(execution)).into_response(),
         Err(e) => {
             tracing::error!(error = %e, "failed to persist new execution");
             StatusCode::INTERNAL_SERVER_ERROR.into_response()
