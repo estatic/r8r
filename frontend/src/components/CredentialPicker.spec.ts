@@ -10,6 +10,15 @@ const CREDENTIAL_TYPE_SCHEMAS = [
   { credential_type: 'basicAuth', display_name: 'Basic Auth', generic: true, fields: [{ name: 'username', label: 'Username', field_type: 'text', required: true }, { name: 'password', label: 'Password (optional)', field_type: 'password', required: false }] },
 ]
 
+// Shaped like the real ai.agent node: two restricted, non-generic types whose
+// schemas share a field name (api_key) but not all fields (only openaiApi
+// declares base_url). This is what makes the stale-key leak concretely
+// reachable via the restricted `<select v-model="newType">` path.
+const AI_AGENT_CREDENTIAL_TYPES = [
+  { credential_type: 'anthropicApi', display_name: 'Anthropic API', generic: false, fields: [{ name: 'api_key', label: 'API Key', field_type: 'password', required: true }] },
+  { credential_type: 'openaiApi', display_name: 'OpenAI API', generic: false, fields: [{ name: 'api_key', label: 'API Key', field_type: 'password', required: true }, { name: 'base_url', label: 'Base URL (optional)', field_type: 'text', required: false }] },
+]
+
 function stubFetch(nodeTypes: unknown[], credentials: unknown[] = [], credentialTypes: unknown[] = CREDENTIAL_TYPE_SCHEMAS) {
   vi.stubGlobal(
     'fetch',
@@ -110,6 +119,69 @@ describe('CredentialPicker', () => {
     await new Promise((r) => setTimeout(r, 0))
     await wrapper.find('input[placeholder="Name"]').setValue('My Bot')
     await wrapper.find('input[placeholder="Bot Token"]').setValue('secret-token-value')
+    await wrapper.find('button.bg-blue-600').trigger('click')
+    await new Promise((r) => setTimeout(r, 0))
+    expect(wrapper.emitted('update:modelValue')).toEqual([['new-id']])
+    vi.unstubAllGlobals()
+  })
+
+  it('switching the restricted type select clears stale field values so submitted data never contains a key outside the new schema', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, options?: RequestInit) => {
+        if (url === '/rest/node-types') return Promise.resolve({ ok: true, status: 200, json: async () => [{ type_name: 'ai.agent', display_name: 'AI Agent', icon: '🤖', category: 'action', description: '', credential_types: ['openaiApi', 'anthropicApi'], output_ports: ['main'] }] })
+        if (url === '/rest/credentials' && (!options || options.method === undefined)) return Promise.resolve({ ok: true, status: 200, json: async () => [] })
+        if (url === '/rest/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => AI_AGENT_CREDENTIAL_TYPES })
+        if (url === '/rest/credentials' && options?.method === 'POST') {
+          const body = JSON.parse(options.body as string)
+          expect(body.data).toEqual({ api_key: 'anthropic-key' })
+          return Promise.resolve({ ok: true, status: 201, json: async () => ({ id: 'new-id', name: body.name, credential_type: body.credential_type, owner_id: 'u', created_at: '', updated_at: '' }) })
+        }
+        return Promise.reject(new Error(`unexpected fetch: ${url}`))
+      }),
+    )
+    const wrapper = mount(CredentialPicker, { props: { modelValue: null, nodeType: 'ai.agent' } })
+    await wrapper.find('button').trigger('click')
+    await new Promise((r) => setTimeout(r, 0))
+    // Two accepted types, so nothing auto-selects: pick openaiApi first.
+    const typeSelect = wrapper.findAll('select')[1]
+    await typeSelect.setValue('openaiApi')
+    await wrapper.find('input[placeholder="API Key"]').setValue('openai-key')
+    await wrapper.find('input[placeholder="Base URL (optional)"]').setValue('https://example.com')
+    // Now switch to anthropicApi, which has no base_url field at all.
+    await typeSelect.setValue('anthropicApi')
+    await wrapper.find('input[placeholder="Name"]').setValue('My Agent Cred')
+    await wrapper.find('input[placeholder="API Key"]').setValue('anthropic-key')
+    await wrapper.find('button.bg-blue-600').trigger('click')
+    await new Promise((r) => setTimeout(r, 0))
+    expect(wrapper.emitted('update:modelValue')).toEqual([['new-id']])
+    vi.unstubAllGlobals()
+  })
+
+  it('omits a cleared optional field from the submitted data instead of sending an empty string', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, options?: RequestInit) => {
+        if (url === '/rest/node-types') return Promise.resolve({ ok: true, status: 200, json: async () => [{ type_name: 'ai.agent', display_name: 'AI Agent', icon: '🤖', category: 'action', description: '', credential_types: ['openaiApi'], output_ports: ['main'] }] })
+        if (url === '/rest/credentials' && (!options || options.method === undefined)) return Promise.resolve({ ok: true, status: 200, json: async () => [] })
+        if (url === '/rest/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => AI_AGENT_CREDENTIAL_TYPES })
+        if (url === '/rest/credentials' && options?.method === 'POST') {
+          const body = JSON.parse(options.body as string)
+          expect(body.data).toEqual({ api_key: 'openai-key' })
+          expect(Object.prototype.hasOwnProperty.call(body.data, 'base_url')).toBe(false)
+          return Promise.resolve({ ok: true, status: 201, json: async () => ({ id: 'new-id', name: body.name, credential_type: body.credential_type, owner_id: 'u', created_at: '', updated_at: '' }) })
+        }
+        return Promise.reject(new Error(`unexpected fetch: ${url}`))
+      }),
+    )
+    const wrapper = mount(CredentialPicker, { props: { modelValue: null, nodeType: 'ai.agent' } })
+    await wrapper.find('button').trigger('click')
+    await new Promise((r) => setTimeout(r, 0))
+    // Single accepted type auto-selects openaiApi.
+    await wrapper.find('input[placeholder="Name"]').setValue('My OpenAI Cred')
+    await wrapper.find('input[placeholder="API Key"]').setValue('openai-key')
+    await wrapper.find('input[placeholder="Base URL (optional)"]').setValue('https://example.com')
+    await wrapper.find('input[placeholder="Base URL (optional)"]').setValue('')
     await wrapper.find('button.bg-blue-600').trigger('click')
     await new Promise((r) => setTimeout(r, 0))
     expect(wrapper.emitted('update:modelValue')).toEqual([['new-id']])

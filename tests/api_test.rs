@@ -2196,6 +2196,7 @@ async fn credential_types_lists_all_known_schemas() {
     let telegram = types.iter().find(|t| t["credential_type"] == "telegramApi").expect("telegramApi should be listed");
     assert_eq!(telegram["generic"], false);
     assert_eq!(telegram["fields"][0]["name"], "bot_token");
+    assert_eq!(telegram["fields"][0]["field_type"], "password");
     let bearer = types.iter().find(|t| t["credential_type"] == "bearerToken").expect("bearerToken should be listed");
     assert_eq!(bearer["generic"], true);
 }

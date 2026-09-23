@@ -50,9 +50,16 @@ watch(
   },
 )
 
+// Whenever the selected credential type changes — including on the
+// restricted `<select v-model="newType">` path, which has no dedicated
+// change handler — drop any field values entered for the previously
+// selected schema so they can't leak into a later submission.
+watch(newType, () => {
+  fieldValues.value = {}
+})
+
 function toggleCreating() {
   creating.value = !creating.value
-  fieldValues.value = {}
   useCustomType.value = false
   newType.value = creating.value && acceptedTypes.value.length === 1 ? acceptedTypes.value[0] : ''
 }
@@ -74,7 +81,6 @@ function selectGenericType(value: string) {
     useCustomType.value = false
     newType.value = value
   }
-  fieldValues.value = {}
 }
 
 async function createCredential() {
@@ -87,7 +93,15 @@ async function createCredential() {
       error.value = `${missing.map((f) => f.label).join(', ')} ${missing.length === 1 ? 'is' : 'are'} required.`
       return
     }
-    data = { ...fieldValues.value }
+    // Assemble from the schema (not the accumulated fieldValues map) so a
+    // stale key from a previously-selected schema can't leak into the
+    // submitted data, and drop blanks so a cleared optional field is
+    // omitted rather than submitted as an empty string.
+    data = Object.fromEntries(
+      schema.fields
+        .map((f) => [f.name, fieldValues.value[f.name] ?? ''])
+        .filter(([, v]) => v !== ''),
+    )
   } else {
     try {
       data = JSON.parse(newDataText.value)
