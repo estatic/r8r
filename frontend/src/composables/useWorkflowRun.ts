@@ -12,6 +12,7 @@ export function useWorkflowRun(workflowId: string, execution: Ref<Execution | nu
   const executing = ref(false)
   let startedId: string | null = null
   let timer: ReturnType<typeof setInterval> | null = null
+  let disposed = false
 
   function stop() {
     executing.value = false
@@ -22,11 +23,25 @@ export function useWorkflowRun(workflowId: string, execution: Ref<Execution | nu
     }
   }
 
+  // The socket finished the run, but it may have missed node events (e.g.
+  // the results panel was closed mid-run): show the server's final copy.
+  function finishFromSocket(id: string) {
+    stop()
+    api
+      .get<Execution>(`/rest/executions/${id}`)
+      .then((latest) => {
+        if (!disposed && latest.status !== 'Running' && execution.value?.id === id) execution.value = latest
+      })
+      .catch(() => {
+        // Keep the socket's copy.
+      })
+  }
+
   // The socket mutates the execution object in place, hence deep.
   watch(
     execution,
     (e) => {
-      if (startedId && e?.id === startedId && e.status !== 'Running') stop()
+      if (startedId && e?.id === startedId && e.status !== 'Running') finishFromSocket(startedId)
     },
     { deep: true },
   )
@@ -40,10 +55,15 @@ export function useWorkflowRun(workflowId: string, execution: Ref<Execution | nu
       stop()
       throw e
     }
+    // The editor was left while the POST was in flight: nothing to track.
+    if (disposed) {
+      stop()
+      return
+    }
     // Socket events for this run may have landed first: keep that richer copy.
     if (execution.value?.id !== started.id) execution.value = started
     if (execution.value!.status !== 'Running') {
-      stop()
+      finishFromSocket(started.id)
       return
     }
     startedId = started.id
@@ -51,14 +71,22 @@ export function useWorkflowRun(workflowId: string, execution: Ref<Execution | nu
     timer = setInterval(async () => {
       try {
         const latest = await api.get<Execution>(`/rest/executions/${id}`)
-        if (startedId === id && latest.status !== 'Running') execution.value = latest
+        if (startedId === id && latest.status !== 'Running') {
+          stop()
+          execution.value = latest
+        }
       } catch {
         // Transient; the next tick retries.
       }
     }, pollMs)
   }
 
-  if (getCurrentScope()) onScopeDispose(stop)
+  if (getCurrentScope()) {
+    onScopeDispose(() => {
+      disposed = true
+      stop()
+    })
+  }
 
   return { executing, execute, stop }
 }

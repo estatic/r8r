@@ -89,6 +89,21 @@ impl ChatQueues {
     }
 }
 
+/// Waits up to `idle` for the worker's next job; `None` means the worker
+/// should exit. On timeout the channel is closed *before* giving up, so a
+/// send racing the timeout either lands here (and is drained) or fails and
+/// hands the job back to `dispatch` -- it can never vanish with the
+/// receiver.
+async fn next_job(rx: &mut mpsc::UnboundedReceiver<TelegramJob>, idle: std::time::Duration) -> Option<TelegramJob> {
+    match tokio::time::timeout(idle, rx.recv()).await {
+        Ok(job) => job,
+        Err(_) => {
+            rx.close();
+            rx.recv().await
+        }
+    }
+}
+
 async fn chat_worker(
     mut rx: mpsc::UnboundedReceiver<TelegramJob>,
     storage: Arc<dyn Storage>,
@@ -96,7 +111,7 @@ async fn chat_worker(
     registry: Arc<NodeRegistry>,
     idle: std::time::Duration,
 ) {
-    while let Ok(Some(job)) = tokio::time::timeout(idle, rx.recv()).await {
+    while let Some(job) = next_job(&mut rx, idle).await {
         let workflow_id = job.workflow.id;
         match crate::execution_runner::start_execution(
             storage.clone(),
@@ -822,5 +837,27 @@ mod poller_tests {
         queues.dispatch(Some(1), job(&wf, 2, 0));
         wait_until(&seen, |s| s.len() == 2).await;
         assert_eq!(*seen.lock().unwrap(), vec![1, 2]);
+    }
+
+    #[tokio::test]
+    async fn an_idle_worker_refuses_sends_once_it_decides_to_exit() {
+        // The race: the idle timeout fires, and before the worker drops its
+        // receiver the poller's send succeeds -- the job would vanish with
+        // the receiver. next_job must close the channel before returning
+        // None, so that late send fails and dispatch respawns a worker.
+        let (_, wf, _) = queue_fixture(CHAT_WORKER_IDLE).await;
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        assert!(next_job(&mut rx, std::time::Duration::from_millis(1)).await.is_none());
+        // rx is still alive here, exactly like inside chat_worker before it returns.
+        assert!(tx.send(job(&wf, 1, 0)).is_err(), "a send after the exit decision must be refused");
+    }
+
+    #[tokio::test]
+    async fn an_idle_worker_still_runs_a_job_that_arrived_before_it_closed() {
+        let (_, wf, _) = queue_fixture(CHAT_WORKER_IDLE).await;
+        let (tx, mut rx) = mpsc::unbounded_channel::<TelegramJob>();
+        tx.send(job(&wf, 7, 0)).unwrap();
+        let got = next_job(&mut rx, std::time::Duration::from_millis(1)).await;
+        assert_eq!(got.map(|j| j.item.json["seq"].as_i64().unwrap()), Some(7));
     }
 }

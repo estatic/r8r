@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { nextTick, ref } from 'vue'
+import { effectScope, nextTick, ref } from 'vue'
 import { useWorkflowRun } from './useWorkflowRun'
 import type { Execution } from '../types/domain'
 
@@ -89,5 +89,37 @@ describe('useWorkflowRun', () => {
     const run = useWorkflowRun('wf', ref<Execution | null>(null))
     await expect(run.execute()).rejects.toThrow('boom')
     expect(run.executing.value).toBe(false)
+  })
+
+  it('does not start polling when its scope is disposed while the POST is in flight', async () => {
+    let resolvePost: (v: unknown) => void = () => {}
+    const fetchMock = vi.fn((_url: string, options?: RequestInit) =>
+      options?.method === 'POST'
+        ? new Promise((r) => { resolvePost = r })
+        : Promise.resolve({ ok: true, status: 200, json: async () => exec('e1', 'Running') }),
+    )
+    vi.stubGlobal('fetch', fetchMock)
+    const scope = effectScope()
+    const run = scope.run(() => useWorkflowRun('wf', ref<Execution | null>(null), 2000))!
+    const pending = run.execute()
+    scope.stop() // user leaves the editor
+    resolvePost({ ok: true, status: 202, json: async () => exec('e1', 'Running') })
+    await pending
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(fetchMock.mock.calls.length).toBe(1) // only the POST
+    expect(run.executing.value).toBe(false)
+  })
+
+  it('replaces the socket copy with the server copy once the socket finishes the run', async () => {
+    const serverCopy = exec('e1', 'Success', { set1: [{ json: { full: true }, binary: {} }], set2: [] })
+    stubFetch(exec('e1', 'Running'), [serverCopy])
+    const execution = ref<Execution | null>(null)
+    const run = useWorkflowRun('wf', execution)
+    await run.execute()
+    // Socket finishes the run but missed some node events (e.g. panel closed mid-run).
+    execution.value!.status = 'Success'
+    await nextTick()
+    await vi.advanceTimersByTimeAsync(0)
+    expect(execution.value).toEqual(serverCopy)
   })
 })
