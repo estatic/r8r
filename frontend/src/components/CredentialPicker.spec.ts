@@ -272,4 +272,13 @@ describe('CredentialPicker', () => {
     expect((wrapper.findAll('select')[1].element as HTMLSelectElement).value).toBe('')
     vi.unstubAllGlobals()
   })
+
+  it('shows an Edit link only when a credential is selected', async () => {
+    stubFetch([{ type_name: 'core.httpRequest', display_name: 'HTTP Request', icon: '🌐', category: 'action', description: '', credential_types: [], output_ports: ['main'] }])
+    const none = mount(CredentialPicker, { props: { modelValue: null, nodeType: 'core.httpRequest' } })
+    expect(none.find('[data-testid="edit-credential"]').exists()).toBe(false)
+    const some = mount(CredentialPicker, { props: { modelValue: 'c1', nodeType: 'core.httpRequest' } })
+    expect(some.find('[data-testid="edit-credential"]').exists()).toBe(true)
+    vi.unstubAllGlobals()
+  })
 })

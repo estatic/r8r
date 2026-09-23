@@ -73,6 +73,11 @@ export interface CredentialSummary {
   owner_id: string
   created_at: string
   updated_at: string
+  used_by: number
+}
+
+export interface CredentialDetail extends CredentialSummary {
+  fields: Record<string, string>
 }
 
 export type CredentialFieldType = 'text' | 'password'
