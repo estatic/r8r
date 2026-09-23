@@ -2,6 +2,7 @@ use crate::domain::Workflow;
 use crate::storage::Storage;
 use std::collections::HashMap;
 use uuid::Uuid;
+use crate::credential_types::{known_credential_types, CredentialTypeSchema, FieldType};
 
 pub async fn resolve_credentials_for_workflow(
     storage: &dyn Storage,
@@ -25,6 +26,68 @@ pub async fn resolve_credentials_for_workflow(
         resolved.insert(id, credential.data);
     }
     Ok(resolved)
+}
+
+/// The field schema for a credential type, if it is one of the known types.
+pub fn schema_for(credential_type: &str) -> Option<&'static CredentialTypeSchema> {
+    known_credential_types().iter().find(|s| s.credential_type == credential_type)
+}
+
+/// `(id, name)` of every workflow with a node whose
+/// `parameters.auth.credential_id` is `id` -- the field
+/// `resolve_credentials_for_workflow` reads.
+pub fn workflows_using_credential(workflows: &[crate::domain::Workflow], id: Uuid) -> Vec<(Uuid, String)> {
+    let id = id.to_string();
+    workflows
+        .iter()
+        .filter(|wf| {
+            wf.nodes.iter().any(|n| {
+                n.parameters.get("auth").and_then(|a| a.get("credential_id")).and_then(|v| v.as_str()) == Some(id.as_str())
+            })
+        })
+        .map(|wf| (wf.id, wf.name.clone()))
+        .collect()
+}
+
+/// Applies a PATCH body to stored credential data. Typed (schema known):
+/// per schema field, a non-blank patch value replaces the stored one;
+/// blank/absent keeps it; other keys are ignored. Untyped: replace.
+pub fn merge_credential_data(
+    schema: Option<&CredentialTypeSchema>,
+    stored: &serde_json::Value,
+    patch: &serde_json::Value,
+) -> serde_json::Value {
+    let Some(schema) = schema else {
+        return patch.clone();
+    };
+    let mut merged = stored.as_object().cloned().unwrap_or_default();
+    for field in schema.fields {
+        match patch.get(field.name) {
+            None | Some(serde_json::Value::Null) => {}
+            Some(serde_json::Value::String(s)) if s.is_empty() => {}
+            Some(v) => {
+                merged.insert(field.name.to_string(), v.clone());
+            }
+        }
+    }
+    serde_json::Value::Object(merged)
+}
+
+/// Stored values of the schema's text fields only -- never password
+/// fields, and nothing for an untyped credential.
+pub fn non_secret_fields(
+    schema: Option<&CredentialTypeSchema>,
+    stored: &serde_json::Value,
+) -> serde_json::Map<String, serde_json::Value> {
+    let mut out = serde_json::Map::new();
+    if let Some(schema) = schema {
+        for field in schema.fields.iter().filter(|f| matches!(f.field_type, FieldType::Text)) {
+            if let Some(v) = stored.get(field.name) {
+                out.insert(field.name.to_string(), v.clone());
+            }
+        }
+    }
+    out
 }
 
 #[cfg(test)]
@@ -108,5 +171,78 @@ mod tests {
         let wf = workflow_with_nodes(vec![node_with_credential(Uuid::new_v4())]);
         let result = resolve_credentials_for_workflow(&storage, &wf).await;
         assert!(result.is_err());
+    }
+
+    fn wf_with_auth(name: &str, credential_id: Option<&str>) -> crate::domain::Workflow {
+        let params = match credential_id {
+            Some(id) => serde_json::json!({"auth": {"type": "bearer", "credential_id": id}}),
+            None => serde_json::json!({"url": "https://example.com"}),
+        };
+        crate::domain::Workflow {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            active: false,
+            nodes: vec![crate::domain::NodeInstance {
+                id: "n1".into(),
+                node_type: "core.httpRequest".into(),
+                position: (0.0, 0.0),
+                parameters: params,
+                disabled: false,
+                settings: Default::default(),
+            }],
+            connections: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    #[test]
+    fn finds_workflows_that_reference_the_credential() {
+        let id = Uuid::new_v4();
+        let other = Uuid::new_v4();
+        let using = wf_with_auth("uses it", Some(&id.to_string()));
+        let workflows = vec![using.clone(), wf_with_auth("other cred", Some(&other.to_string())), wf_with_auth("no auth", None)];
+        assert_eq!(workflows_using_credential(&workflows, id), vec![(using.id, "uses it".to_string())]);
+    }
+
+    #[test]
+    fn typed_merge_keeps_blank_fields_and_ignores_unknown_keys() {
+        let schema = schema_for("apiKeyHeader");
+        let stored = serde_json::json!({"header_name": "X-Key", "value": "old-secret"});
+        let patch = serde_json::json!({"header_name": "X-Api-Key", "value": "", "extra": "nope"});
+        assert_eq!(
+            merge_credential_data(schema, &stored, &patch),
+            serde_json::json!({"header_name": "X-Api-Key", "value": "old-secret"})
+        );
+        let patch = serde_json::json!({"value": "new-secret"});
+        assert_eq!(
+            merge_credential_data(schema, &stored, &patch),
+            serde_json::json!({"header_name": "X-Key", "value": "new-secret"})
+        );
+    }
+
+    #[test]
+    fn untyped_merge_replaces_everything() {
+        let stored = serde_json::json!({"a": 1, "b": 2});
+        let patch = serde_json::json!({"c": 3});
+        assert_eq!(merge_credential_data(None, &stored, &patch), serde_json::json!({"c": 3}));
+    }
+
+    #[test]
+    fn merge_into_non_object_starts_fresh() {
+        let schema = schema_for("bearerToken");
+        let stored = serde_json::json!("legacy string");
+        let patch = serde_json::json!({"token": "t"});
+        assert_eq!(merge_credential_data(schema, &stored, &patch), serde_json::json!({"token": "t"}));
+    }
+
+    #[test]
+    fn non_secret_fields_returns_text_fields_only() {
+        let schema = schema_for("apiKeyHeader");
+        let stored = serde_json::json!({"header_name": "X-Key", "value": "secret"});
+        let fields = non_secret_fields(schema, &stored);
+        assert_eq!(fields.get("header_name"), Some(&serde_json::json!("X-Key")));
+        assert!(!fields.contains_key("value"));
+        assert!(non_secret_fields(None, &stored).is_empty());
     }
 }
