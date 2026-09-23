@@ -18,6 +18,12 @@ const router = createRouter({
       component: () => import('../views/WorkflowEditorView.vue'),
       meta: { requiresAuth: true },
     },
+    {
+      path: '/credentials',
+      name: 'credentials',
+      component: () => import('../views/CredentialsView.vue'),
+      meta: { requiresAuth: true },
+    },
     { path: '/', redirect: '/workflows' },
   ],
 })

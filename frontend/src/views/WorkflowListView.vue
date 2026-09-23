@@ -58,7 +58,10 @@ function logout() {
   <main class="min-h-screen bg-gray-50">
     <header class="bg-white border-b px-6 py-4 flex justify-between items-center">
       <h1 class="text-xl font-semibold text-gray-800">Workflows</h1>
-      <button class="text-sm text-gray-500" @click="logout">Log out</button>
+      <div class="flex gap-4 items-center">
+        <router-link to="/credentials" class="text-sm text-blue-600">Credentials</router-link>
+        <button class="text-sm text-gray-500" @click="logout">Log out</button>
+      </div>
     </header>
     <div class="p-6 max-w-3xl mx-auto space-y-4">
       <form class="flex gap-2" @submit.prevent="createWorkflow">
