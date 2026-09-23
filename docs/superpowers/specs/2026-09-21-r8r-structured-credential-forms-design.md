@@ -73,6 +73,9 @@ pub struct CredentialField {
 pub struct CredentialTypeSchema {
     pub credential_type: &'static str,
     pub display_name: &'static str,
+    /// Added during implementation: true for bearerToken/apiKeyHeader/basicAuth,
+    /// the types offered to a node with no fixed `credential_types`.
+    pub generic: bool,
     pub fields: &'static [CredentialField],
 }
 

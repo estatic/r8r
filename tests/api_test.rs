@@ -2173,6 +2173,16 @@ async fn agent_node_calls_a_tool_then_returns_a_final_response_end_to_end() {
 }
 
 #[tokio::test]
+async fn credential_types_requires_authentication() {
+    let app = test_app().await;
+    let response = app
+        .oneshot(Request::builder().method("GET").uri("/rest/credential-types").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
+}
+
+#[tokio::test]
 async fn credential_types_lists_all_known_schemas() {
     let app = test_app().await;
     let token = register_and_get_token(&app, "cred-types@example.com").await;

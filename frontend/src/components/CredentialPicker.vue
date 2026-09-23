@@ -56,6 +56,7 @@ watch(
 // selected schema so they can't leak into a later submission.
 watch(newType, () => {
   fieldValues.value = {}
+  error.value = ''
 })
 
 function toggleCreating() {
@@ -70,6 +71,12 @@ function toggleCreating() {
 watch(acceptedTypes, (types) => {
   if (creating.value && types.length === 1) {
     newType.value = types[0]
+  } else if (types.length > 0 && !types.includes(newType.value)) {
+    // A type picked from the generic list before the node's restricted
+    // list arrived is no longer offered; drop it rather than keep rendering
+    // a form the restricted select can't show.
+    newType.value = ''
+    useCustomType.value = false
   }
 })
 
@@ -96,10 +103,11 @@ async function createCredential() {
     // Assemble from the schema (not the accumulated fieldValues map) so a
     // stale key from a previously-selected schema can't leak into the
     // submitted data, and drop blanks so a cleared optional field is
-    // omitted rather than submitted as an empty string.
+    // omitted rather than submitted as an empty string. Trim to match the
+    // required-field check, so pasted tokens don't carry stray whitespace.
     data = Object.fromEntries(
       schema.fields
-        .map((f) => [f.name, fieldValues.value[f.name] ?? ''])
+        .map((f) => [f.name, (fieldValues.value[f.name] ?? '').trim()])
         .filter(([, v]) => v !== ''),
     )
   } else {
@@ -140,7 +148,9 @@ async function createCredential() {
     </select>
     <button type="button" class="text-xs text-blue-600" @click="toggleCreating">+ New credential</button>
     <div v-if="creating" class="border rounded p-2 space-y-2 bg-gray-50">
-      <input v-model="newName" placeholder="Name" class="w-full border rounded px-2 py-1 text-sm" />
+      <!-- autocomplete opt-outs keep password managers from treating this as
+           a login form and filling the r8r login into credential secrets. -->
+      <input v-model="newName" placeholder="Name" autocomplete="off" class="w-full border rounded px-2 py-1 text-sm" />
 
       <select v-if="hasRestrictedTypes" v-model="newType" class="w-full border rounded px-2 py-1 text-sm">
         <option value="" disabled>Select a type…</option>
@@ -165,6 +175,8 @@ async function createCredential() {
           v-model="fieldValues[f.name]"
           :type="f.field_type === 'password' ? 'password' : 'text'"
           :placeholder="f.label"
+          :aria-label="f.label"
+          :autocomplete="f.field_type === 'password' ? 'new-password' : 'off'"
           class="w-full border rounded px-2 py-1 text-sm"
         />
       </div>

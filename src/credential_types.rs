@@ -90,6 +90,23 @@ mod tests {
     }
 
     #[test]
+    fn every_node_declared_credential_type_has_a_schema() {
+        // Guards against drift: a node declaring a credential type with no
+        // registry entry would silently fall back to the raw-JSON form.
+        let mut registry = crate::node::NodeRegistry::new();
+        crate::nodes::register_all(&mut registry);
+        for type_name in registry.type_names() {
+            let node = registry.get(type_name).unwrap();
+            for credential_type in node.credential_types() {
+                assert!(
+                    known_credential_types().iter().any(|s| s.credential_type == *credential_type),
+                    "node {type_name} declares credential type {credential_type} with no registered schema"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn telegram_api_requires_bot_token() {
         let schema = find("telegramApi");
         assert!(!schema.generic);

@@ -187,4 +187,89 @@ describe('CredentialPicker', () => {
     expect(wrapper.emitted('update:modelValue')).toEqual([['new-id']])
     vi.unstubAllGlobals()
   })
+
+  it('opts every create-form input out of browser password-manager autofill and gives each field an accessible name', async () => {
+    stubFetch([
+      { type_name: 'core.httpRequest', display_name: 'HTTP Request', icon: '🌐', category: 'action', description: '', credential_types: [], output_ports: ['main'] },
+    ])
+    const wrapper = mount(CredentialPicker, { props: { modelValue: null, nodeType: 'core.httpRequest' } })
+    await wrapper.find('button').trigger('click')
+    await new Promise((r) => setTimeout(r, 0))
+    await wrapper.findAll('select')[1].setValue('apiKeyHeader')
+    expect(wrapper.find('input[placeholder="Name"]').attributes('autocomplete')).toBe('off')
+    const headerName = wrapper.find('input[placeholder="Header Name"]')
+    const value = wrapper.find('input[placeholder="Value"]')
+    expect(headerName.attributes('autocomplete')).toBe('off')
+    expect(value.attributes('autocomplete')).toBe('new-password')
+    expect(headerName.attributes('aria-label')).toBe('Header Name')
+    expect(value.attributes('aria-label')).toBe('Value')
+    vi.unstubAllGlobals()
+  })
+
+  it('trims submitted field values and omits a whitespace-only optional field', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string, options?: RequestInit) => {
+        if (url === '/rest/node-types') return Promise.resolve({ ok: true, status: 200, json: async () => [{ type_name: 'ai.agent', display_name: 'AI Agent', icon: '🤖', category: 'action', description: '', credential_types: ['openaiApi'], output_ports: ['main'] }] })
+        if (url === '/rest/credentials' && (!options || options.method === undefined)) return Promise.resolve({ ok: true, status: 200, json: async () => [] })
+        if (url === '/rest/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => AI_AGENT_CREDENTIAL_TYPES })
+        if (url === '/rest/credentials' && options?.method === 'POST') {
+          const body = JSON.parse(options.body as string)
+          expect(body.data).toEqual({ api_key: 'openai-key' })
+          return Promise.resolve({ ok: true, status: 201, json: async () => ({ id: 'new-id', name: body.name, credential_type: body.credential_type, owner_id: 'u', created_at: '', updated_at: '' }) })
+        }
+        return Promise.reject(new Error(`unexpected fetch: ${url}`))
+      }),
+    )
+    const wrapper = mount(CredentialPicker, { props: { modelValue: null, nodeType: 'ai.agent' } })
+    await wrapper.find('button').trigger('click')
+    await new Promise((r) => setTimeout(r, 0))
+    await wrapper.find('input[placeholder="Name"]').setValue('My OpenAI Cred')
+    await wrapper.find('input[placeholder="API Key"]').setValue('  openai-key \n')
+    await wrapper.find('input[placeholder="Base URL (optional)"]').setValue('   ')
+    await wrapper.find('button.bg-blue-600').trigger('click')
+    await new Promise((r) => setTimeout(r, 0))
+    expect(wrapper.emitted('update:modelValue')).toEqual([['new-id']])
+    vi.unstubAllGlobals()
+  })
+
+  it('clears a validation error when the selected type changes', async () => {
+    stubFetch([
+      { type_name: 'ai.agent', display_name: 'AI Agent', icon: '🤖', category: 'action', description: '', credential_types: ['openaiApi', 'anthropicApi'], output_ports: ['main'] },
+    ], [], AI_AGENT_CREDENTIAL_TYPES)
+    const wrapper = mount(CredentialPicker, { props: { modelValue: null, nodeType: 'ai.agent' } })
+    await wrapper.find('button').trigger('click')
+    await new Promise((r) => setTimeout(r, 0))
+    const typeSelect = wrapper.findAll('select')[1]
+    await typeSelect.setValue('openaiApi')
+    await wrapper.find('button.bg-blue-600').trigger('click')
+    expect(wrapper.find('p.text-red-600').text()).toBe('API Key is required.')
+    await typeSelect.setValue('anthropicApi')
+    expect(wrapper.find('p.text-red-600').exists()).toBe(false)
+    vi.unstubAllGlobals()
+  })
+
+  it('drops a type picked before node types loaded when it is not among the accepted types', async () => {
+    let resolveNodeTypes: (v: unknown) => void = () => {}
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((url: string) => {
+        if (url === '/rest/node-types') return new Promise((r) => { resolveNodeTypes = r })
+        if (url === '/rest/credentials') return Promise.resolve({ ok: true, status: 200, json: async () => [] })
+        if (url === '/rest/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => [...CREDENTIAL_TYPE_SCHEMAS, ...AI_AGENT_CREDENTIAL_TYPES] })
+        return Promise.reject(new Error(`unexpected fetch: ${url}`))
+      }),
+    )
+    const wrapper = mount(CredentialPicker, { props: { modelValue: null, nodeType: 'ai.agent' } })
+    await wrapper.find('button').trigger('click')
+    await new Promise((r) => setTimeout(r, 0))
+    // Node types still loading, so the generic list shows: pick Bearer Token.
+    await wrapper.findAll('select')[1].setValue('bearerToken')
+    expect(wrapper.find('input[placeholder="Token"]').exists()).toBe(true)
+    resolveNodeTypes({ ok: true, status: 200, json: async () => [{ type_name: 'ai.agent', display_name: 'AI Agent', icon: '🤖', category: 'action', description: '', credential_types: ['openaiApi', 'anthropicApi'], output_ports: ['main'] }] })
+    await new Promise((r) => setTimeout(r, 0))
+    expect(wrapper.find('input[placeholder="Token"]').exists()).toBe(false)
+    expect((wrapper.findAll('select')[1].element as HTMLSelectElement).value).toBe('')
+    vi.unstubAllGlobals()
+  })
 })
