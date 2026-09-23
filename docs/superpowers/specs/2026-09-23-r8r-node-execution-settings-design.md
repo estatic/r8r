@@ -136,6 +136,10 @@ async fn run_node_with_policy(
 
 - The timeout applies **per attempt**, not to the total.
 - `wait_ms` elapses between attempts only — never after the final one.
+- When wrapping, an `ExecutionFailed` last error contributes its inner
+  message rather than its Display, so the `node execution failed: `
+  prefix isn't doubled (the code above is simplified on this point; the
+  plan has the exact version).
 - With default settings this is exactly one untimed `execute()` call,
   i.e. today's behavior.
 
