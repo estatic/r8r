@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest'
 import { mount } from '@vue/test-utils'
 import NodeConfigPanel from './NodeConfigPanel.vue'
+import { useCredentialsStore } from '../stores/credentials'
 import type { NodeInstance, NodeSettings } from '../types/domain'
 
 const node: NodeInstance = {
@@ -100,5 +101,36 @@ describe('NodeConfigPanel', () => {
     await clickApply(wrapper)
     expect(wrapper.text()).toContain('Max tries must be between 2 and 10.')
     expect(wrapper.emitted('update')).toBeFalsy()
+  })
+
+  function seedCredential(id: string, credentialType: string) {
+    const store = useCredentialsStore()
+    store.credentials = [{ id, name: 'cred', credential_type: credentialType, owner_id: 'u', created_at: '', updated_at: '', used_by: 0 }]
+    store.loaded = true
+  }
+
+  function agent(parameters: Record<string, unknown>): NodeInstance {
+    return { id: 'a1', node_type: 'ai.agent', position: [0, 0], parameters, disabled: false }
+  }
+
+  it('fills in the AI Agent provider from the selected credential type on Apply', async () => {
+    seedCredential('c1', 'openaiApi')
+    const wrapper = mount(NodeConfigPanel, { props: { node: agent({ auth: { credential_id: 'c1' } }) } })
+    await clickApply(wrapper)
+    expect((wrapper.emitted('update')![0][0] as NodeInstance).parameters.provider).toBe('openai')
+  })
+
+  it('keeps an explicitly set AI Agent provider', async () => {
+    seedCredential('c1', 'openaiApi')
+    const wrapper = mount(NodeConfigPanel, { props: { node: agent({ auth: { credential_id: 'c1' }, provider: 'anthropic' }) } })
+    await clickApply(wrapper)
+    expect((wrapper.emitted('update')![0][0] as NodeInstance).parameters.provider).toBe('anthropic')
+  })
+
+  it('does not add a provider to other node types', async () => {
+    seedCredential('c1', 'openaiApi')
+    const wrapper = mount(NodeConfigPanel, { props: { node: { ...node, parameters: { auth: { credential_id: 'c1' } } } } })
+    await clickApply(wrapper)
+    expect((wrapper.emitted('update')![0][0] as NodeInstance).parameters.provider).toBeUndefined()
   })
 })

@@ -243,23 +243,28 @@ impl Node for AgentNode {
     }
 
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
-        let provider_name = ctx
-            .parameters
-            .get("provider")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| NodeError::ExecutionFailed("ai.agent requires a \"provider\" parameter (\"anthropic\" or \"openai\")".into()))?;
-        let model = ctx
-            .parameters
-            .get("model")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| NodeError::ExecutionFailed("ai.agent requires a \"model\" parameter".into()))?;
-        let system_prompt = ctx.parameters.get("system_prompt").and_then(|v| v.as_str()).unwrap_or("");
-        let user_message = ctx
-            .parameters
-            .get("user_message")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| NodeError::ExecutionFailed("ai.agent requires a \"user_message\" parameter".into()))?
-            .to_string();
+        let str_param = |name: &str| ctx.parameters.get(name).and_then(|v| v.as_str());
+        // Report every missing required parameter at once: they're edited as
+        // raw JSON, so one-at-a-time errors mean one failed run per field.
+        let missing: Vec<&str> = [
+            ("provider", "provider (\"anthropic\" or \"openai\")"),
+            ("model", "model"),
+            ("user_message", "user_message"),
+        ]
+        .iter()
+        .filter(|(key, _)| str_param(key).is_none())
+        .map(|(_, label)| *label)
+        .collect();
+        if !missing.is_empty() {
+            return Err(NodeError::ExecutionFailed(format!(
+                "ai.agent is missing required parameters: {}",
+                missing.join(", ")
+            )));
+        }
+        let provider_name = str_param("provider").unwrap_or_default();
+        let model = str_param("model").unwrap_or_default();
+        let system_prompt = str_param("system_prompt").unwrap_or("");
+        let user_message = str_param("user_message").unwrap_or_default().to_string();
         let max_iterations = ctx.parameters.get("max_iterations").and_then(|v| v.as_u64()).unwrap_or(10);
         let max_context_tokens = ctx.parameters.get("max_context_tokens").and_then(|v| v.as_u64()).map(|n| n as usize);
         let empty_tools = serde_json::json!([]);
@@ -671,5 +676,18 @@ mod tests {
             matches!(m, LlmMessage::Assistant { content: Some(text), .. } if text == "Let me check that for you.")
         });
         assert!(has_preserved_text, "assistant's accompanying text must survive into the next turn's history, got: {second_call_messages:?}");
+    }
+
+    #[tokio::test]
+    async fn names_every_missing_required_parameter_at_once() {
+        let ctx = NodeExecutionContext {
+            parameters: serde_json::json!({"auth": {"credential_id": uuid::Uuid::new_v4().to_string()}}),
+            ..Default::default()
+        };
+        let err = AgentNode.execute(&ctx).await.unwrap_err().to_string();
+        assert!(
+            err.contains("ai.agent is missing required parameters: provider (\"anthropic\" or \"openai\"), model, user_message"),
+            "{err}"
+        );
     }
 }

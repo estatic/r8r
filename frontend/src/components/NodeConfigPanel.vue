@@ -2,6 +2,14 @@
 import { ref, watch } from 'vue'
 import type { NodeInstance, NodeSettings } from '../types/domain'
 import CredentialPicker from './CredentialPicker.vue'
+import { useCredentialsStore } from '../stores/credentials'
+
+// ai.agent reads `provider` from its parameters, but the credential type
+// already says which API it is for; fill it in when the user hasn't.
+const PROVIDER_BY_CREDENTIAL_TYPE: Record<string, string> = {
+  openaiApi: 'openai',
+  anthropicApi: 'anthropic',
+}
 
 const props = defineProps<{ node: NodeInstance | null }>()
 const emit = defineEmits<{ update: [node: NodeInstance]; close: [] }>()
@@ -10,6 +18,7 @@ const paramsText = ref('')
 const error = ref('')
 const disabled = ref(false)
 const credentialId = ref<string | null>(null)
+const credentialsStore = useCredentialsStore()
 const continueOnFail = ref(false)
 const retryEnabled = ref(false)
 const maxTries = ref<number | string>(3)
@@ -65,6 +74,11 @@ function apply() {
   }
   if (credentialId.value) {
     parsed.auth = { ...((parsed.auth as object) ?? {}), credential_id: credentialId.value }
+  }
+  if (props.node.node_type === 'ai.agent' && typeof parsed.provider !== 'string' && credentialId.value) {
+    const type = credentialsStore.credentials.find((c) => c.id === credentialId.value)?.credential_type
+    const provider = type ? PROVIDER_BY_CREDENTIAL_TYPE[type] : undefined
+    if (provider) parsed.provider = provider
   }
   const settings = buildSettings()
   if (typeof settings === 'string') {
