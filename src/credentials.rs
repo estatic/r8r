@@ -121,6 +121,27 @@ pub fn non_secret_fields(
     out
 }
 
+/// `(id, name)` of every library tool whose parameters reference credential `id`.
+pub fn tools_using_credential(tools: &[crate::domain::Tool], id: Uuid) -> Vec<(Uuid, String)> {
+    let id = id.to_string();
+    tools.iter().filter(|t| credential_ref(&t.parameters) == Some(id.as_str())).map(|t| (t.id, t.name.clone())).collect()
+}
+
+/// `(id, name)` of every workflow with an `ai.agent` node listing `tool_id` in `tool_ids`.
+pub fn workflows_using_tool(workflows: &[Workflow], tool_id: Uuid) -> Vec<(Uuid, String)> {
+    let id = tool_id.to_string();
+    workflows
+        .iter()
+        .filter(|wf| {
+            wf.nodes.iter().any(|n| {
+                n.node_type == "ai.agent"
+                    && n.parameters.get("tool_ids").and_then(|v| v.as_array()).is_some_and(|ids| ids.iter().any(|v| v.as_str() == Some(id.as_str())))
+            })
+        })
+        .map(|wf| (wf.id, wf.name.clone()))
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

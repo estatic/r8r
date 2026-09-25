@@ -7,7 +7,7 @@ use axum::response::IntoResponse;
 use axum::Json;
 use serde::Deserialize;
 use uuid::Uuid;
-use crate::credentials::{merge_credential_data, non_secret_fields, schema_for, workflows_using_credential};
+use crate::credentials::{merge_credential_data, non_secret_fields, schema_for, tools_using_credential, workflows_using_credential};
 
 #[derive(Deserialize)]
 pub struct CreateCredentialRequest {
@@ -55,9 +55,13 @@ pub async fn list_credentials(
         Ok(w) => w,
         Err(r) => return r,
     };
+    let tools = match all_tools(&state).await {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
     let items: Vec<CredentialListItem> = summaries
         .into_iter()
-        .map(|summary| CredentialListItem { used_by: workflows_using_credential(&workflows, summary.id).len(), summary })
+        .map(|summary| CredentialListItem { used_by: usage_count(&workflows, &tools, summary.id), summary })
         .collect();
     Json(items).into_response()
 }
@@ -85,6 +89,18 @@ pub struct UpdateCredentialRequest {
     pub data: Option<serde_json::Value>,
 }
 
+async fn all_tools(state: &AppState) -> Result<Vec<crate::domain::Tool>, axum::response::Response> {
+    state.storage.list_tools().await.map_err(|e| {
+        tracing::error!(error = %e, "failed to list tools for credential usage");
+        StatusCode::INTERNAL_SERVER_ERROR.into_response()
+    })
+}
+
+/// Workflows plus library tools that reference credential `id`.
+fn usage_count(workflows: &[crate::domain::Workflow], tools: &[crate::domain::Tool], id: Uuid) -> usize {
+    workflows_using_credential(workflows, id).len() + tools_using_credential(tools, id).len()
+}
+
 async fn all_workflows(state: &AppState) -> Result<Vec<crate::domain::Workflow>, axum::response::Response> {
     state.storage.list_workflows().await.map_err(|e| {
         tracing::error!(error = %e, "failed to list workflows for credential usage");
@@ -109,8 +125,12 @@ pub async fn get_credential(
         Ok(w) => w,
         Err(r) => return r,
     };
+    let tools = match all_tools(&state).await {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
     Json(CredentialDetail {
-        used_by: workflows_using_credential(&workflows, id).len(),
+        used_by: usage_count(&workflows, &tools, id),
         fields: non_secret_fields(schema_for(&credential.credential_type), &credential.data),
         summary: CredentialSummary::from(&credential),
     })
@@ -161,8 +181,12 @@ pub async fn update_credential(
         Ok(w) => w,
         Err(r) => return r,
     };
+    let tools = match all_tools(&state).await {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
     Json(CredentialListItem {
-        used_by: workflows_using_credential(&workflows, id).len(),
+        used_by: usage_count(&workflows, &tools, id),
         summary: CredentialSummary::from(&credential),
     })
     .into_response()
@@ -177,13 +201,23 @@ pub async fn delete_credential(
         Ok(w) => w,
         Err(r) => return r,
     };
-    let users = workflows_using_credential(&workflows, id);
-    if !users.is_empty() {
-        let list: Vec<serde_json::Value> =
-            users.iter().map(|(wf_id, name)| serde_json::json!({"id": wf_id, "name": name})).collect();
+    let tools = match all_tools(&state).await {
+        Ok(t) => t,
+        Err(r) => return r,
+    };
+    let using_workflows = workflows_using_credential(&workflows, id);
+    let using_tools = tools_using_credential(&tools, id);
+    if !using_workflows.is_empty() || !using_tools.is_empty() {
+        let as_json = |refs: &[(Uuid, String)]| -> Vec<serde_json::Value> {
+            refs.iter().map(|(ref_id, name)| serde_json::json!({"id": ref_id, "name": name})).collect()
+        };
         return (
             StatusCode::CONFLICT,
-            Json(serde_json::json!({"error": "credential is in use", "workflows": list})),
+            Json(serde_json::json!({
+                "error": "credential is in use",
+                "workflows": as_json(&using_workflows),
+                "tools": as_json(&using_tools),
+            })),
         )
             .into_response();
     }

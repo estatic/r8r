@@ -2521,3 +2521,97 @@ async fn delete_is_refused_while_a_workflow_uses_the_credential() {
     let (s, _) = send(&app, "DELETE", &format!("/rest/credentials/{id}"), &token, None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
+
+fn tool_body(name: &str, cred: Option<&str>) -> serde_json::Value {
+    let mut parameters = serde_json::json!({"method": "GET", "url": "https://s.example/?q={{ $args.q }}"});
+    if let Some(c) = cred {
+        parameters["auth"] = serde_json::json!({"type": "bearer", "credential_id": c});
+    }
+    serde_json::json!({
+        "name": name,
+        "description": "search",
+        "node_type": "core.httpRequest",
+        "argument_schema": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]},
+        "parameters": parameters
+    })
+}
+
+#[tokio::test]
+async fn tool_crud_and_validation() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "tools@example.com").await;
+    let (s, created) = send(&app, "POST", "/rest/tools", &token, Some(tool_body("search", None))).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let id = created["id"].as_str().unwrap().to_string();
+    let (s, _) = send(&app, "POST", "/rest/tools", &token, Some(tool_body("search", None))).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    let (s, _) = send(&app, "POST", "/rest/tools", &token, Some(tool_body("bad name", None))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, list) = send(&app, "GET", "/rest/tools", &token, None).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(list[0]["used_by"], 0);
+    let (s, patched) = send(&app, "PATCH", &format!("/rest/tools/{id}"), &token, Some(serde_json::json!({"description": "web search"}))).await;
+    assert_eq!(s, StatusCode::OK);
+    assert_eq!(patched["description"], "web search");
+    let (s, _) = send(&app, "PATCH", &format!("/rest/tools/{id}"), &token, Some(serde_json::json!({"node_type": "ai.agent"}))).await;
+    assert_eq!(s, StatusCode::BAD_REQUEST);
+    let (s, _) = send(&app, "GET", &format!("/rest/tools/{}", uuid::Uuid::new_v4()), &token, None).await;
+    assert_eq!(s, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn tool_delete_is_refused_while_an_agent_uses_it() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "tools-del@example.com").await;
+    let (_, tool) = send(&app, "POST", "/rest/tools", &token, Some(tool_body("lookup", None))).await;
+    let tool_id = tool["id"].as_str().unwrap().to_string();
+    let wf = serde_json::json!({
+        "name": "agent-wf",
+        "nodes": [{"id": "a", "node_type": "ai.agent", "position": [0.0, 0.0], "parameters": {"tool_ids": [tool_id]}}],
+        "connections": []
+    });
+    let (s, wf) = send(&app, "POST", "/rest/workflows", &token, Some(wf)).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (s, body) = send(&app, "DELETE", &format!("/rest/tools/{tool_id}"), &token, None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(body["workflows"][0]["name"], "agent-wf");
+    let wf_id = wf["id"].as_str().unwrap();
+    send(&app, "DELETE", &format!("/rest/workflows/{wf_id}"), &token, None).await;
+    let (s, _) = send(&app, "DELETE", &format!("/rest/tools/{tool_id}"), &token, None).await;
+    assert_eq!(s, StatusCode::NO_CONTENT);
+}
+
+#[tokio::test]
+async fn a_credential_used_only_by_a_tool_cannot_be_deleted() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "tools-cred@example.com").await;
+    let cred = create_cred(&app, &token, "api", "bearerToken", serde_json::json!({"token": "t"})).await;
+    let (s, _) = send(&app, "POST", "/rest/tools", &token, Some(tool_body("secured", Some(&cred)))).await;
+    assert_eq!(s, StatusCode::CREATED);
+    let (_, list) = send(&app, "GET", "/rest/credentials", &token, None).await;
+    assert_eq!(list.as_array().unwrap().iter().find(|c| c["id"] == cred.as_str()).unwrap()["used_by"], 1);
+    let (s, body) = send(&app, "DELETE", &format!("/rest/credentials/{cred}"), &token, None).await;
+    assert_eq!(s, StatusCode::CONFLICT);
+    assert_eq!(body["tools"][0]["name"], "secured");
+}
+
+#[tokio::test]
+async fn webhook_runs_resolve_credentials_first() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "hook-cred@example.com").await;
+    let wf = serde_json::json!({
+        "name": "hook-cred",
+        "nodes": [
+            {"id": "hook", "node_type": "core.webhook", "position": [0.0, 0.0], "parameters": {"path": "hc", "method": "POST"}},
+            {"id": "h", "node_type": "core.httpRequest", "position": [1.0, 0.0], "parameters": {"url": "https://x", "auth": {"type": "bearer", "credential_id": uuid::Uuid::new_v4().to_string()}}}
+        ],
+        "connections": [{"from_node": "hook", "from_output": 0, "to_node": "h", "to_input": 0}]
+    });
+    let (_, wf) = send(&app, "POST", "/rest/workflows", &token, Some(wf)).await;
+    let wf_id = wf["id"].as_str().unwrap().to_string();
+    send(&app, "PATCH", &format!("/rest/workflows/{wf_id}/active"), &token, Some(serde_json::json!({"active": true}))).await;
+    let response = fire_webhook(&app, &wf_id, "hc").await;
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let bytes = response.into_body().collect().await.unwrap().to_bytes();
+    assert!(String::from_utf8_lossy(&bytes).contains("credential resolution failed"));
+}

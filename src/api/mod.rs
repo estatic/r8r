@@ -5,6 +5,7 @@ pub mod executions;
 pub mod webhook;
 pub mod workflows;
 pub mod node_types;
+pub mod tools;
 
 use crate::state::AppState;
 use axum::routing::{get, post};
@@ -26,6 +27,11 @@ pub fn build_router(state: AppState) -> Router {
         .route("/rest/workflows/:id/executions", get(executions::list_executions_for_workflow))
         .route("/ws/workflows/:id/executions", get(executions::subscribe_executions))
         .route("/rest/credential-types", get(credential_types::list_credential_types))
+        .route("/rest/tools", post(tools::create_tool).get(tools::list_tools))
+        .route(
+            "/rest/tools/:id",
+            get(tools::get_tool).patch(tools::update_tool).delete(tools::delete_tool),
+        )
         .route("/rest/node-types", get(node_types::list_node_types))
         .route("/rest/node-types/:type_name/output-ports", post(node_types::output_ports_for_type))
         .route("/rest/executions/:id", get(executions::get_execution))
