@@ -61,6 +61,11 @@ The spec says *what* must match n8n but leaves several contracts open. The
   version is pinned (open question §9.4).
 - The timeout status (`canceled` vs `error`) and several n8n error
   messages are not stated.
+- It does not mention n8n 2.x behaviour r8r must match, found by running
+  the suite against n8n 2.35.7: workflows must be published before they
+  can serve as sub-workflows or error workflows, resume URLs are signed,
+  `execute --file` is gone, and manual runs and invitations use new
+  payloads.
 
 ## Where this fits
 

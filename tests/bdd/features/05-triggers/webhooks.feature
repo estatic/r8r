@@ -178,6 +178,8 @@ Feature: Webhook trigger
     Then the response status is a success
     And the response header "access-control-allow-origin" is "https://shop.example"
 
+  # n8n 2.35 answers 500 here; the spec (§8.2) requires a proper 413.
+  @beyond-n8n
   Scenario: Request bodies above the payload limit are rejected
     Given the environment variable "N8N_PAYLOAD_SIZE_MAX" is "1"
     And I restart the r8r server

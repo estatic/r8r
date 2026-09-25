@@ -31,6 +31,7 @@ R8R_BIN=/path/to/r8r cargo test --test bdd             # test another build
 | `R8R_BDD_INCLUDE` | – | Opt-in tags to add: `perf`, `slow`, `requires-redis`, `requires-postgres`, `requires-python-runner` |
 | `R8R_BDD_REDIS_HOST` / `_PORT` | 127.0.0.1 / 6379 | Redis for `@requires-redis` |
 | `R8R_BDD_POSTGRES_URL` | `postgres://postgres:postgres@127.0.0.1:5432/postgres` | PostgreSQL for `@requires-postgres` |
+| `R8R_BDD_START_TIMEOUT` | 30 | Seconds a server may take to become ready |
 
 `--tags` replaces the opt-in filter, so `--tags @perf` runs perf scenarios.
 
@@ -40,9 +41,9 @@ The binary is driven **black-box**; no step imports `r8r::*`. The spec
 restructures the crate into a workspace, and the suite must keep compiling
 through that.
 
-- **Headless**: `r8r execute --file=<workflow.json> --rawOutput` runs a
-  workflow and prints n8n's `IRun` JSON. Engine, expression and node
-  scenarios use this; no server or database is needed.
+- **Headless**: `r8r import:workflow` + `r8r execute --id --rawOutput` run
+  a workflow and print n8n's `IRun` JSON. Engine, expression and node
+  scenarios use this; no server is needed.
 - **CLI**: `import:workflow`, `export:workflow`, `import:credentials`,
   `export:credentials`, `config check`, `migrate-from-n8n`.
 - **Server**: `r8r start` on a free port, per scenario, with its own
@@ -94,6 +95,27 @@ tests/bdd/
 | `@node-*` | Node the scenario is about |
 | `@perf`, `@slow` | Opt-in: timing-sensitive or long |
 | `@requires-*` | Opt-in: needs external infrastructure |
+| `@beyond-n8n` | The spec asks for more than n8n 2.35 does; n8n fails these |
+| `@n8n-licensed` | n8n gates the feature behind a licence (variables, team projects) |
+| `@r8r-only` | r8r commands n8n doesn't have (`config check`, `migrate-from-n8n`) |
+
+## Checking the expectations against n8n
+
+The scenarios are n8n's own contracts, so real n8n should pass them. That
+is the fastest way to check an expectation (spec §9.1, Phase 0):
+
+```sh
+npm install n8n@2.35.7            # newest release that runs on Node 22
+R8R_BIN=$PWD/node_modules/.bin/n8n R8R_BDD_START_TIMEOUT=120 \
+  cargo test --test bdd -- --tags 'not @beyond-n8n and not @n8n-licensed and not @r8r-only
+    and not @perf and not @slow and not @requires-redis and not @requires-postgres
+    and not @requires-python-runner'
+```
+
+On 2026-09-25 n8n 2.35.7 passed all 358 of these scenarios. When n8n
+fails a scenario, either the expectation is wrong (fix it) or the spec
+asks for more than n8n does (tag it `@beyond-n8n` and say why in a
+comment above the scenario).
 
 ## Writing scenarios
 
@@ -140,10 +162,13 @@ The spec fixes the n8n-facing contracts but leaves some details open. The
 suite pins these down; change them here and in the steps together if the
 team decides otherwise.
 
-1. **`r8r execute --file=<f> --rawOutput`** prints the `IRun` JSON on stdout
-   (status, mode, `data.resultData.runData`, `lastNodeExecuted`, `error`),
-   exits 0 on success and non-zero on a failed run, and runs as a *manual*
-   execution: pin data is used and `$execution.mode` is `"test"`.
+1. **Headless runs follow n8n 2.x**: `r8r import:workflow --input=<f>` then
+   `r8r execute --id=<id> --rawOutput`, which prints the `IRun` JSON
+   (status, mode, `data.resultData.runData`, `lastNodeExecuted`, `error`)
+   after any log lines. It runs in `cli` mode, where pin data does not
+   apply, so `the trigger outputs the items:` renames the trigger to
+   "<name> (trigger)" and inserts a Code node under the original name that
+   returns the items (`support::workflow::prepare_for_cli`).
 2. **Run order** is read from `executionIndex` on each task (n8n ≥ 1.7x),
    falling back to `startTime`.
 3. **`R8R_SSRF_ALLOWED_HOSTS`** (comma-separated) allows private hosts
@@ -158,7 +183,11 @@ team decides otherwise.
    `CREDENTIALS_KEY`, `DATABASE_URL`, see `legacy_server_env`); delete them
    once `src/main.rs` reads n8n names.
 6. **API keys**: `POST /rest/api-keys` with `label`, `scopes`, `expiresAt`
-   returns `data.rawApiKey`, as n8n 1.8x+ does.
+   returns `data.rawApiKey`, as n8n does.
+7. **Readiness**: a server is used once its port is open *and*
+   `/healthz/readiness` stops answering "starting up".
+8. **Each process gets its own `N8N_RUNNERS_BROKER_PORT`**, so parallel
+   processes don't collide on n8n's default 5679.
 
 Parameter shapes follow the n8n node versions listed in
 `support/workflow.rs`. The spec asks for these to be checked against the

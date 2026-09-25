@@ -57,6 +57,7 @@ Feature: Performance targets and observability
   @phase-4
   Scenario: Logs can be structured JSON with execution context
     Given the environment variable "N8N_LOG_FORMAT" is "json"
+    And the environment variable "N8N_LOG_LEVEL" is "debug"
     And a running r8r server with an owner and an API key
     And a workflow named "Logged" with nodes:
       | name    | type    | parameters                                                                          |
@@ -66,7 +67,9 @@ Feature: Performance targets and observability
     Then every server log line is a JSON object with "level" and "message"
     And a server log line has the fields "executionId, workflowId"
 
-  @phase-4
+  # The metric name is the spec's target; n8n 2.35 exports no execution
+  # counter by default.
+  @phase-4 @beyond-n8n
   Scenario: Execution metrics are exported
     Given the environment variable "N8N_METRICS" is "true"
     And a running r8r server with an owner and an API key

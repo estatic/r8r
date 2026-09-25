@@ -34,14 +34,27 @@ the role of the spec's "conformance corpus" (§3.3 lesson 5, §8.5).
 ## Harness contracts it pins down
 
 Where the spec is silent the suite had to choose, and the choices are
-listed in `tests/bdd/README.md`: the `execute --rawOutput` output format
-and manual-mode semantics, reading run order from `executionIndex`, the
-`R8R_SSRF_ALLOWED_HOSTS` and `R8R_QUEUE_BACKEND` settings, and the n8n 1.8x
-API-key response shape.
+listed in `tests/bdd/README.md`: headless runs use n8n 2.x's `import:workflow`
++ `execute --id --rawOutput`, run order comes from `executionIndex`, the
+`R8R_SSRF_ALLOWED_HOSTS` and `R8R_QUEUE_BACKEND` settings, and servers
+count as ready only once `/healthz/readiness` settles.
+
+## Validation against n8n
+
+The same scenarios were run against real n8n 2.35.7 (`R8R_BIN`). After
+correcting the expectations n8n disproved, n8n passes all 358 scenarios it
+should. The rest are tagged `@beyond-n8n` (the spec asks for more than n8n
+does), `@n8n-licensed` or `@r8r-only`, or are opt-in. The run also
+surfaced n8n 2.x behaviour the
+[[n8n-in-rust-reimplementation-spec]] does not mention: publishing
+sub-workflows and error workflows, signed resume URLs, the 2.x manual-run
+payload, token-based invitations, v0 order for workflows without
+`executionOrder`, and `execute --id` in cli mode without pin data. Details
+are in `docs/superpowers/specs/2026-09-25-r8r-bdd-conformance-suite-design.md`.
 
 ## Status
 
-On 2026-09-25, before any implementation work, 1 of 395 scenarios passed
+On 2026-09-25, before any implementation work, 0 of 392 scenarios passed
 against the existing code. The existing binary has no CLI subcommands and
 none of n8n's `/rest` auth routes, so nearly every scenario stops at its
 first step. That is the starting point of the progress bar, not a harness

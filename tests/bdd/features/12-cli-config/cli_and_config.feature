@@ -19,7 +19,7 @@ Feature: One binary, typed configuration
     And the command output contains "migrate-from-n8n"
     And the command output contains "config"
 
-  @phase-1
+  @phase-1 @r8r-only
   Scenario: The CLI reports its version
     When I run "r8r --version"
     Then the command succeeds
@@ -29,7 +29,7 @@ Feature: One binary, typed configuration
   Scenario: An unknown subcommand fails with usage help
     When I run "r8r frobnicate"
     Then the command fails
-    And the command output contains "Usage"
+    And the command output contains "frobnicate"
 
   @phase-1
   Scenario: execute reports an unknown workflow id clearly
@@ -47,8 +47,7 @@ Feature: One binary, typed configuration
       """
     And I successfully run "r8r import:workflow --input=wf.json"
     When I run "r8r execute --id=wf-by-id --rawOutput"
-    Then the command succeeds
-    And the execution succeeds
+    Then the execution succeeds
 
   @phase-1 @r8r-only
   Scenario: config check validates and prints the effective configuration

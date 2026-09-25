@@ -6,14 +6,18 @@ This document reviews *n8n in Rust — Analysis, Review & Reimplementation
 Spec* (2026-09-25, `raw/2026-09-25-n8n-in-rust-reimplementation-spec.md`)
 and describes the BDD suite built from it in `tests/bdd/`. The spec's own
 advice (§3.3 lesson 5) is to build the conformance suite before the engine,
-and the suite does exactly that. It has 393 cucumber scenarios in 14 areas,
+and the suite does exactly that. It has 392 cucumber scenarios in 14 areas,
 driving the `r8r` binary black-box through n8n's own contracts.
 
 The expectations were checked against **real n8n 2.35.7** (the newest
 release that runs on Node 22), with the same suite and `R8R_BIN` pointed
 at `n8n`. That found a dozen places where my first reading of n8n was
-wrong, and several n8n 2.x behaviours the spec does not mention (§4).
-Against the current r8r code all 393 scenarios fail, because the binary has
+wrong, and several n8n 2.x behaviours the spec does not mention (§4). After
+correcting them, **n8n passes all 358 scenarios it should**. The rest are
+spec requirements beyond n8n, features n8n licenses, r8r-only commands,
+or opt-in perf and infrastructure scenarios.
+
+Against the current r8r code all 392 scenarios fail, because the binary has
 no CLI subcommands and none of n8n's `/rest` auth routes, so nearly every
 scenario stops at its first step. The suite is the progress bar for the
 rewrite.
@@ -107,10 +111,11 @@ mostly SHOULD-level or Phase 5 and can be added as the APIs are decided.
 
 ## 4. What running the suite against n8n 2.35.7 showed
 
-The headless features (workflow model, engine, expressions, nodes) pass
-**200 of 203** on n8n once corrected; the three remaining scenarios are
-deliberate `@beyond-n8n` requirements. The corrections, all now in the
-suite, fall into two groups.
+Validation took several rounds. The first headless run passed 103 of 212,
+mostly because of harness problems (n8n's task broker port colliding
+across parallel processes, and the removed `execute --file`). The final
+run passes all 358 n8n-applicable scenarios. The corrections to
+expectations, all now in the suite, fall into two groups.
 
 **My expectations were wrong about n8n:**
 - A workflow *without* `settings.executionOrder` runs in **v0** order.
@@ -122,6 +127,11 @@ suite, fall into two groups.
   under its own name; there is no `toCamelCase()`; the agent's tool is
   named after its node (`Calculator`); hitting max iterations returns an
   output instead of failing; wrong basic-auth credentials get 401, not 403.
+- Stop and Error ignores `onError`; a sub-workflow refused by its
+  `callerPolicy` says it "limits which workflows it can be called by";
+  execution context appears in JSON logs only at debug level, under
+  `metadata`; `/api/v1/users` returns roles only with `includeRole=true`;
+  API keys for members may only carry member scopes.
 - Webhook v2 options: `options.responseCode.values.responseCode`, and
   dynamic paths are registered under the node's webhook id
   (`/webhook/<webhookId>/users/:id`).
@@ -135,7 +145,8 @@ suite, fall into two groups.
 - **Signed resume URLs.** `/webhook-waiting/:id` without its signature
   answers 401.
 - Manual runs need `triggerToStartFrom` or `destinationNode {nodeName,
-  mode}`; partial runs send `runData` + `dirtyNodeNames`.
+  mode}`; partial runs send `runData` + `dirtyNodeNames`. Pin data comes
+  from the *saved* workflow, not the request.
 - Invitations are accepted with a signed token (`POST
   /rest/invitations/accept`).
 - The public API omits running executions; only `/rest/executions` shows
@@ -144,13 +155,12 @@ suite, fall into two groups.
   must come from `/healthz/readiness`, not an open port.
 - The `n8n-auth` cookie is `Secure` even on plain HTTP.
 
-**Where the spec asks for more than n8n does** (tagged `@beyond-n8n`):
-unknown top-level workflow fields survive export; expressions have no
-`setInterval`/`fetch` stubs and a hard time limit; credential values sent to
-a webhook are redacted from execution data; invalid configuration stops the
-server at boot.
-
-The server-side results are in §6.
+**Where the spec asks for more than n8n does** (tagged `@beyond-n8n`, 10
+scenarios): unknown top-level workflow fields survive export; expressions
+have no `setInterval`/`fetch` stubs and a hard time limit; credential values
+sent to a webhook are redacted from execution data; an SSRF guard; a 413 for
+oversized bodies (n8n answers 500); login rate limiting; invalid
+configuration stops the server at boot; an execution counter metric.
 
 ## 5. Harness contracts to confirm
 
@@ -171,8 +181,12 @@ listed in `tests/bdd/README.md` so the team can confirm or change them:
 | Target | Scenarios run | Passed |
 | --- | --- | --- |
 | Current r8r (`claude/elegant-archimedes-u5hrus`, 2026-09-25) | 393 | 0 |
-| n8n 2.35.7, headless features (01–04, phase 1, excl. `@beyond-n8n`) | 203 | 200 |
-| n8n 2.35.7, server features (phases 2, 3, 5, excl. `@beyond-n8n`, `@n8n-licensed`, `@r8r-only`) | SERVER_TOTAL | SERVER_PASSED |
+| n8n 2.35.7, all n8n-applicable scenarios (excl. `@beyond-n8n`, `@n8n-licensed`, `@r8r-only`, `@perf`, `@slow`, `@requires-*`) | 358 | 358 |
+
+Not run anywhere yet: the opt-in `@perf` (4), `@slow` (1),
+`@requires-redis` (3), `@requires-postgres` (1) and
+`@requires-python-runner` (1) scenarios, which need reference hardware or
+extra services. Their steps are defined and statically checked.
 
 What makes the r8r column move, in order:
 

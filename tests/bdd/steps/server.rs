@@ -354,7 +354,13 @@ async fn log_line_fields(w: &mut R8rWorld, fields: String) {
         async move {
             log.lines()
                 .filter_map(|l| serde_json::from_str::<Value>(l).ok())
-                .any(|v| fields.iter().all(|f| crate::support::json::lookup(&v, f).is_some()))
+                // n8n nests context under "metadata"; accept either place.
+                .any(|v| {
+                    fields.iter().all(|f| {
+                        crate::support::json::lookup(&v, f).is_some()
+                            || crate::support::json::lookup(&v, &format!("metadata.{f}")).is_some()
+                    })
+                })
                 .then_some(())
         }
     })

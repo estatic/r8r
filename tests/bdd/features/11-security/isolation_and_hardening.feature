@@ -12,8 +12,9 @@ Feature: Isolation and hardening
       | Shell | executeCommand | {"command": "printf 'pw%s' ned"}     |
     And the connections "Start -> Shell"
     When I execute the workflow
-    Then the execution fails
+    Then the command fails
     And the command output does not contain "pwned"
+    And the command output contains "n8n-nodes-base.executeCommand"
 
   @phase-1
   Scenario: Execute Command can be enabled explicitly
@@ -39,7 +40,8 @@ Feature: Isolation and hardening
     When I activate the workflow
     Then the response status is a client error
 
-  @phase-1
+  # The SSRF guard is new in the spec (§5.3); n8n 2.35 has none.
+  @phase-1 @beyond-n8n
   Scenario: HTTP requests to private networks are blocked by default
     Given the environment variable "R8R_SSRF_ALLOWED_HOSTS" is not set
     And a mock HTTP service
@@ -53,7 +55,7 @@ Feature: Isolation and hardening
     Then the execution fails
     And the mock service received no requests
 
-  @phase-1
+  @phase-1 @beyond-n8n
   Scenario Outline: Well-known internal targets are blocked
     Given the environment variable "R8R_SSRF_ALLOWED_HOSTS" is not set
     And a workflow with nodes:
