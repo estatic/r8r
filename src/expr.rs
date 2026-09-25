@@ -1,6 +1,6 @@
 //! Expression engine core: a QuickJS wrapper that evaluates JS snippets
 //! against a small set of JSON-derived globals (`$json`, `$items`, `$node`,
-//! `$now`, `$workflow`).
+//! `$now`, `$workflow`, and `$args` for library tool calls).
 //!
 //! This module is intentionally self-contained: it depends only on
 //! `serde_json`, `thiserror`, `chrono`, and `rquickjs`, not on `domain.rs`
@@ -21,6 +21,9 @@ pub struct EvalContext<'a> {
     pub node_json: &'a HashMap<String, serde_json::Value>,
     /// Bound as `$workflow.name`.
     pub workflow_name: &'a str,
+    /// Bound as `$args`: a tool call's arguments (library tools only).
+    /// `None` leaves `$args` undefined.
+    pub args: Option<&'a serde_json::Value>,
 }
 
 /// Wall-clock deadline for a single `eval_js` call, enforced via QuickJS's
@@ -102,6 +105,13 @@ pub fn eval_js(script: &str, ctx: &EvalContext) -> Result<serde_json::Value, Exp
         globals
             .set("$workflow", workflow_val)
             .map_err(|e| ExprError::Runtime(e.to_string()))?;
+
+        if let Some(args) = ctx.args {
+            let args_val = json_to_js(&js, args)?;
+            globals
+                .set("$args", args_val)
+                .map_err(|e| ExprError::Runtime(e.to_string()))?;
+        }
 
         let result: rquickjs::Value = match js.eval(script) {
             Ok(v) => v,
@@ -272,6 +282,7 @@ mod tests {
             items: &[],
             node_json: Box::leak(Box::new(HashMap::new())),
             workflow_name: "test-workflow",
+            args: None,
         }
     }
 
@@ -409,5 +420,34 @@ mod tests {
         });
         let result = resolve_parameters(&params, &ctx).unwrap();
         assert_eq!(result, serde_json::json!({"list": [1, "plain", {"nested": 2}]}));
+    }
+
+    #[test]
+    fn args_resolve_inside_a_template() {
+        let args = serde_json::json!({"city": "Warsaw"});
+        let ctx = EvalContext { args: Some(&args), ..empty_ctx() };
+        let params = serde_json::json!({"url": "https://api.example.com/weather?city={{ $args.city }}"});
+        assert_eq!(
+            resolve_parameters(&params, &ctx).unwrap(),
+            serde_json::json!({"url": "https://api.example.com/weather?city=Warsaw"})
+        );
+    }
+
+    #[test]
+    fn args_is_undefined_without_args() {
+        let ctx = empty_ctx();
+        let params = serde_json::json!({"t": "{{ typeof $args }}"});
+        assert_eq!(resolve_parameters(&params, &ctx).unwrap(), serde_json::json!({"t": "undefined"}));
+    }
+
+    #[test]
+    fn args_values_are_data_not_code() {
+        let args = serde_json::json!({"x": "{{ 1 + 1 }}", "y": "'); throw new Error('pwned'); ('"});
+        let ctx = EvalContext { args: Some(&args), ..empty_ctx() };
+        let params = serde_json::json!({"a": "{{ $args.x }}", "b": "{{ $args.y }}"});
+        assert_eq!(
+            resolve_parameters(&params, &ctx).unwrap(),
+            serde_json::json!({"a": "{{ 1 + 1 }}", "b": "'); throw new Error('pwned'); ('"})
+        );
     }
 }

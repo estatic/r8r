@@ -91,6 +91,7 @@ impl Node for CodeNode {
                 items: &items_json,
                 node_json: &empty_node_json,
                 workflow_name: "",
+                args: None,
             };
             eval_js(&wrapped_script, &eval_ctx)
         });

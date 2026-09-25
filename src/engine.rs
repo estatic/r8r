@@ -214,6 +214,7 @@ pub async fn execute_workflow_seeded(
                 items: &items_json,
                 node_json: &node_json,
                 workflow_name: &workflow.name,
+                args: None,
             };
             crate::expr::resolve_parameters(&node_instance.parameters, &eval_ctx)
                 .map_err(|e| anyhow::anyhow!("node {} parameter resolution failed: {e}", node_instance.id))?
