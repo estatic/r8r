@@ -54,8 +54,15 @@ Feature: Error workflows
     Then the execution succeeds
     And the workflow "On error" has 0 executions
 
+  # Stop and Error always fails the run in n8n, so a Code node throws here.
   Scenario: A failure handled by continueErrorOutput is not an execution error
     Given I edit the workflow "Fragile"
+    And the node "Explode" has the property "type" set to "n8n-nodes-base.code"
+    And the node "Explode" has the property "typeVersion" set to 2
+    And the node "Explode" runs the JavaScript:
+      """
+      throw new Error('Inventory service unavailable');
+      """
     And the node "Explode" has the property "onError" set to "continueErrorOutput"
     And the workflow "Fragile" is active
     When I send a POST request to "/webhook/fragile" with body:

@@ -251,9 +251,17 @@ async fn member_user(w: &mut R8rWorld, email: String) {
     w.auth = saved;
 }
 
+/// Scopes a global member may put on an API key.
+pub const MEMBER_SCOPES: &[&str] = &[
+    "workflow:create", "workflow:read", "workflow:update", "workflow:delete", "workflow:list",
+    "workflow:activate", "workflow:deactivate", "execution:read", "execution:list",
+    "credential:create", "tag:read", "tag:list",
+];
+
 #[given(expr = "{string} has an API key")]
 async fn member_key(w: &mut R8rWorld, user: String) {
-    let key = create_api_key(w, &user, ALL_SCOPES).await;
+    let scopes = if user == "owner" { ALL_SCOPES } else { MEMBER_SCOPES };
+    let key = create_api_key(w, &user, scopes).await;
     w.api_keys.insert(user, key);
 }
 
@@ -264,6 +272,7 @@ async fn member_key_scoped(w: &mut R8rWorld, user: String, scopes: String) {
     w.api_keys.insert(user, key);
 }
 
+#[given(expr = "I restart the r8r server")]
 #[when(expr = "I restart the r8r server")]
 async fn restart(w: &mut R8rWorld) {
     if let Some(mut s) = w.servers.remove("main") {

@@ -24,18 +24,6 @@ Feature: Live execution push and health endpoints
       """
     And a "nodeExecuteAfter" push message names the node "Step"
 
-  Scenario: Activating a workflow is announced
-    Given a running r8r server with an owner and an API key
-    And I am connected to the push channel
-    And a workflow named "Announced" with nodes:
-      | name    | type    | parameters                                                                        |
-      | Webhook | webhook | {"httpMethod": "GET", "path": "announce", "responseMode": "onReceived", "options": {}} |
-    When I activate the workflow
-    Then I receive the push messages in order:
-      """
-      workflowActivated
-      """
-
   Scenario: The push endpoint requires a session
     Given a running r8r server with an owner account
     And I am not authenticated

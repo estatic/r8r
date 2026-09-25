@@ -87,7 +87,7 @@ Feature: Sub-workflows
     Then the response status is 500
     And I wait for the execution of "Parent" to finish
     And the execution fails
-    And the node "Call" failed with an error containing "not allowed"
+    And the node "Call" failed with an error containing "limits which workflows it can be called by"
 
   Scenario: The child execution records its parent
     Given the workflow "Parent" is active

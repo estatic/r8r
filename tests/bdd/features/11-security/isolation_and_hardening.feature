@@ -167,7 +167,9 @@ Feature: Isolation and hardening
     When I send a GET request to "/healthz"
     Then the response status is 200
 
-  @phase-2
+  # n8n 2.35 did not rate-limit repeated failed logins in this setup; the
+  # spec (§8.2) requires rate limits on all public endpoints.
+  @phase-2 @beyond-n8n
   Scenario: The editor API rate-limits login attempts
     Given a running r8r server with an owner account
     When I send 30 POST requests to "/rest/login" with concurrency 5 and body:

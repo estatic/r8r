@@ -22,6 +22,8 @@ Feature: Pin data and partial execution
       """
       [{"name": "Ada"}, {"name": "Grace"}]
       """
+    # n8n takes pin data from the saved workflow.
+    And the workflow is saved from the editor
     When I run the workflow manually from the editor
     And I wait for that execution to finish
     Then the execution succeeds
@@ -43,6 +45,7 @@ Feature: Pin data and partial execution
       """
       [{"pinned": 1}, {"pinned": 2}]
       """
+    And the workflow is saved from the editor
     When I run the workflow manually from the editor
     And I wait for that execution to finish
     Then the node "Echo" outputs:

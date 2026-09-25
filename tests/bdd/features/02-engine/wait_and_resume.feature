@@ -76,7 +76,7 @@ Feature: Wait node and resuming executions
       """
     And the node "Resume" outputs items matching:
       """
-      [{"resumeUrl": "$regex:/webhook-waiting/%{EXECUTION_ID}$"}]
+      [{"resumeUrl": "$regex:/webhook-waiting/%{EXECUTION_ID}\\?signature="}]
       """
 
   Scenario: Resuming a finished execution is refused

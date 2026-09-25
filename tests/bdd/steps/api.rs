@@ -155,6 +155,7 @@ async fn wait_for_execution(w: &mut R8rWorld, workflow_name: Option<&str>, accep
     }
 }
 
+#[given(expr = "I wait for the execution to finish")]
 #[when(expr = "I wait for the execution to finish")]
 #[then(expr = "I wait for the execution to finish")]
 async fn wait_finished(w: &mut R8rWorld) {
@@ -212,6 +213,7 @@ async fn execution_count_named(w: &mut R8rWorld, name: String, count: usize) {
     assert_eq!(list.len(), count, "executions: {}", pretty(&Value::Array(list.clone())));
 }
 
+#[given(expr = "within {int} seconds the workflow has at least {int} executions")]
 #[then(expr = "within {int} seconds the workflow has at least {int} executions")]
 async fn eventually_count(w: &mut R8rWorld, secs: u64, count: usize) {
     let name = w.wf().name.clone();
