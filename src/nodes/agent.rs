@@ -14,6 +14,9 @@ struct ToolDecl {
     node_type: String,
     argument_schema: serde_json::Value,
     base_parameters: serde_json::Value,
+    /// Library tool (spec B1): `base_parameters` are `{{ $args.x }}`
+    /// templates, not a key-merge target.
+    template: bool,
 }
 
 fn parse_tools(tools_param: &serde_json::Value) -> Result<Vec<ToolDecl>, NodeError> {
@@ -41,6 +44,7 @@ fn parse_tools(tools_param: &serde_json::Value) -> Result<Vec<ToolDecl>, NodeErr
             node_type,
             argument_schema: entry.get("argument_schema").cloned().unwrap_or(serde_json::json!({})),
             base_parameters: entry.get("base_parameters").cloned().unwrap_or(serde_json::json!({})),
+            template: false,
         });
     }
     Ok(decls)
@@ -148,7 +152,26 @@ pub(crate) async fn run_agent_loop(
     max_context_tokens: Option<usize>,
     ctx: &NodeExecutionContext,
 ) -> Result<NodeOutput, NodeError> {
-    let tool_decls = parse_tools(tools_param)?;
+    let mut tool_decls = parse_tools(tools_param)?;
+    if let Some(ids) = ctx.parameters.get("tool_ids").and_then(|v| v.as_array()) {
+        for id in ids.iter().filter_map(|v| v.as_str()).filter_map(|s| uuid::Uuid::parse_str(s).ok()) {
+            let tool = ctx
+                .tools
+                .get(&id)
+                .ok_or_else(|| NodeError::ExecutionFailed(format!("ai.agent: tool {id} was not resolved for this run")))?;
+            if tool_decls.iter().any(|t| t.name == tool.name) {
+                return Err(NodeError::ExecutionFailed(format!("ai.agent: duplicate tool name \"{}\"", tool.name)));
+            }
+            tool_decls.push(ToolDecl {
+                name: tool.name.clone(),
+                description: tool.description.clone(),
+                node_type: tool.node_type.clone(),
+                argument_schema: tool.argument_schema.clone(),
+                base_parameters: tool.parameters.clone(),
+                template: true,
+            });
+        }
+    }
     let tool_definitions: Vec<ToolDefinition> = tool_decls
         .iter()
         .map(|t| ToolDefinition { name: t.name.clone(), description: t.description.clone(), parameters: t.argument_schema.clone() })
@@ -187,21 +210,47 @@ pub(crate) async fn run_agent_loop(
                         messages.push(LlmMessage::ToolResult { tool_call_id: call.id.clone(), content: reason, is_error: true });
                         continue;
                     }
-                    let mut merged_parameters = decl.base_parameters.clone();
-                    if let (Some(merged_obj), Some(args_obj)) = (merged_parameters.as_object_mut(), call.arguments.as_object()) {
-                        let declared = decl.argument_schema.get("properties").and_then(|v| v.as_object());
-                        for (k, v) in args_obj {
-                            // Only a key the tool author explicitly declared
-                            // may override base_parameters -- an undeclared
-                            // key is silently dropped rather than merged, so
-                            // the model can never inject configuration the
-                            // author never opted the tool into.
-                            if declared.is_some_and(|d| d.contains_key(k)) {
-                                merged_obj.insert(k.clone(), v.clone());
+                    let parameters = if decl.template {
+                        // Library tool: arguments reach the node only where
+                        // the tool author placed {{ $args.x }}.
+                        let no_items: Vec<serde_json::Value> = Vec::new();
+                        let no_nodes = std::collections::HashMap::new();
+                        let eval_ctx = crate::expr::EvalContext {
+                            json: serde_json::json!({}),
+                            items: &no_items,
+                            node_json: &no_nodes,
+                            workflow_name: "",
+                            args: Some(&call.arguments),
+                        };
+                        match crate::expr::resolve_parameters(&decl.base_parameters, &eval_ctx) {
+                            Ok(p) => p,
+                            Err(e) => {
+                                messages.push(LlmMessage::ToolResult {
+                                    tool_call_id: call.id.clone(),
+                                    content: format!("tool parameter template failed: {e}"),
+                                    is_error: true,
+                                });
+                                continue;
                             }
                         }
-                    }
-                    match tool_executor.call_tool(&decl.node_type, merged_parameters).await {
+                    } else {
+                        let mut merged_parameters = decl.base_parameters.clone();
+                        if let (Some(merged_obj), Some(args_obj)) = (merged_parameters.as_object_mut(), call.arguments.as_object()) {
+                            let declared = decl.argument_schema.get("properties").and_then(|v| v.as_object());
+                            for (k, v) in args_obj {
+                                // Only a key the tool author explicitly declared
+                                // may override base_parameters -- an undeclared
+                                // key is silently dropped rather than merged, so
+                                // the model can never inject configuration the
+                                // author never opted the tool into.
+                                if declared.is_some_and(|d| d.contains_key(k)) {
+                                    merged_obj.insert(k.clone(), v.clone());
+                                }
+                            }
+                        }
+                        merged_parameters
+                    };
+                    match tool_executor.call_tool(&decl.node_type, parameters).await {
                         Ok(output) => {
                             messages.push(LlmMessage::ToolResult {
                                 tool_call_id: call.id.clone(),
@@ -689,5 +738,94 @@ mod tests {
             err.contains("ai.agent is missing required parameters: provider (\"anthropic\" or \"openai\"), model, user_message"),
             "{err}"
         );
+    }
+
+    fn library_tool(name: &str, parameters: serde_json::Value) -> crate::domain::Tool {
+        crate::domain::Tool {
+            id: uuid::Uuid::new_v4(),
+            name: name.into(),
+            description: "search the web".into(),
+            node_type: "core.httpRequest".into(),
+            argument_schema: serde_json::json!({"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}),
+            parameters,
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        }
+    }
+
+    fn ctx_with_library(executor: std::sync::Arc<dyn ToolExecutor>, tool: &crate::domain::Tool) -> NodeExecutionContext {
+        NodeExecutionContext {
+            parameters: serde_json::json!({"tool_ids": [tool.id.to_string()]}),
+            tools: std::collections::HashMap::from([(tool.id, tool.clone())]),
+            tool_executor: Some(executor),
+            ..Default::default()
+        }
+    }
+
+    fn one_call_then_done(name: &str, arguments: serde_json::Value) -> Vec<ProviderResponse> {
+        vec![
+            ProviderResponse::ToolCalls { text: None, calls: vec![ToolCall { id: "t1".into(), name: name.into(), arguments }] },
+            ProviderResponse::Text("Done.".into()),
+        ]
+    }
+
+    #[tokio::test]
+    async fn library_tool_resolves_args_templates_without_key_merge() {
+        let tool = library_tool("search", serde_json::json!({"method": "GET", "url": "https://s.example/?q={{ $args.q }}", "q": "fixed"}));
+        let provider = ScriptedProvider { responses: Mutex::new(one_call_then_done("search", serde_json::json!({"q": "rust"}))) };
+        let spy = std::sync::Arc::new(SpyToolExecutor { calls: Mutex::new(Vec::new()), result: Ok(vec![vec![]]) });
+        let ctx = ctx_with_library(spy.clone(), &tool);
+
+        let output = run_agent_loop(&provider, "m", "key", "sys", "go".into(), &serde_json::json!([]), 10, None, &ctx).await.unwrap();
+
+        assert_eq!(output[0][0].json["response"], "Done.");
+        let calls = spy.calls.lock().unwrap();
+        assert_eq!(calls[0].0, "core.httpRequest");
+        assert_eq!(calls[0].1, serde_json::json!({"method": "GET", "url": "https://s.example/?q=rust", "q": "fixed"}));
+    }
+
+    #[tokio::test]
+    async fn library_tool_template_error_is_reported_to_the_model() {
+        struct Capturing {
+            responses: Mutex<Vec<ProviderResponse>>,
+            seen: Mutex<Vec<Vec<LlmMessage>>>,
+        }
+        #[async_trait::async_trait]
+        impl ProviderClient for Capturing {
+            async fn send_message(&self, _: &str, messages: &[LlmMessage], _: &[ToolDefinition], _: &str, _: &str) -> Result<ProviderResponse, NodeError> {
+                self.seen.lock().unwrap().push(messages.to_vec());
+                Ok(self.responses.lock().unwrap().remove(0))
+            }
+            async fn count_tokens(&self, _: &str, _: &[LlmMessage], _: &str, _: &str) -> Result<usize, NodeError> {
+                Ok(0)
+            }
+        }
+        let tool = library_tool("search", serde_json::json!({"url": "{{ $args.q.missing.deep }}"}));
+        let provider = Capturing { responses: Mutex::new(one_call_then_done("search", serde_json::json!({"q": "rust"}))), seen: Mutex::new(Vec::new()) };
+        let spy = std::sync::Arc::new(SpyToolExecutor { calls: Mutex::new(Vec::new()), result: Ok(vec![vec![]]) });
+        let ctx = ctx_with_library(spy.clone(), &tool);
+
+        run_agent_loop(&provider, "m", "key", "sys", "go".into(), &serde_json::json!([]), 10, None, &ctx).await.unwrap();
+
+        assert!(spy.calls.lock().unwrap().is_empty(), "the node must not run when its template fails");
+        let seen = provider.seen.lock().unwrap();
+        assert!(
+            seen[1].iter().any(|m| matches!(m, LlmMessage::ToolResult { is_error: true, content, .. } if content.contains("template"))),
+            "{:?}",
+            seen[1]
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_and_library_tools_with_the_same_name_are_rejected() {
+        let tool = library_tool("search", serde_json::json!({}));
+        let provider = ScriptedProvider { responses: Mutex::new(vec![ProviderResponse::Text("unused".into())]) };
+        let spy = std::sync::Arc::new(SpyToolExecutor { calls: Mutex::new(Vec::new()), result: Ok(vec![vec![]]) });
+        let ctx = ctx_with_library(spy, &tool);
+        let inline = serde_json::json!([{"name": "search", "node_type": "core.code"}]);
+
+        let err = run_agent_loop(&provider, "m", "key", "sys", "go".into(), &inline, 10, None, &ctx).await.unwrap_err().to_string();
+
+        assert!(err.contains("duplicate tool name \"search\""), "{err}");
     }
 }
