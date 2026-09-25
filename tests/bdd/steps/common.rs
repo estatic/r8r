@@ -31,13 +31,13 @@ async fn logged_in_as(w: &mut AppWorld, email: String) {
 
 #[given("I am not logged in")]
 async fn not_logged_in(w: &mut AppWorld) {
-    w.app().await;
+    let _ = w.app().await;
     w.token = None;
 }
 
 #[given(expr = "my session token is {string}")]
 async fn session_token(w: &mut AppWorld, token: String) {
-    w.app().await;
+    let _ = w.app().await;
     w.token = Some(token);
 }
 
