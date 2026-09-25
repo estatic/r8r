@@ -16,7 +16,8 @@ Feature: Sub-workflows
       """
     And the connections "Input -> Compute"
     And the workflow setting "callerPolicy" is "any"
-    And the workflow "Child" is created
+    # n8n 2.x refuses to publish a parent whose sub-workflow is unpublished.
+    And the workflow "Child" is active
     And a workflow named "Parent" with nodes:
       | name    | type            | parameters                                                                            |
       | Webhook | webhook         | {"httpMethod": "POST", "path": "parent", "responseMode": "lastNode", "options": {}}   |
@@ -72,7 +73,7 @@ Feature: Sub-workflows
       | name  | type                   | parameters                     |
       | Input | executeWorkflowTrigger | {"inputSource": "passthrough"} |
     And the workflow setting "callerPolicy" is "none"
-    And the workflow "Locked child" is created
+    And the workflow "Locked child" is active
     And I edit the workflow "Parent"
     And the node "Call" has parameters:
       """

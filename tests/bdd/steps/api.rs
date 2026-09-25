@@ -107,6 +107,25 @@ async fn list_executions(w: &mut R8rWorld, workflow: &str) -> Vec<Value> {
     json["data"].as_array().cloned().unwrap_or_default()
 }
 
+/// The public API leaves out executions that are still running; the
+/// editor's `/rest/executions` includes them.
+async fn list_running(w: &mut R8rWorld, workflow: &str) -> Vec<Value> {
+    let filter = format!("{{\"workflowId\":\"{workflow}\",\"status\":[\"running\"]}}");
+    let path = format!("/rest/executions?filter={}", urlencode(&filter));
+    let resp = call(w, Auth::Session("owner".into()), "GET", &path, None).await;
+    let json: Value = serde_json::from_str(&resp.body).unwrap_or(Value::Null);
+    json.pointer("/data/results").and_then(Value::as_array).cloned().unwrap_or_default()
+}
+
+fn urlencode(s: &str) -> String {
+    s.bytes()
+        .map(|b| match b {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+            _ => format!("%{b:02X}"),
+        })
+        .collect()
+}
+
 /// Waits for the newest execution of `workflow` whose status satisfies
 /// `accept`, stores it as the scenario's execution and returns it.
 async fn wait_for_execution(w: &mut R8rWorld, workflow_name: Option<&str>, accept: &dyn Fn(&str) -> bool, what: &str) {
@@ -115,7 +134,10 @@ async fn wait_for_execution(w: &mut R8rWorld, workflow_name: Option<&str>, accep
     let deadline = std::time::Instant::now() + Duration::from_secs(30);
     loop {
         // The public API lists newest first.
-        let last = list_executions(w, &id).await;
+        let mut last = list_executions(w, &id).await;
+        if accept("running") {
+            last.extend(list_running(w, &id).await);
+        }
         if let Some(found) = last.iter().find(|e| accept(e["status"].as_str().unwrap_or(""))) {
             let exec_id = found["id"].as_str().map(String::from).unwrap_or_else(|| found["id"].to_string());
             w.vars.insert("EXECUTION_ID".into(), exec_id);
@@ -277,22 +299,29 @@ async fn manual_run(w: &mut R8rWorld, extra: Value) {
     }
 }
 
+/// Full manual run from the workflow's first node (its trigger), as the
+/// editor's "Execute workflow" button sends it (n8n 2.x `ManualRunDto`).
 #[when(expr = "I run the workflow manually from the editor")]
 async fn run_manual(w: &mut R8rWorld) {
-    manual_run(w, json!({})).await;
+    let trigger = w.wf().first_node_name();
+    manual_run(w, json!({ "triggerToStartFrom": { "name": trigger } })).await;
 }
 
 #[when(expr = "I run the workflow manually from the editor up to the node {string}")]
 async fn run_manual_to(w: &mut R8rWorld, node: String) {
-    manual_run(w, json!({ "destinationNode": node })).await;
+    manual_run(w, json!({ "destinationNode": { "nodeName": node, "mode": "inclusive" } })).await;
 }
 
-/// Partial execution: re-run from `start` reusing the previous run's data
-/// for the nodes before it (n8n's `runData` + `startNodes`).
-#[when(expr = "I re-run the workflow manually from the node {string} reusing the previous run data")]
-async fn rerun_from(w: &mut R8rWorld, start: String) {
+/// Partial execution: run up to `node`, marking it dirty and reusing the
+/// previous run's data for everything upstream.
+#[when(expr = "I re-run the node {string} manually reusing the previous run data")]
+async fn rerun_node(w: &mut R8rWorld, node: String) {
     let run_data = w.run().pointer("/data/resultData/runData").cloned().expect("a previous execution with runData");
-    manual_run(w, json!({ "runData": run_data, "startNodes": [{"name": start, "sourceData": null}] })).await;
+    manual_run(
+        w,
+        json!({ "runData": run_data, "destinationNode": { "nodeName": node, "mode": "inclusive" }, "dirtyNodeNames": [node] }),
+    )
+    .await;
 }
 
 #[when(expr = "I stop that execution")]

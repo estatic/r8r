@@ -207,7 +207,8 @@ Feature: Expression data proxy
     When I evaluate the expression "={{ $jmespath($json, 'people[?age > `40`].name') }}"
     Then the result is ["Grace"]
 
-  @phase-2
+  # Variables are a licensed feature in n8n.
+  @phase-2 @n8n-licensed
   Scenario: $vars reads instance variables
     Given a running r8r server with an owner and an API key
     And I send a POST request to "/api/v1/variables" with body:

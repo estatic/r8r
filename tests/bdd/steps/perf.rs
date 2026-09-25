@@ -20,6 +20,16 @@ async fn idle_rss(w: &mut R8rWorld, secs: u64, mb: f64) {
 
 #[when(regex = r#"^I send (\d+) ([A-Z]+) requests to "([^"]*)" with concurrency (\d+)$"#)]
 async fn load(w: &mut R8rWorld, total: usize, method: String, path: String, concurrency: usize) {
+    run_load(w, total, method, path, concurrency, "{\"n\":1}".to_string()).await;
+}
+
+#[when(regex = r#"^I send (\d+) ([A-Z]+) requests to "([^"]*)" with concurrency (\d+) and body:$"#)]
+async fn load_body(w: &mut R8rWorld, total: usize, method: String, path: String, concurrency: usize, step: &cucumber::gherkin::Step) {
+    let body = w.expand(super::docstring(step));
+    run_load(w, total, method, path, concurrency, body).await;
+}
+
+async fn run_load(w: &mut R8rWorld, total: usize, method: String, path: String, concurrency: usize, body: String) {
     let url = w.url(&path);
     let client = reqwest::Client::builder().pool_max_idle_per_host(concurrency).build().unwrap();
     let sem = std::sync::Arc::new(tokio::sync::Semaphore::new(concurrency));
@@ -27,12 +37,12 @@ async fn load(w: &mut R8rWorld, total: usize, method: String, path: String, conc
     let mut handles = Vec::with_capacity(total);
     for _ in 0..total {
         let permit = sem.clone().acquire_owned().await.unwrap();
-        let (client, url, method) = (client.clone(), url.clone(), method.clone());
+        let (client, url, method, body) = (client.clone(), url.clone(), method.clone(), body.clone());
         handles.push(tokio::spawn(async move {
             let _permit = permit;
             let t = Instant::now();
             let req = client.request(reqwest::Method::from_bytes(method.as_bytes()).unwrap(), &url);
-            let req = if method == "GET" { req } else { req.header("content-type", "application/json").body("{\"n\":1}") };
+            let req = if method == "GET" { req } else { req.header("content-type", "application/json").body(body) };
             let status = req.send().await.map(|r| r.status().as_u16()).unwrap_or(0);
             (status, t.elapsed())
         }));

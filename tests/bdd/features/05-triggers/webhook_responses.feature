@@ -28,7 +28,7 @@ Feature: Webhook response modes
   Scenario: onReceived with a custom status code and no body
     Given a workflow named "Accepted" with nodes:
       | name    | type    | parameters                                                                                                    |
-      | Webhook | webhook | {"httpMethod": "POST", "path": "accepted", "responseMode": "onReceived", "responseCode": 202, "options": {"noResponseBody": true}} |
+      | Webhook | webhook | {"httpMethod": "POST", "path": "accepted", "responseMode": "onReceived", "options": {"responseCode": {"values": {"responseCode": 202}}, "noResponseBody": true}} |
     And the workflow is active
     When I send a POST request to "/webhook/accepted" with body:
       """

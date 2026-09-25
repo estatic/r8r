@@ -45,7 +45,7 @@ Feature: AI Agent and LLM chain nodes
     Given a mock OpenAI API that replies in order:
       """
       [
-        {"role": "assistant", "content": null, "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "calculator", "arguments": "{\"input\": \"6 * 7\"}"}}]},
+        {"role": "assistant", "content": null, "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "Calculator", "arguments": "{\"input\": \"6 * 7\"}"}}]},
         {"role": "assistant", "content": "The answer is 42."}
       ]
       """
@@ -73,17 +73,17 @@ Feature: AI Agent and LLM chain nodes
       [{"output": "The answer is 42."}]
       """
     And the mock OpenAI API received 2 chat requests
-    And chat request 1 offers the tool "calculator"
+    And chat request 1 offers the tool "Calculator"
     And chat request 1 contains a "system" message containing "Be exact."
     And chat request 2 contains a "tool" message containing "42"
     And the node "Model" has run data on the "ai_languageModel" connection
     And the node "Calculator" has run data on the "ai_tool" connection
     And the node "Model" recorded a token usage of 30 in total
 
-  Scenario: An agent stops after its maximum number of iterations
+  Scenario: An agent gives up after its maximum number of iterations
     Given a mock OpenAI API that replies in order:
       """
-      [{"role": "assistant", "content": null, "tool_calls": [{"id": "call_n", "type": "function", "function": {"name": "calculator", "arguments": "{\"input\": \"1 + 1\"}"}}]}]
+      [{"role": "assistant", "content": null, "tool_calls": [{"id": "call_n", "type": "function", "function": {"name": "Calculator", "arguments": "{\"input\": \"1 + 1\"}"}}]}]
       """
     And a workflow with nodes:
       | name       | type              | parameters                                                                   |
@@ -99,8 +99,8 @@ Feature: AI Agent and LLM chain nodes
       Calculator -[ai_tool]-> Agent
       """
     When I execute the workflow
-    Then the execution fails
-    And the node "Agent" failed with an error containing "max iterations"
+    Then the execution succeeds
+    And the field "output" of item 0 from the node "Agent" is "$contains:max iterations"
     And the mock OpenAI API received 3 chat requests
 
   Scenario: Window buffer memory carries the conversation between runs
@@ -148,5 +148,5 @@ Feature: AI Agent and LLM chain nodes
       """
     When I execute the workflow
     Then the execution fails
-    And the execution error message contains "API key"
+    And the node "Agent" failed with an error containing "Incorrect API key provided"
     And the execution data does not contain "sk-test-123"

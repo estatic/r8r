@@ -93,7 +93,7 @@ Feature: Code node (JavaScript)
     When I execute the workflow
     Then the execution fails
     And the node "Code" failed with an error containing "bad input"
-    And the node "Code" failed with an error containing "line 2"
+    And the node "Code" failed with an error containing "[line"
 
   Scenario: Returning something that is not items fails with a clear message
     Given the node "Code" runs the JavaScript:

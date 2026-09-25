@@ -170,5 +170,8 @@ Feature: Isolation and hardening
   @phase-2
   Scenario: The editor API rate-limits login attempts
     Given a running r8r server with an owner account
-    When I send 30 POST requests to "/rest/login" with concurrency 5
+    When I send 30 POST requests to "/rest/login" with concurrency 5 and body:
+      """
+      {"emailOrLdapLoginId": "owner@example.com", "password": "wrong-password"}
+      """
     Then some load responses had the status 429

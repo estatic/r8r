@@ -5,7 +5,7 @@ use super::{docstring, list};
 use crate::support::json::{assert_matches, lookup, parse_loose, parse_strict, Mode};
 use crate::world::{pretty, R8rWorld};
 use cucumber::gherkin::Step;
-use cucumber::then;
+use cucumber::{then, when};
 use serde_json::Value;
 
 fn status(w: &R8rWorld) -> String {
@@ -111,6 +111,14 @@ async fn item_field(w: &mut R8rWorld, path: String, index: usize, node: String, 
     let actual = lookup(item, &path).cloned().unwrap_or(Value::Null);
     assert_matches(&parse_loose(&w.expand(&expected)), &actual, Mode::Exact)
         .unwrap_or_else(|e| panic!("{e}\nitem: {}", pretty(item)));
+}
+
+#[when(expr = "I remember the field {string} of item {int} from the node {string} as {string}")]
+#[then(expr = "I remember the field {string} of item {int} from the node {string} as {string}")]
+async fn remember_field(w: &mut R8rWorld, path: String, index: usize, node: String, name: String) {
+    let items = w.node_output(&node, 0, None);
+    let v = items.get(index).and_then(|i| lookup(i, &path)).cloned().unwrap_or_else(|| panic!("no {path} on item {index} of \"{node}\""));
+    w.vars.insert(name, v.as_str().map(String::from).unwrap_or_else(|| v.to_string()));
 }
 
 #[then(expr = "the node {string} was not executed")]

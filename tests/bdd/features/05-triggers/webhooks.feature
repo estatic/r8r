@@ -63,6 +63,7 @@ Feature: Webhook trigger
     Then the response status is 404
     And the workflow has 0 executions
 
+  # n8n registers dynamic paths under the node's webhook id.
   Scenario: Path parameters are available to the workflow
     Given a workflow named "Users" with nodes:
       | name    | type    | parameters                                                                                 |
@@ -74,7 +75,7 @@ Feature: Webhook trigger
       """
     And the connections "Webhook -> Echo"
     And the workflow is active
-    When I send a GET request to "/webhook/users/42/orders/7"
+    When I send a GET request to "/webhook/%{WEBHOOK_ID:Webhook}/users/42/orders/7"
     Then the response status is 200
     And the response JSON is:
       """
@@ -145,7 +146,7 @@ Feature: Webhook trigger
   Scenario: A binary request body is stored as binary data
     Given a workflow named "Upload" with nodes:
       | name    | type    | parameters                                                                                                      |
-      | Webhook | webhook | {"httpMethod": "POST", "path": "upload", "responseMode": "lastNode", "options": {"binaryPropertyName": "file", "rawBody": true}} |
+      | Webhook | webhook | {"httpMethod": "POST", "path": "upload", "responseMode": "lastNode", "options": {"binaryPropertyName": "file"}} |
       | Info    | set     |                                                                                                                 |
     And the node "Info" sets the fields:
       """

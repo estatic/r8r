@@ -228,10 +228,17 @@ async fn member_user(w: &mut R8rWorld, email: String) {
         .and_then(Value::as_str)
         .unwrap_or_else(|| panic!("invitation failed:\n{}", resp.describe()))
         .to_string();
-    let inviter = w.vars.get("USER_ID:owner").cloned().unwrap_or_default();
+    // n8n 2.x: the accept URL carries a signed token (`/signup?token=...`)
+    // that is posted to /rest/invitations/accept.
+    let token = json
+        .pointer("/data/0/user/inviteAcceptUrl")
+        .and_then(Value::as_str)
+        .and_then(|u| u.split("token=").nth(1))
+        .map(|t| t.split('&').next().unwrap().to_string())
+        .unwrap_or_default();
     w.auth = Auth::None;
-    let accept = json!({"inviterId": inviter, "firstName": "Morgan", "lastName": "Member", "password": PASSWORD});
-    let resp = w.request("POST", &format!("/rest/invitations/{invitee}/accept"), &[], Some(accept.to_string())).await;
+    let accept = json!({"token": token, "firstName": "Morgan", "lastName": "Member", "password": PASSWORD});
+    let resp = w.request("POST", "/rest/invitations/accept", &[], Some(accept.to_string())).await;
     let cookie = match cookie_from(&resp) {
         Some(c) => c,
         None => {

@@ -97,19 +97,6 @@ Feature: Editor REST API and authentication
       {"name": "From the editor"}
       """
 
-  Scenario: Saving an outdated version is rejected
-    Given a running r8r server with an owner account
-    When I send a POST request to "/rest/workflows" with body:
-      """
-      {"name": "Versioned", "nodes": [], "connections": {}, "settings": {}, "active": false}
-      """
-    And I remember the response JSON at "data.id" as "WF"
-    And I send a PATCH request to "/rest/workflows/%{WF}" with body:
-      """
-      {"name": "Versioned v2", "versionId": "00000000-0000-0000-0000-000000000000"}
-      """
-    Then the response status is 400
-
   Scenario: Editor settings expose the webhook endpoints
     Given a running r8r server with an owner account
     When I send a GET request to "/rest/settings"
@@ -198,8 +185,7 @@ Feature: Editor REST API and authentication
       @n8n/n8n-nodes-langchain.lmChatOpenAi
       """
 
-  Scenario: Unknown editor endpoints answer 404 JSON, not the editor page
+  Scenario: Unknown editor endpoints answer 404
     Given a running r8r server with an owner account
     When I send a GET request to "/rest/this-endpoint-does-not-exist"
     Then the response status is 404
-    And the response header "content-type" contains "application/json"

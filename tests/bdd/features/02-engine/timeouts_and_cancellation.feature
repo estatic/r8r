@@ -28,11 +28,12 @@ Feature: Execution timeouts and cancellation
     And the node "After" was not executed
 
   Scenario: A running execution can be stopped from the editor
-    Given a workflow named "Stoppable" with nodes:
-      | name    | type    | parameters                                                                              |
-      | Webhook | webhook | {"httpMethod": "POST", "path": "stoppable", "responseMode": "onReceived", "options": {}} |
-      | Pause   | wait    | {"resume": "timeInterval", "amount": 30, "unit": "seconds"}                             |
-      | After   | noOp    |                                                                                         |
+    Given the mock service responds to GET "/very-slow" with status 200 after 20000 ms
+    And a workflow named "Stoppable" with nodes:
+      | name    | type        | parameters                                                                              |
+      | Webhook | webhook     | {"httpMethod": "POST", "path": "stoppable", "responseMode": "onReceived", "options": {}} |
+      | Pause   | httpRequest | {"url": "%{MOCK_URL}/very-slow", "options": {}}                                         |
+      | After   | noOp        |                                                                                         |
     And the connections "Webhook -> Pause -> After"
     And the workflow is active
     When I send a POST request to "/webhook/stoppable" with body:

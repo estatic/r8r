@@ -2,7 +2,9 @@
 Feature: Wait node and resuming executions
   A Wait node pauses the execution. Long waits persist the full execution
   state with status `waiting` and `waitTill`; any process can resume it
-  later, on time or when `/webhook-waiting/:executionId` is called.
+  later, on time or when its resume URL is called. In n8n 2.x the resume
+  URL (`$execution.resumeUrl`, `/webhook-waiting/:executionId`) carries a
+  signature, and an unsigned call is refused.
 
   Background:
     Given a running r8r server with an owner and an API key
@@ -59,6 +61,12 @@ Feature: Wait node and resuming executions
       """
       {"approved": true}
       """
+    Then the response status is a client error
+    When I remember the field "resumeUrl" of item 0 from the node "Resume" as "RESUME_URL"
+    And I send a POST request to "%{RESUME_URL}" with body:
+      """
+      {"approved": true}
+      """
     Then the response status is 200
     When I wait for that execution to finish
     Then the execution succeeds
@@ -75,20 +83,26 @@ Feature: Wait node and resuming executions
     Given a workflow named "Once" with nodes:
       | name    | type    | parameters                                                                        |
       | Webhook | webhook | {"httpMethod": "POST", "path": "once", "responseMode": "onReceived", "options": {}} |
+      | Resume  | set     |                                                                                   |
       | Hold    | wait    | {"resume": "webhook", "httpMethod": "POST", "options": {}}                        |
-    And the connections "Webhook -> Hold"
+    And the node "Resume" sets the fields:
+      """
+      {"resumeUrl": "={{ $execution.resumeUrl }}"}
+      """
+    And the connections "Webhook -> Resume -> Hold"
     And the workflow is active
     When I send a POST request to "/webhook/once" with body:
       """
       {}
       """
     And I wait for an execution with the status "waiting"
-    And I send a POST request to "/webhook-waiting/%{EXECUTION_ID}" with body:
+    And I remember the field "resumeUrl" of item 0 from the node "Resume" as "RESUME_URL"
+    And I send a POST request to "%{RESUME_URL}" with body:
       """
       {}
       """
     And I wait for that execution to finish
-    And I send a POST request to "/webhook-waiting/%{EXECUTION_ID}" with body:
+    And I send a POST request to "%{RESUME_URL}" with body:
       """
       {}
       """
@@ -98,21 +112,27 @@ Feature: Wait node and resuming executions
     Given a workflow named "Durable" with nodes:
       | name    | type    | parameters                                                                           |
       | Webhook | webhook | {"httpMethod": "POST", "path": "durable", "responseMode": "onReceived", "options": {}} |
+      | Resume  | set     |                                                                                      |
       | Hold    | wait    | {"resume": "webhook", "httpMethod": "POST", "options": {}}                           |
       | After   | set     |                                                                                      |
+    And the node "Resume" sets the fields:
+      """
+      {"resumeUrl": "={{ $execution.resumeUrl }}"}
+      """
     And the node "After" sets the fields:
       """
       {"resumed": true}
       """
-    And the connections "Webhook -> Hold -> After"
+    And the connections "Webhook -> Resume -> Hold -> After"
     And the workflow is active
     When I send a POST request to "/webhook/durable" with body:
       """
       {}
       """
     And I wait for an execution with the status "waiting"
+    And I remember the field "resumeUrl" of item 0 from the node "Resume" as "RESUME_URL"
     And I restart the r8r server
-    And I send a POST request to "/webhook-waiting/%{EXECUTION_ID}" with body:
+    And I send a POST request to "%{RESUME_URL}" with body:
       """
       {}
       """

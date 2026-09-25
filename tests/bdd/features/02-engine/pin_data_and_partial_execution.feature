@@ -132,7 +132,7 @@ Feature: Pin data and partial execution
     And the connections "Start -> Expensive -> Double"
     When I run the workflow manually from the editor
     And I wait for that execution to finish
-    And I re-run the workflow manually from the node "Double" reusing the previous run data
+    And I re-run the node "Double" manually reusing the previous run data
     And I wait for that execution to finish
     Then the execution succeeds
     And the node "Double" outputs:

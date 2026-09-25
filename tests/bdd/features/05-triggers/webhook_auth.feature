@@ -40,7 +40,7 @@ Feature: Webhook authentication
     And the response header "www-authenticate" contains "Basic"
     When I send a GET request to "/webhook/basic" with headers:
       | authorization | Basic aG9vazp3cm9uZw== |
-    Then the response status is 403
+    Then the response status is 401
     When I send a GET request to "/webhook/basic" with headers:
       | authorization | Basic aG9vazpwYTU1 |
     Then the response status is 200
@@ -63,6 +63,9 @@ Feature: Webhook authentication
     When I send a GET request to "/webhook/jwt" with a bearer JWT signed with "jwt-secret"
     Then the response status is 200
 
+  # n8n stores the request headers, auth header included, in the webhook
+  # item. The spec (§8.2) requires credential data to be redacted.
+  @beyond-n8n
   Scenario: Credentials protecting a webhook never appear in its execution data
     Given the credential "Webhook header" of type "httpHeaderAuth" with the data:
       """

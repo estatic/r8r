@@ -76,10 +76,12 @@ Feature: Saving, pruning and recovering executions
       """
 
   Scenario: An execution interrupted by a crash is marked crashed on the next start
-    Given a workflow named "Long runner" with nodes:
-      | name    | type    | parameters                                                                            |
-      | Webhook | webhook | {"httpMethod": "POST", "path": "long", "responseMode": "onReceived", "options": {}}   |
-      | Pause   | wait    | {"resume": "timeInterval", "amount": 20, "unit": "seconds"}                           |
+    Given a mock HTTP service
+    And the mock service responds to GET "/very-slow" with status 200 after 20000 ms
+    And a workflow named "Long runner" with nodes:
+      | name    | type        | parameters                                                                            |
+      | Webhook | webhook     | {"httpMethod": "POST", "path": "long", "responseMode": "onReceived", "options": {}}   |
+      | Pause   | httpRequest | {"url": "%{MOCK_URL}/very-slow", "options": {}}                                       |
     And the connections "Webhook -> Pause"
     And the workflow is active
     When I send a POST request to "/webhook/long" with body:

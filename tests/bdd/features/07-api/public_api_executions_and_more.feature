@@ -89,9 +89,10 @@ Feature: Public API: executions, variables, users, audit and docs
     Then the response status is 200
     And the response JSON matches:
       """
-      {"retryOf": "%{EXECUTION_ID}"}
+      {"mode": "retry"}
       """
 
+  @n8n-licensed
   Scenario: Variables can be managed
     When I send a POST request to "/api/v1/variables" with body:
       """
@@ -104,6 +105,7 @@ Feature: Public API: executions, variables, users, audit and docs
       {"key": "API_BASE", "value": "https://api.example.com"}
       """
 
+  @n8n-licensed
   Scenario: Variable keys must be valid identifiers
     When I send a POST request to "/api/v1/variables" with body:
       """
@@ -112,7 +114,7 @@ Feature: Public API: executions, variables, users, audit and docs
     Then the response status is 400
 
   Scenario: Users can be listed by the owner
-    When I send a GET request to "/api/v1/users"
+    When I send a GET request to "/api/v1/users?includeRole=true"
     Then the response status is 200
     And the response JSON at "data" contains an element matching:
       """

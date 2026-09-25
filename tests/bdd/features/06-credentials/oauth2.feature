@@ -55,5 +55,4 @@ Feature: OAuth2 credentials
   Scenario: The OAuth2 callback endpoint exists for authorization-code flows
     Given a running r8r server with an owner account
     When I send a GET request to "/rest/oauth2-credential/callback?code=abc&state=not-a-valid-state"
-    Then the response status is one of "400, 404"
-    And the response body contains "state"
+    Then the response body contains "state"

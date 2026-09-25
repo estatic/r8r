@@ -65,6 +65,8 @@ Feature: Users, projects and access control
     And I send a GET request to "/webhook/borrow"
     Then the mock service received no requests
 
+  # Team projects are a licensed feature in n8n.
+  @n8n-licensed
   Scenario: Team projects share workflows with their members
     Given I use the owner's API key
     When I send a POST request to "/api/v1/projects" with body:

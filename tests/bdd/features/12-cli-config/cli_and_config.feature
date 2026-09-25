@@ -4,7 +4,7 @@ Feature: One binary, typed configuration
   uses n8n's variable names where they still make sense (goal G4), is typed
   and validated at boot, and can be checked with `r8r config check`.
 
-  @phase-1
+  @phase-1 @r8r-only
   Scenario: The CLI lists its subcommands
     When I run "r8r --help"
     Then the command succeeds
@@ -50,7 +50,7 @@ Feature: One binary, typed configuration
     Then the command succeeds
     And the execution succeeds
 
-  @phase-1
+  @phase-1 @r8r-only
   Scenario: config check validates and prints the effective configuration
     Given the environment variable "N8N_PORT" is "5999"
     When I run "r8r config check"
@@ -58,13 +58,13 @@ Feature: One binary, typed configuration
     And the command output contains "N8N_PORT"
     And the command output contains "5999"
 
-  @phase-1
+  @phase-1 @r8r-only
   Scenario: config check never prints secrets
     When I run "r8r config check"
     Then the command succeeds
     And the command output does not contain "bdd-n8n-encryption-key"
 
-  @phase-1
+  @phase-1 @r8r-only
   Scenario Outline: Invalid values are rejected at boot, naming the variable
     Given the environment variable "<variable>" is "<value>"
     When I run "r8r config check"
@@ -86,7 +86,8 @@ Feature: One binary, typed configuration
     And I send a GET request to "/healthz"
     Then the response status is 200
 
-  @phase-2
+  # n8n 2.35 starts anyway; the spec requires boot-time validation.
+  @phase-2 @beyond-n8n
   Scenario: The server refuses to start with an invalid configuration
     Given the environment variable "EXECUTIONS_MODE" is "sideways"
     When I start the r8r server
@@ -106,7 +107,7 @@ Feature: One binary, typed configuration
       {"name": "X-Key", "value": "kept-value"}
       """
 
-  @phase-3
+  @phase-3 @r8r-only
   Scenario: migrate-from-n8n refuses an unsupported database
     Given the file "not-a-db.sqlite" contains:
       """

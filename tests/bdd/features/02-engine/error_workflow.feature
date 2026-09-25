@@ -20,7 +20,8 @@ Feature: Error workflows
       }
       """
     And the connections "Failed -> Record"
-    And the workflow "On error" is created
+    # n8n 2.x runs only published (active) error workflows.
+    And the workflow "On error" is active
     And a workflow named "Fragile" with nodes:
       | name    | type         | parameters                                                                            |
       | Webhook | webhook      | {"httpMethod": "POST", "path": "fragile", "responseMode": "onReceived", "options": {}} |
