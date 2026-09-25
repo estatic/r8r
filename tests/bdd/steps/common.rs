@@ -67,6 +67,7 @@ async fn send_with_header(w: &mut AppWorld, method: String, path: String, name: 
 // ---- remembering values ------------------------------------------------
 
 #[then(regex = r#"^I remember the JSON at "([^"]*)" as "([^"]*)"$"#)]
+#[when(regex = r#"^I remember the JSON at "([^"]*)" as "([^"]*)"$"#)]
 #[given(regex = r#"^I remember the JSON at "([^"]*)" as "([^"]*)"$"#)]
 async fn remember(w: &mut AppWorld, pointer: String, name: String) {
     let value = w.at(&pointer).unwrap_or_else(|| panic!("nothing at {pointer} in {}", w.last_text)).clone();
