@@ -5,6 +5,7 @@ import { api, ApiError } from '../api/client'
 import { useExecutionsStore } from '../stores/executions'
 import { useLiveExecutionSocket } from '../composables/useLiveExecutionSocket'
 import { useWorkflowRun } from '../composables/useWorkflowRun'
+import { agentSetupProblems, describeSetupProblems } from '../agent/setup'
 import type { Workflow, Connection, NodeInstance, Execution } from '../types/domain'
 import WorkflowCanvas from '../components/WorkflowCanvas.vue'
 import AddNodeMenu from '../components/AddNodeMenu.vue'
@@ -107,6 +108,10 @@ async function save() {
       nodes: workflow.value.nodes,
       connections: workflow.value.connections,
     })
+    // Saving an unfinished agent is fine (work in progress), but say so now
+    // rather than at the next run.
+    const problems = agentSetupProblems(workflow.value.nodes)
+    if (problems.length > 0) actionError.value = `Saved. ${describeSetupProblems(problems)}`
   } catch (e) {
     // Leave workflow.value untouched so the user keeps their unsaved edits
     // and can simply retry.
@@ -118,6 +123,11 @@ async function save() {
 
 async function execute() {
   actionError.value = ''
+  const problems = workflow.value ? agentSetupProblems(workflow.value.nodes) : []
+  if (problems.length > 0) {
+    actionError.value = describeSetupProblems(problems)
+    return
+  }
   try {
     await run.execute()
   } catch (e) {

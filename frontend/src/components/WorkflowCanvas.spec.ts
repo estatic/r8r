@@ -136,6 +136,19 @@ describe('WorkflowCanvas', () => {
     expect(wrapper.find('[title="core.manualTrigger"]').exists()).toBe(true)
   })
 
+  it('marks an AI Agent that is missing its model or message as needing setup', async () => {
+    stubFetch()
+    const nodes: NodeInstance[] = [
+      { id: 'bare', node_type: 'ai.agent', position: [0, 0], parameters: {}, disabled: false },
+      { id: 'ready', node_type: 'ai.agent', position: [0, 200], parameters: { model: 'qwen', user_message: 'hi' }, disabled: false },
+    ]
+    const wrapper = mount(WorkflowCanvas, { props: { nodes, connections: [] } })
+    await flush()
+    const badges = wrapper.findAll('[data-testid="needs-setup"]')
+    expect(badges).toHaveLength(1)
+    expect(badges[0].text()).toBe('Needs setup')
+  })
+
   it('falls back to the raw type_name for an unknown node type', async () => {
     stubFetch()
     const nodes: NodeInstance[] = [{ id: 'a', node_type: 'does.not.exist', position: [0, 0], parameters: {}, disabled: false }]

@@ -32,6 +32,7 @@ import { VueFlow, Handle, Position, MarkerType, useVueFlow, type Node as FlowNod
 import '@vue-flow/core/dist/style.css'
 import type { NodeInstance } from '../types/domain'
 import { useNodeTypesStore } from '../stores/nodeTypes'
+import { agentSetupProblems } from '../agent/setup'
 
 const props = defineProps<{
   nodes: NodeInstance[]
@@ -91,7 +92,12 @@ const flowNodes = computed<FlowNode[]>(() =>
     id: n.id,
     position: { x: n.position[0], y: n.position[1] },
     label: labelFor(n.node_type),
-    data: { nodeType: n.node_type, disabled: n.disabled, outputPorts: portsByNodeId[n.id] ?? ['main'] },
+    data: {
+      nodeType: n.node_type,
+      disabled: n.disabled,
+      outputPorts: portsByNodeId[n.id] ?? ['main'],
+      needsSetup: agentSetupProblems([n]).length > 0,
+    },
   })),
 )
 
@@ -135,6 +141,13 @@ function handlePosition(index: number, total: number): string {
           :title="data.nodeType"
         >
           {{ label }}
+          <span
+            v-if="data.needsSetup"
+            data-testid="needs-setup"
+            title="Set Model and User message in this node's panel"
+            class="ml-1 px-1 rounded bg-amber-100 text-amber-800"
+            >Needs setup</span
+          >
         </div>
         <Handle
           v-for="(port, i) in data.outputPorts"
