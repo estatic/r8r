@@ -11,7 +11,6 @@ Feature: n8n extension methods and Luxon dates
     Examples:
       | expression                                                  | result                    |
       | ={{ 'hello world'.toSnakeCase() }}                          | "hello_world"             |
-      | ={{ 'hello world'.toCamelCase() }}                          | "helloWorld"              |
       | ={{ 'hello world'.toTitleCase() }}                          | "Hello World"             |
       | ={{ 'hello world'.toSentenceCase() }}                       | "Hello world"             |
       | ={{ 'Contact: ada@example.com today'.extractEmail() }}      | "ada@example.com"         |

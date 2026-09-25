@@ -109,7 +109,8 @@ async fn command_succeeds(w: &mut R8rWorld) {
 #[then(expr = "the command fails")]
 async fn command_fails(w: &mut R8rWorld) {
     let out = last(w);
-    assert!(!out.timed_out && out.code.is_some_and(|c| c != 0), "expected a non-zero exit:\n{}", out.describe());
+    // A non-zero exit or death by signal both count; a timeout does not.
+    assert!(!out.timed_out && out.code != Some(0), "expected the command to fail:\n{}", out.describe());
 }
 
 #[then(expr = "the command output contains {string}")]

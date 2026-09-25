@@ -169,8 +169,8 @@ Feature: n8n workflow JSON is a frozen contract
     When I run "r8r import:workflow --input=unknown.json"
     Then the command succeeds
     When I run "r8r execute --id=wf-unknown --rawOutput"
-    Then the execution fails
-    And the execution error message contains "n8n-nodes-community.doesNotExist"
+    Then the command fails
+    And the command output contains "Unrecognized node type: n8n-nodes-community.doesNotExist"
 
   Scenario: Nodes that are not connected to the start node do not run
     Given a workflow with nodes:
