@@ -70,6 +70,20 @@ pub async fn start_main(w: &mut R8rWorld, args: &[&str]) -> Result<(), String> {
     let log = w.dir.path().join(format!("server-{}.log", w.servers.len()));
     let wait_port = if w.unset_env.contains("N8N_PORT") { 5678 } else { port };
     let server = spawn_server(&args, &env, w.dir.path(), wait_port, log, true, start_timeout()).await?;
+    // Listening is not ready: n8n, for one, answers "n8n is starting up"
+    // until migrations finish. Wait for /healthz/readiness to settle.
+    let ready_url = format!("http://127.0.0.1:{wait_port}/healthz/readiness");
+    let deadline = std::time::Instant::now() + start_timeout();
+    loop {
+        let settled = match w.http.get(&ready_url).send().await {
+            Ok(r) => r.status().as_u16() != 503 && !r.text().await.unwrap_or_default().contains("starting up"),
+            Err(_) => false,
+        };
+        if settled || std::time::Instant::now() > deadline {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
     w.servers.insert("main".into(), server);
     if wait_port != port {
         w.port = Some(wait_port);
