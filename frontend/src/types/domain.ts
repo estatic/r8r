@@ -95,3 +95,17 @@ export interface CredentialTypeSchema {
   generic: boolean
   fields: CredentialField[]
 }
+
+export type ToolArgumentType = 'string' | 'number' | 'integer' | 'boolean'
+
+export interface Tool {
+  id: string
+  name: string
+  description: string
+  node_type: string
+  argument_schema: { type: 'object'; properties?: Record<string, { type: ToolArgumentType; description?: string }>; required?: string[] }
+  parameters: Record<string, unknown>
+  created_at: string
+  updated_at: string
+  used_by?: number
+}

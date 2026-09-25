@@ -6,8 +6,9 @@ import type { CredentialDetail, CredentialSummary } from '../types/domain'
 export function inUseWorkflowNames(e: unknown): string[] | null {
   if (!(e instanceof ApiError) || e.status !== 409) return null
   try {
-    const body = JSON.parse(e.message) as { workflows?: { name: string }[] }
-    return Array.isArray(body.workflows) ? body.workflows.map((w) => w.name) : null
+    const body = JSON.parse(e.message) as { workflows?: { name: string }[]; tools?: { name: string }[] }
+    if (!Array.isArray(body.workflows)) return null
+    return [...body.workflows.map((w) => w.name), ...(body.tools ?? []).map((t) => `${t.name} (tool)`)]
   } catch {
     return null
   }

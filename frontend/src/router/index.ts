@@ -24,6 +24,12 @@ const router = createRouter({
       component: () => import('../views/CredentialsView.vue'),
       meta: { requiresAuth: true },
     },
+    {
+      path: '/tools',
+      name: 'tools',
+      component: () => import('../views/ToolsView.vue'),
+      meta: { requiresAuth: true },
+    },
     { path: '/', redirect: '/workflows' },
   ],
 })

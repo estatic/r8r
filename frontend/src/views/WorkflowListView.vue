@@ -60,6 +60,7 @@ function logout() {
       <h1 class="text-xl font-semibold text-gray-800">Workflows</h1>
       <div class="flex gap-4 items-center">
         <router-link to="/credentials" class="text-sm text-blue-600">Credentials</router-link>
+        <router-link to="/tools" class="text-sm text-blue-600">Tools</router-link>
         <button class="text-sm text-gray-500" @click="logout">Log out</button>
       </div>
     </header>

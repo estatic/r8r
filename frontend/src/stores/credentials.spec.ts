@@ -24,3 +24,12 @@ describe('credentials store', () => {
     vi.unstubAllGlobals()
   })
 })
+
+describe('inUseWorkflowNames', () => {
+  it('lists workflows and tools from a credential 409 body', async () => {
+    const { inUseWorkflowNames } = await import('./credentials')
+    const { ApiError } = await import('../api/client')
+    const e = new ApiError(409, JSON.stringify({ error: 'credential is in use', workflows: [{ id: 'w', name: 'Bot' }], tools: [{ id: 't', name: 'search' }] }))
+    expect(inUseWorkflowNames(e)).toEqual(['Bot', 'search (tool)'])
+  })
+})

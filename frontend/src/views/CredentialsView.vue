@@ -44,7 +44,10 @@ async function afterSave() {
   <main class="min-h-screen bg-gray-50">
     <header class="bg-white border-b px-6 py-4 flex justify-between items-center">
       <h1 class="text-xl font-semibold text-gray-800">Credentials</h1>
-      <router-link to="/workflows" class="text-sm text-blue-600">Workflows</router-link>
+      <div class="flex gap-4">
+        <router-link to="/workflows" class="text-sm text-blue-600">Workflows</router-link>
+        <router-link to="/tools" class="text-sm text-blue-600">Tools</router-link>
+      </div>
     </header>
     <div class="p-6 max-w-3xl mx-auto space-y-4">
       <button type="button" class="bg-blue-600 text-white rounded px-4 py-2 text-sm" @click="creating = !creating; editingId = null">
