@@ -13,3 +13,4 @@ Operations:
 
 ## [2026-09-25] ingest | n8n in Rust reimplementation spec -> sources/n8n-in-rust-reimplementation-spec, concepts/bdd-conformance-suite
 ## [2026-09-25] query | validated the BDD suite against n8n 2.35.7; updated concepts/bdd-conformance-suite and sources/n8n-in-rust-reimplementation-spec
+## [2026-09-25] query | Phase 1 core implemented; BDD 258/392 (phase 1 222/223); updated concepts/bdd-conformance-suite

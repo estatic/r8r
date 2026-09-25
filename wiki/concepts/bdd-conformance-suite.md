@@ -60,6 +60,10 @@ none of n8n's `/rest` auth routes, so nearly every scenario stops at its
 first step. That is the starting point of the progress bar, not a harness
 defect.
 
+After the Phase 1 core landed (`src/n8n`: engine, expressions, nodes,
+credentials, CLI), 258 of 392 pass, including 222 of 223 phase-1
+scenarios. The rest need the Phase 2 server work.
+
 ## Where this fits
 
 - [[n8n-in-rust-reimplementation-spec]]

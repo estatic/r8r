@@ -180,7 +180,8 @@ listed in `tests/bdd/README.md` so the team can confirm or change them:
 
 | Target | Scenarios run | Passed |
 | --- | --- | --- |
-| Current r8r (`claude/elegant-archimedes-u5hrus`, 2026-09-25) | 393 | 0 |
+| Current r8r (`claude/elegant-archimedes-u5hrus`, 2026-09-25, before Phase 1) | 393 | 0 |
+| r8r after the Phase 1 core (`src/n8n`, CLI) | 392 | 258 (phase 1: 222/223) |
 | n8n 2.35.7, all n8n-applicable scenarios (excl. `@beyond-n8n`, `@n8n-licensed`, `@r8r-only`, `@perf`, `@slow`, `@requires-*`) | 358 | 358 |
 
 Not run anywhere yet: the opt-in `@perf` (4), `@slow` (1),
