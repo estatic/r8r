@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import { ref, watch } from 'vue'
-import type { NodeInstance, NodeSettings } from '../types/domain'
+import { computed, ref, watch } from 'vue'
+import type { AgentFields, NodeInstance, NodeSettings } from '../types/domain'
 import CredentialPicker from './CredentialPicker.vue'
+import AgentSettings from './AgentSettings.vue'
 import { useCredentialsStore } from '../stores/credentials'
 
 // ai.agent reads `provider` from its parameters, but the credential type
@@ -26,6 +27,27 @@ const waitMs = ref<number | string>(1000)
 // '' = no timeout (an empty <input type="number">).
 const timeoutMs = ref<number | string>('')
 
+const isAgent = computed(() => props.node?.node_type === 'ai.agent')
+const emptyAgentFields = (): AgentFields => ({ provider: '', model: '', system_prompt: '', user_message: '', max_iterations: 10, tool_ids: [] })
+const agentFields = ref<AgentFields>(emptyAgentFields())
+const inlineToolCount = computed(() => {
+  const tools = props.node?.parameters?.tools
+  return Array.isArray(tools) ? tools.length : 0
+})
+
+function loadAgentFields(parameters: Record<string, unknown>): AgentFields {
+  const str = (k: string) => (typeof parameters[k] === 'string' ? (parameters[k] as string) : '')
+  const ids = parameters.tool_ids
+  return {
+    provider: str('provider'),
+    model: str('model'),
+    system_prompt: str('system_prompt'),
+    user_message: str('user_message'),
+    max_iterations: typeof parameters.max_iterations === 'number' ? parameters.max_iterations : 10,
+    tool_ids: Array.isArray(ids) ? ids.filter((v): v is string => typeof v === 'string') : [],
+  }
+}
+
 watch(
   () => props.node,
   (node) => {
@@ -40,6 +62,7 @@ watch(
       error.value = ''
       const auth = node.parameters?.auth as { credential_id?: string } | undefined
       credentialId.value = auth?.credential_id ?? null
+      agentFields.value = node.node_type === 'ai.agent' ? loadAgentFields(node.parameters ?? {}) : emptyAgentFields()
     }
   },
   { immediate: true },
@@ -74,6 +97,31 @@ function apply() {
   }
   if (credentialId.value) {
     parsed.auth = { ...((parsed.auth as object) ?? {}), credential_id: credentialId.value }
+  }
+  if (isAgent.value) {
+    // The form is the source of truth for the fields it shows; everything
+    // else in the JSON (inline tools, api_base_url, ...) is kept as typed.
+    const f = agentFields.value
+    const iterations = Number(f.max_iterations)
+    if (!f.model.trim()) {
+      error.value = 'Model is required.'
+      return
+    }
+    if (!f.user_message.trim()) {
+      error.value = 'User message is required.'
+      return
+    }
+    if (!Number.isInteger(iterations) || iterations < 1 || iterations > 50) {
+      error.value = 'Max iterations must be between 1 and 50.'
+      return
+    }
+    parsed.model = f.model.trim()
+    parsed.user_message = f.user_message
+    parsed.system_prompt = f.system_prompt
+    parsed.max_iterations = iterations
+    parsed.tool_ids = f.tool_ids
+    if (f.provider) parsed.provider = f.provider
+    else delete parsed.provider
   }
   if (props.node.node_type === 'ai.agent' && typeof parsed.provider !== 'string' && credentialId.value) {
     const type = credentialsStore.credentials.find((c) => c.id === credentialId.value)?.credential_type
@@ -129,15 +177,21 @@ function apply() {
           <input v-model="timeoutMs" data-testid="timeout-ms" type="number" min="1" max="3600000" class="w-full border rounded px-2 py-1 text-sm" />
         </label>
       </fieldset>
+      <AgentSettings v-if="isAgent" v-model="agentFields" :inline-tool-count="inlineToolCount" />
       <div>
         <label class="block text-sm text-gray-600 mb-1">Credential (for nodes that need auth)</label>
         <CredentialPicker v-model="credentialId" :node-type="node.node_type" />
       </div>
-      <div>
+      <details v-if="isAgent">
+        <summary class="text-sm text-gray-600 cursor-pointer">Advanced (JSON)</summary>
+        <textarea v-model="paramsText" rows="14" class="mt-1 w-full border rounded px-2 py-1.5 font-mono text-xs"></textarea>
+      </details>
+      <div v-else>
         <label class="block text-sm text-gray-600 mb-1">Parameters (JSON)</label>
         <textarea v-model="paramsText" rows="14" class="w-full border rounded px-2 py-1.5 font-mono text-xs"></textarea>
-        <p v-if="error" class="text-sm text-red-600 mt-1">{{ error }}</p>
       </div>
+      <!-- Outside the collapsible JSON block so agent-form errors stay visible. -->
+      <p v-if="error" role="alert" class="text-sm text-red-600">{{ error }}</p>
     </div>
     <footer class="px-4 py-3 border-t">
       <button class="w-full bg-blue-600 text-white rounded py-2 text-sm" @click="apply">Apply</button>

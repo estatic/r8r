@@ -110,7 +110,7 @@ describe('NodeConfigPanel', () => {
   }
 
   function agent(parameters: Record<string, unknown>): NodeInstance {
-    return { id: 'a1', node_type: 'ai.agent', position: [0, 0], parameters, disabled: false }
+    return { id: 'a1', node_type: 'ai.agent', position: [0, 0], parameters: { model: 'm', user_message: 'hi', ...parameters }, disabled: false }
   }
 
   it('fills in the AI Agent provider from the selected credential type on Apply', async () => {
@@ -132,5 +132,44 @@ describe('NodeConfigPanel', () => {
     const wrapper = mount(NodeConfigPanel, { props: { node: { ...node, parameters: { auth: { credential_id: 'c1' } } } } })
     await clickApply(wrapper)
     expect((wrapper.emitted('update')![0][0] as NodeInstance).parameters.provider).toBeUndefined()
+  })
+
+  it('loads existing agent parameters into the form', async () => {
+    seedCredential('c1', 'openaiApi')
+    const wrapper = mount(NodeConfigPanel, { props: { node: agent({ auth: { credential_id: 'c1' }, provider: 'openai', model: 'qwen', system_prompt: 'be brief', user_message: '{{ $json.text }}', max_iterations: 5 }) } })
+    expect((wrapper.find('select[aria-label="Provider"]').element as HTMLSelectElement).value).toBe('openai')
+    expect((wrapper.find('input[aria-label="Model"]').element as HTMLInputElement).value).toBe('qwen')
+    expect((wrapper.find('textarea[aria-label="System prompt"]').element as HTMLTextAreaElement).value).toBe('be brief')
+    expect((wrapper.find('input[aria-label="User message"]').element as HTMLInputElement).value).toBe('{{ $json.text }}')
+    expect((wrapper.find('input[aria-label="Max iterations"]').element as HTMLInputElement).value).toBe('5')
+  })
+
+  it('writes the form fields into the agent parameters on Apply', async () => {
+    seedCredential('c1', 'openaiApi')
+    const wrapper = mount(NodeConfigPanel, { props: { node: agent({ auth: { credential_id: 'c1' } }) } })
+    await wrapper.find('input[aria-label="Model"]').setValue('llama3')
+    await wrapper.find('input[aria-label="User message"]').setValue('Hello')
+    await wrapper.find('textarea[aria-label="System prompt"]').setValue('sys')
+    await clickApply(wrapper)
+    const params = (wrapper.emitted('update')![0][0] as NodeInstance).parameters
+    expect(params).toMatchObject({ provider: 'openai', model: 'llama3', user_message: 'Hello', system_prompt: 'sys', max_iterations: 10, tool_ids: [] })
+  })
+
+  it('requires model and user message for an agent', async () => {
+    const wrapper = mount(NodeConfigPanel, { props: { node: { id: 'a1', node_type: 'ai.agent', position: [0, 0], parameters: {}, disabled: false } } })
+    await clickApply(wrapper)
+    expect(wrapper.text()).toContain('Model is required.')
+    expect(wrapper.emitted('update')).toBeFalsy()
+  })
+
+  it('stores checked library tools as tool_ids', async () => {
+    const { useToolsStore } = await import('../stores/tools')
+    const tools = useToolsStore()
+    tools.tools = [{ id: 't1', name: 'search', description: 'web search', node_type: 'core.httpRequest', argument_schema: { type: 'object' }, parameters: {}, created_at: '', updated_at: '' }]
+    tools.loaded = true
+    const wrapper = mount(NodeConfigPanel, { props: { node: agent({}) } })
+    await wrapper.find('input[aria-label="Use tool search"]').setValue(true)
+    await clickApply(wrapper)
+    expect((wrapper.emitted('update')![0][0] as NodeInstance).parameters.tool_ids).toEqual(['t1'])
   })
 })

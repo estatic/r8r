@@ -109,3 +109,13 @@ export interface Tool {
   updated_at: string
   used_by?: number
 }
+
+/** The AI Agent settings form's fields (stored in the node's parameters). */
+export interface AgentFields {
+  provider: string
+  model: string
+  system_prompt: string
+  user_message: string
+  max_iterations: number | string
+  tool_ids: string[]
+}
