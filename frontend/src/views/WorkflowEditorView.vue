@@ -6,6 +6,7 @@ import { useExecutionsStore } from '../stores/executions'
 import { useLiveExecutionSocket } from '../composables/useLiveExecutionSocket'
 import { useWorkflowRun } from '../composables/useWorkflowRun'
 import { agentSetupProblems, describeSetupProblems } from '../agent/setup'
+import { useUnsavedChanges } from '../composables/useUnsavedChanges'
 import type { Workflow, Connection, NodeInstance, Execution } from '../types/domain'
 import WorkflowCanvas from '../components/WorkflowCanvas.vue'
 import AddNodeMenu from '../components/AddNodeMenu.vue'
@@ -17,6 +18,7 @@ const workflowId = route.params.id as string
 const executionsStore = useExecutionsStore()
 
 const workflow = ref<Workflow | null>(null)
+const changes = useUnsavedChanges(workflow)
 const selectedNodeId = ref<string | null>(null)
 const saving = ref(false)
 const loadingHistory = ref(false)
@@ -52,6 +54,7 @@ onMounted(async () => {
   live.connect()
   try {
     workflow.value = await api.get<Workflow>(`/rest/workflows/${workflowId}`)
+    changes.markSaved()
   } catch (e) {
     loadError.value = messageFor(e, 'Failed to load workflow.')
   }
@@ -98,8 +101,9 @@ function onNodeUpdate(updated: NodeInstance) {
   if (idx !== -1) workflow.value.nodes[idx] = updated
 }
 
-async function save() {
-  if (!workflow.value) return
+/** Returns whether the workflow was saved. */
+async function save(): Promise<boolean> {
+  if (!workflow.value) return false
   actionError.value = ''
   saving.value = true
   try {
@@ -110,12 +114,15 @@ async function save() {
     })
     // Saving an unfinished agent is fine (work in progress), but say so now
     // rather than at the next run.
+    changes.markSaved()
     const problems = agentSetupProblems(workflow.value.nodes)
     if (problems.length > 0) actionError.value = `Saved. ${describeSetupProblems(problems)}`
+    return true
   } catch (e) {
     // Leave workflow.value untouched so the user keeps their unsaved edits
     // and can simply retry.
     actionError.value = messageFor(e, 'Failed to save workflow — your changes were not saved.')
+    return false
   } finally {
     saving.value = false
   }
@@ -128,6 +135,9 @@ async function execute() {
     actionError.value = describeSetupProblems(problems)
     return
   }
+  // Execute runs the saved workflow on the server: save pending edits
+  // (e.g. a node's Apply) first, so what runs is what's on screen.
+  if (changes.dirty.value && !(await save())) return
   try {
     await run.execute()
   } catch (e) {
@@ -169,6 +179,7 @@ async function showHistory() {
       >
         {{ saving ? 'Saving…' : 'Save' }}
       </button>
+      <span v-if="changes.dirty.value && !saving" data-testid="unsaved" class="text-xs text-amber-700">Unsaved changes</span>
       <button
         class="bg-green-600 text-white rounded px-3 py-1.5 text-sm disabled:opacity-50"
         :disabled="executing"
