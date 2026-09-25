@@ -35,4 +35,11 @@ pub trait Storage: Send + Sync {
     async fn update_credential(&self, credential: &Credential) -> anyhow::Result<bool>;
     /// `Ok(false)` if no such credential.
     async fn delete_credential(&self, id: Uuid) -> anyhow::Result<bool>;
+    async fn create_tool(&self, tool: &crate::domain::Tool) -> anyhow::Result<()>;
+    async fn get_tool(&self, id: Uuid) -> anyhow::Result<Option<crate::domain::Tool>>;
+    async fn list_tools(&self) -> anyhow::Result<Vec<crate::domain::Tool>>;
+    /// `Ok(false)` if no such tool.
+    async fn update_tool(&self, tool: &crate::domain::Tool) -> anyhow::Result<bool>;
+    /// `Ok(false)` if no such tool.
+    async fn delete_tool(&self, id: Uuid) -> anyhow::Result<bool>;
 }

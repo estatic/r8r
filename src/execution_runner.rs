@@ -318,6 +318,21 @@ mod tests {
         async fn delete_credential(&self, id: Uuid) -> anyhow::Result<bool> {
             self.inner.delete_credential(id).await
         }
+        async fn create_tool(&self, tool: &crate::domain::Tool) -> anyhow::Result<()> {
+            self.inner.create_tool(tool).await
+        }
+        async fn get_tool(&self, id: uuid::Uuid) -> anyhow::Result<Option<crate::domain::Tool>> {
+            self.inner.get_tool(id).await
+        }
+        async fn list_tools(&self) -> anyhow::Result<Vec<crate::domain::Tool>> {
+            self.inner.list_tools().await
+        }
+        async fn update_tool(&self, tool: &crate::domain::Tool) -> anyhow::Result<bool> {
+            self.inner.update_tool(tool).await
+        }
+        async fn delete_tool(&self, id: uuid::Uuid) -> anyhow::Result<bool> {
+            self.inner.delete_tool(id).await
+        }
     }
 
     #[tokio::test]

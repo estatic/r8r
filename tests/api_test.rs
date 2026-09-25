@@ -119,6 +119,21 @@ impl Storage for FailingUpdateStorage {
     async fn delete_credential(&self, id: uuid::Uuid) -> anyhow::Result<bool> {
         self.inner.delete_credential(id).await
     }
+    async fn create_tool(&self, tool: &r8r::domain::Tool) -> anyhow::Result<()> {
+        self.inner.create_tool(tool).await
+    }
+    async fn get_tool(&self, id: uuid::Uuid) -> anyhow::Result<Option<r8r::domain::Tool>> {
+        self.inner.get_tool(id).await
+    }
+    async fn list_tools(&self) -> anyhow::Result<Vec<r8r::domain::Tool>> {
+        self.inner.list_tools().await
+    }
+    async fn update_tool(&self, tool: &r8r::domain::Tool) -> anyhow::Result<bool> {
+        self.inner.update_tool(tool).await
+    }
+    async fn delete_tool(&self, id: uuid::Uuid) -> anyhow::Result<bool> {
+        self.inner.delete_tool(id).await
+    }
 }
 
 /// Builds a router backed by `FailingUpdateStorage`, plus the `AppState` (to

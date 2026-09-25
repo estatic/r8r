@@ -259,6 +259,71 @@ impl Storage for SqliteStorage {
             .await?;
         Ok(result.rows_affected() > 0)
     }
+
+    async fn create_tool(&self, tool: &crate::domain::Tool) -> anyhow::Result<()> {
+        sqlx::query("INSERT INTO tools (id, name, description, node_type, argument_schema, parameters, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)")
+            .bind(tool.id.to_string())
+            .bind(&tool.name)
+            .bind(&tool.description)
+            .bind(&tool.node_type)
+            .bind(tool.argument_schema.to_string())
+            .bind(tool.parameters.to_string())
+            .bind(tool.created_at.to_rfc3339())
+            .bind(tool.updated_at.to_rfc3339())
+            .execute(&self.pool)
+            .await?;
+        Ok(())
+    }
+
+    async fn get_tool(&self, id: Uuid) -> anyhow::Result<Option<crate::domain::Tool>> {
+        let row = sqlx::query_as::<_, ToolRow>("SELECT id, name, description, node_type, argument_schema, parameters, created_at, updated_at FROM tools WHERE id = ?")
+            .bind(id.to_string())
+            .fetch_optional(&self.pool)
+            .await?;
+        row.map(row_to_tool).transpose()
+    }
+
+    async fn list_tools(&self) -> anyhow::Result<Vec<crate::domain::Tool>> {
+        let rows = sqlx::query_as::<_, ToolRow>("SELECT id, name, description, node_type, argument_schema, parameters, created_at, updated_at FROM tools ORDER BY name")
+            .fetch_all(&self.pool)
+            .await?;
+        rows.into_iter().map(row_to_tool).collect()
+    }
+
+    async fn update_tool(&self, tool: &crate::domain::Tool) -> anyhow::Result<bool> {
+        let result = sqlx::query("UPDATE tools SET name = ?, description = ?, node_type = ?, argument_schema = ?, parameters = ?, updated_at = ? WHERE id = ?")
+            .bind(&tool.name)
+            .bind(&tool.description)
+            .bind(&tool.node_type)
+            .bind(tool.argument_schema.to_string())
+            .bind(tool.parameters.to_string())
+            .bind(tool.updated_at.to_rfc3339())
+            .bind(tool.id.to_string())
+            .execute(&self.pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    async fn delete_tool(&self, id: Uuid) -> anyhow::Result<bool> {
+        let result = sqlx::query("DELETE FROM tools WHERE id = ?").bind(id.to_string()).execute(&self.pool).await?;
+        Ok(result.rows_affected() > 0)
+    }
+}
+
+type ToolRow = (String, String, String, String, String, String, String, String);
+
+fn row_to_tool(row: ToolRow) -> anyhow::Result<crate::domain::Tool> {
+    let (id, name, description, node_type, argument_schema, parameters, created_at, updated_at) = row;
+    Ok(crate::domain::Tool {
+        id: Uuid::parse_str(&id)?,
+        name,
+        description,
+        node_type,
+        argument_schema: serde_json::from_str(&argument_schema)?,
+        parameters: serde_json::from_str(&parameters)?,
+        created_at: chrono::DateTime::parse_from_rfc3339(&created_at)?.with_timezone(&chrono::Utc),
+        updated_at: chrono::DateTime::parse_from_rfc3339(&updated_at)?.with_timezone(&chrono::Utc),
+    })
 }
 
 fn row_to_credential(
@@ -704,5 +769,42 @@ mod tests {
         assert!(storage.delete_credential(cred.id).await.unwrap());
         assert!(storage.get_credential(cred.id).await.unwrap().is_none());
         assert!(!storage.delete_credential(cred.id).await.unwrap());
+    }
+
+    fn sample_tool(name: &str) -> crate::domain::Tool {
+        crate::domain::Tool {
+            id: Uuid::new_v4(),
+            name: name.into(),
+            description: "d".into(),
+            node_type: "core.code".into(),
+            argument_schema: serde_json::json!({"type": "object", "properties": {}}),
+            parameters: serde_json::json!({"script": "return []"}),
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_crud_round_trips() {
+        let storage = storage_with_test_key().await;
+        let tool = sample_tool("t1");
+        storage.create_tool(&tool).await.unwrap();
+        assert_eq!(storage.get_tool(tool.id).await.unwrap().unwrap().parameters, tool.parameters);
+        assert_eq!(storage.list_tools().await.unwrap().len(), 1);
+        let mut changed = tool.clone();
+        changed.description = "changed".into();
+        assert!(storage.update_tool(&changed).await.unwrap());
+        assert_eq!(storage.get_tool(tool.id).await.unwrap().unwrap().description, "changed");
+        assert!(storage.delete_tool(tool.id).await.unwrap());
+        assert!(storage.get_tool(tool.id).await.unwrap().is_none());
+        assert!(!storage.update_tool(&changed).await.unwrap());
+        assert!(!storage.delete_tool(tool.id).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn tool_names_are_unique() {
+        let storage = storage_with_test_key().await;
+        storage.create_tool(&sample_tool("same")).await.unwrap();
+        assert!(storage.create_tool(&sample_tool("same")).await.is_err());
     }
 }

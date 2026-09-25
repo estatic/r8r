@@ -16,5 +16,6 @@ pub mod state;
 pub mod static_files;
 pub mod storage;
 pub mod telegram_poller;
+pub mod tools;
 pub mod trigger_registry;
 pub mod triggers;

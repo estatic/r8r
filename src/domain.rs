@@ -142,6 +142,20 @@ impl From<&Credential> for CredentialSummary {
     }
 }
 
+/// A reusable `ai.agent` tool (spec B1 §3). `parameters` are the called
+/// node's fixed parameters and may contain `{{ $args.<name> }}`.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Tool {
+    pub id: Uuid,
+    pub name: String,
+    pub description: String,
+    pub node_type: String,
+    pub argument_schema: serde_json::Value,
+    pub parameters: serde_json::Value,
+    pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
