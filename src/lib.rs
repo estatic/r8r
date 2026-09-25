@@ -1,5 +1,6 @@
 pub mod api;
 pub mod auth;
+pub mod cli;
 pub mod credentials;
 pub mod credential_types;
 pub mod crypto;
@@ -9,6 +10,7 @@ pub mod execution_runner;
 pub mod expr;
 pub mod llm;
 pub mod logging;
+pub mod n8n;
 pub mod node;
 pub mod nodes;
 pub mod scheduler;
