@@ -48,7 +48,7 @@ fn chat_key(update: &serde_json::Value) -> Option<i64> {
 struct TelegramJob {
     item: Item,
     workflow: Workflow,
-    credentials: HashMap<Uuid, serde_json::Value>,
+    resources: crate::credentials::RunResources,
 }
 
 /// Routes updates to per-chat workers (Plan 8.7): each chat's updates run
@@ -120,7 +120,7 @@ async fn chat_worker(
             job.workflow,
             ExecutionMode::Telegram,
             Some(vec![job.item]),
-            job.credentials,
+            job.resources,
         )
         .await
         {
@@ -452,8 +452,8 @@ pub async fn poll_telegram_updates(
         // once resolution succeeds every update in it is processed
         // normally. This also collapses the previous per-update redundant
         // credential fetch+decrypt into a single resolution per batch.
-        let credentials = match crate::credentials::resolve_credentials_for_workflow(storage.as_ref(), &current_workflow).await {
-            Ok(credentials) => credentials,
+        let resources = match crate::credentials::resolve_run_resources(storage.as_ref(), &current_workflow).await {
+            Ok(resources) => resources,
             Err(e) => {
                 tracing::warn!(error = %e, workflow_id = %current_workflow.id, "telegram poller: failed to resolve credentials for this batch, retrying after backoff");
                 tokio::time::sleep(std::time::Duration::from_secs(RETRY_BACKOFF_SECS)).await;
@@ -471,7 +471,7 @@ pub async fn poll_telegram_updates(
             let key = chat_key(&trigger_item.json);
             queues.dispatch(
                 key,
-                TelegramJob { item: trigger_item, workflow: current_workflow.clone(), credentials: credentials.clone() },
+                TelegramJob { item: trigger_item, workflow: current_workflow.clone(), resources: resources.clone() },
             );
         }
     }
@@ -872,7 +872,7 @@ mod poller_tests {
         TelegramJob {
             item: Item { json: serde_json::json!({"seq": seq, "sleep_ms": sleep_ms}), binary: serde_json::json!({}) },
             workflow: wf.clone(),
-            credentials: HashMap::new(),
+            resources: Default::default(),
         }
     }
 

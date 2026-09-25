@@ -3,7 +3,6 @@ use crate::engine::ExecutionObserver;
 use crate::node::NodeRegistry;
 use crate::storage::Storage;
 use serde::Serialize;
-use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{broadcast, Mutex};
 use uuid::Uuid;
@@ -114,7 +113,7 @@ pub async fn start_execution(
     workflow: Workflow,
     mode: ExecutionMode,
     trigger_items: Option<Vec<Item>>,
-    credentials: HashMap<Uuid, serde_json::Value>,
+    resources: crate::credentials::RunResources,
 ) -> anyhow::Result<(Execution, tokio::task::JoinHandle<Execution>)> {
     let execution = Execution {
         id: Uuid::new_v4(),
@@ -139,7 +138,7 @@ pub async fn start_execution(
         let clock = std::time::Instant::now();
         let tracker = LiveExecutionTracker::new(execution, storage.clone(), events.clone());
         let result =
-            crate::engine::execute_workflow_seeded(&workflow, &registry, trigger_items, &credentials, &tracker).await;
+            crate::engine::execute_workflow_seeded(&workflow, &registry, trigger_items, &resources, &tracker).await;
 
         let mut final_execution = tracker.into_execution();
         let duration_ms = clock.elapsed().as_millis() as u64;
@@ -191,7 +190,7 @@ pub async fn run_and_track_execution(
     workflow: &Workflow,
     mode: ExecutionMode,
     trigger_items: Option<Vec<Item>>,
-    credentials: &HashMap<Uuid, serde_json::Value>,
+    resources: &crate::credentials::RunResources,
 ) -> anyhow::Result<Execution> {
     let (_, handle) = start_execution(
         storage.clone(),
@@ -200,7 +199,7 @@ pub async fn run_and_track_execution(
         workflow.clone(),
         mode,
         trigger_items,
-        credentials.clone(),
+        resources.clone(),
     )
     .await?;
     handle.await.map_err(|e| anyhow::anyhow!("execution task failed: {e}"))
@@ -213,7 +212,6 @@ mod tests {
     use crate::node::NodeRegistry;
     use crate::storage::sqlite::SqliteStorage;
     use crate::storage::Storage;
-    use std::collections::HashMap;
     use std::sync::atomic::{AtomicUsize, Ordering};
     use std::sync::Arc;
     use uuid::Uuid;
@@ -344,7 +342,7 @@ mod tests {
         let storage: Arc<dyn Storage> = Arc::new(CountingStorage { inner, update_execution_calls: counter.clone() });
         let (events, _rx) = tokio::sync::broadcast::channel(16);
 
-        run_and_track_execution(&storage, &events, &registry(), &wf, ExecutionMode::Manual, None, &HashMap::new())
+        run_and_track_execution(&storage, &events, &registry(), &wf, ExecutionMode::Manual, None, &Default::default())
             .await
             .unwrap();
 
@@ -362,7 +360,7 @@ mod tests {
         let (events, _rx) = tokio::sync::broadcast::channel(16);
 
         let execution =
-            run_and_track_execution(&storage, &events, &registry(), &wf, ExecutionMode::Manual, None, &HashMap::new())
+            run_and_track_execution(&storage, &events, &registry(), &wf, ExecutionMode::Manual, None, &Default::default())
                 .await
                 .unwrap();
 
@@ -380,7 +378,7 @@ mod tests {
         storage.create_workflow(&wf).await.unwrap();
         let (events, mut rx) = tokio::sync::broadcast::channel(16);
 
-        run_and_track_execution(&storage, &events, &registry(), &wf, ExecutionMode::Manual, None, &HashMap::new())
+        run_and_track_execution(&storage, &events, &registry(), &wf, ExecutionMode::Manual, None, &Default::default())
             .await
             .unwrap();
 
@@ -442,7 +440,7 @@ mod tests {
         let (registry, wf) = sleepy_setup(200);
         storage.create_workflow(&wf).await.unwrap();
 
-        let (started, handle) = start_execution(storage.clone(), events, registry, wf, ExecutionMode::Manual, None, HashMap::new())
+        let (started, handle) = start_execution(storage.clone(), events, registry, wf, ExecutionMode::Manual, None, Default::default())
             .await
             .unwrap();
         assert_eq!(started.status, ExecutionStatus::Running);
@@ -461,7 +459,7 @@ mod tests {
         let (registry, wf) = sleepy_setup(100);
         storage.create_workflow(&wf).await.unwrap();
 
-        let (started, handle) = start_execution(storage.clone(), events, registry, wf, ExecutionMode::Manual, None, HashMap::new())
+        let (started, handle) = start_execution(storage.clone(), events, registry, wf, ExecutionMode::Manual, None, Default::default())
             .await
             .unwrap();
         drop(handle);

@@ -218,6 +218,7 @@ mod tests {
             }),
             input_items: vec![],
             credentials,
+            tools: Default::default(),
             tool_executor: None,
         };
         let result = node.execute(&ctx).await.unwrap();

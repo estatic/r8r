@@ -197,7 +197,7 @@ pub async fn execute_workflow(
         }
     };
 
-    let credentials = match crate::credentials::resolve_credentials_for_workflow(state.storage.as_ref(), &workflow).await {
+    let resources = match crate::credentials::resolve_run_resources(state.storage.as_ref(), &workflow).await {
         Ok(c) => c,
         Err(e) => {
             tracing::warn!(error = %e, workflow_id = %workflow.id, "failed to resolve workflow credentials");
@@ -214,7 +214,7 @@ pub async fn execute_workflow(
         workflow,
         ExecutionMode::Manual,
         None,
-        credentials,
+        resources,
     )
     .await
     {

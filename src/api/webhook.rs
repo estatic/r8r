@@ -46,6 +46,14 @@ pub async fn handle_webhook(
     );
     let trigger_item = build_trigger_item(&headers, &query, &body);
 
+    let resources = match crate::credentials::resolve_run_resources(state.storage.as_ref(), &workflow).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, workflow_id = %workflow.id, "webhook: failed to resolve credentials");
+            return (StatusCode::INTERNAL_SERVER_ERROR, format!("credential resolution failed: {e}")).into_response();
+        }
+    };
+
     // The run is always a detached background task (Plan 8.7), so a caller
     // disconnecting never cancels it; `respond` only decides whether this
     // handler waits for the result.
@@ -58,7 +66,7 @@ pub async fn handle_webhook(
         workflow.clone(),
         ExecutionMode::Webhook,
         Some(vec![trigger_item]),
-        std::collections::HashMap::new(),
+        resources,
     )
     .await
     {

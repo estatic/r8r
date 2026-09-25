@@ -11,7 +11,6 @@ use r8r::node::{Node, NodeCategory, NodeError, NodeExecutionContext, NodeOutput,
 use r8r::state::AppState;
 use r8r::storage::sqlite::SqliteStorage;
 use r8r::storage::Storage;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex, OnceLock};
 use tower::ServiceExt;
 use uuid::Uuid;
@@ -109,7 +108,7 @@ async fn run(wf: Workflow) -> Uuid {
     storage.create_workflow(&wf).await.unwrap();
     let (events, _rx) = tokio::sync::broadcast::channel(16);
     let (started, handle) =
-        r8r::execution_runner::start_execution(storage, events, registry(), wf, ExecutionMode::Manual, None, HashMap::new())
+        r8r::execution_runner::start_execution(storage, events, registry(), wf, ExecutionMode::Manual, None, Default::default())
             .await
             .unwrap();
     handle.await.unwrap();

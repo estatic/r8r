@@ -7,6 +7,8 @@ pub struct NodeExecutionContext {
     pub parameters: serde_json::Value,
     pub input_items: Vec<Item>,
     pub credentials: std::collections::HashMap<uuid::Uuid, serde_json::Value>,
+    /// Library tools the run's agents reference (spec B1 §5.2).
+    pub tools: std::collections::HashMap<uuid::Uuid, crate::domain::Tool>,
     pub tool_executor: Option<std::sync::Arc<dyn ToolExecutor>>,
 }
 

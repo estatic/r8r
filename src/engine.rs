@@ -24,7 +24,7 @@ pub async fn execute_workflow(
     workflow: &Workflow,
     registry: &std::sync::Arc<NodeRegistry>,
 ) -> anyhow::Result<HashMap<String, Vec<Item>>> {
-    execute_workflow_seeded(workflow, registry, None, &HashMap::new(), &NoopObserver).await
+    execute_workflow_seeded(workflow, registry, None, &Default::default(), &NoopObserver).await
 }
 
 /// The real `ToolExecutor` used by every live execution: dispatches a
@@ -55,6 +55,7 @@ impl crate::node::ToolExecutor for EngineToolExecutor {
             parameters,
             input_items: vec![],
             credentials: self.credentials.clone(),
+            tools: Default::default(),
             tool_executor: None,
         };
         node.execute(&ctx).await
@@ -115,7 +116,7 @@ pub async fn execute_workflow_seeded(
     workflow: &Workflow,
     registry: &std::sync::Arc<NodeRegistry>,
     trigger_items: Option<Vec<Item>>,
-    credentials: &HashMap<uuid::Uuid, serde_json::Value>,
+    resources: &crate::credentials::RunResources,
     observer: &dyn ExecutionObserver,
 ) -> anyhow::Result<HashMap<String, Vec<Item>>> {
     let order = topological_order(workflow)?;
@@ -123,7 +124,7 @@ pub async fn execute_workflow_seeded(
     let mut produced: HashMap<String, crate::node::NodeOutput> = HashMap::new();
     let mut error_produced: HashMap<String, Vec<Item>> = HashMap::new();
     let tool_executor: std::sync::Arc<dyn crate::node::ToolExecutor> =
-        std::sync::Arc::new(EngineToolExecutor::new(registry.clone(), credentials.clone()));
+        std::sync::Arc::new(EngineToolExecutor::new(registry.clone(), resources.credentials.clone()));
 
     for node_instance in &order {
         // Aggregate this node's input items from every incoming connection,
@@ -225,7 +226,8 @@ pub async fn execute_workflow_seeded(
         let ctx = NodeExecutionContext {
             parameters,
             input_items,
-            credentials: credentials.clone(),
+            credentials: resources.credentials.clone(),
+            tools: resources.tools.clone(),
             tool_executor: Some(tool_executor.clone()),
         };
         observer.on_node_started(&node_instance.id).await;
@@ -419,7 +421,7 @@ mod tests {
     async fn execute_workflow_seeded_injects_trigger_items_as_start_node_output() {
         let wf = linear_workflow(); // trigger -> set1
         let seeded_items = vec![Item { json: serde_json::json!({"from": "webhook"}), binary: serde_json::json!({}) }];
-        let outputs = execute_workflow_seeded(&wf, &registry(), Some(seeded_items.clone()), &HashMap::new(), &NoopObserver).await.unwrap();
+        let outputs = execute_workflow_seeded(&wf, &registry(), Some(seeded_items.clone()), &Default::default(), &NoopObserver).await.unwrap();
         // trigger's own execute() was never called — its output IS the seeded item, verbatim.
         assert_eq!(outputs["trigger"], seeded_items);
         // set1 (which merges a static "greeting" field into its input item, per
@@ -1071,7 +1073,7 @@ mod tests {
         });
 
         let spy = SpyObserver::new();
-        execute_workflow_seeded(&wf, &registry(), None, &HashMap::new(), &spy).await.unwrap();
+        execute_workflow_seeded(&wf, &registry(), None, &Default::default(), &spy).await.unwrap();
 
         assert_eq!(
             spy.calls(),
@@ -1107,7 +1109,7 @@ mod tests {
         });
 
         let spy = SpyObserver::new();
-        execute_workflow_seeded(&wf, &registry_with_failing_node(), None, &HashMap::new(), &spy)
+        execute_workflow_seeded(&wf, &registry_with_failing_node(), None, &Default::default(), &spy)
             .await
             .unwrap();
 
@@ -1125,7 +1127,7 @@ mod tests {
         hard_wf.nodes[1].node_type = "test.alwaysFails".into();
         let spy2 = SpyObserver::new();
         let result =
-            execute_workflow_seeded(&hard_wf, &registry_with_failing_node(), None, &HashMap::new(), &spy2).await;
+            execute_workflow_seeded(&hard_wf, &registry_with_failing_node(), None, &Default::default(), &spy2).await;
         assert!(result.is_err());
         assert_eq!(spy2.calls()[0], "started:trigger");
         assert_eq!(spy2.calls()[1], "finished:trigger:1");

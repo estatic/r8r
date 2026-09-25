@@ -123,6 +123,13 @@ pub async fn fire_schedule(
         }
     };
 
+    let resources = match crate::credentials::resolve_run_resources(storage.as_ref(), &workflow).await {
+        Ok(r) => r,
+        Err(e) => {
+            tracing::warn!(error = %e, %workflow_id, "fire_schedule: failed to resolve credentials, skipping this firing");
+            return;
+        }
+    };
     let trigger_items = vec![crate::domain::Item { json: serde_json::json!({}), binary: serde_json::json!({}) }];
     if let Err(e) = crate::execution_runner::run_and_track_execution(
         &storage,
@@ -131,7 +138,7 @@ pub async fn fire_schedule(
         &workflow,
         ExecutionMode::Schedule,
         Some(trigger_items),
-        &std::collections::HashMap::new(),
+        &resources,
     )
     .await
     {
@@ -460,5 +467,37 @@ mod tests {
 
         let summary = reactivate_all(&state).await.unwrap();
         assert_eq!(summary, ReactivationSummary { schedule: 1, webhook: 1, telegram: 0, failed: 1 });
+    }
+
+    #[tokio::test]
+    async fn fire_schedule_resolves_credentials() {
+        let state = test_state().await;
+        let owner = crate::domain::User {
+            id: Uuid::new_v4(), email: "o@x.io".into(), password_hash: "x".into(),
+            role: crate::domain::UserRole::Owner, created_at: chrono::Utc::now(),
+        };
+        state.storage.create_user(&owner).await.unwrap();
+        let cred_id = Uuid::new_v4();
+        state.storage.create_credential(&crate::domain::Credential {
+            id: cred_id, name: "c".into(), credential_type: "telegramApi".into(),
+            data: serde_json::json!({"bot_token": "1:A"}), owner_id: owner.id,
+            created_at: chrono::Utc::now(), updated_at: chrono::Utc::now(),
+        }).await.unwrap();
+        // A code node that fails unless its credential was resolved is not
+        // available; instead reference a credential that DOESN'T exist and
+        // assert no execution starts (resolution ran and refused), then one
+        // that does and assert the run succeeds.
+        let mut wf = schedule_workflow("* * * * * *");
+        wf.nodes[1].parameters = serde_json::json!({"fields": {"fired": true}, "auth": {"credential_id": Uuid::new_v4().to_string()}});
+        state.storage.create_workflow(&wf).await.unwrap();
+        fire_schedule(state.storage.clone(), state.registry.clone(), state.execution_events.clone(), wf.id).await;
+        assert!(state.storage.list_executions_for_workflow(wf.id, 10).await.unwrap().is_empty(), "a run with an unresolvable credential must not start");
+
+        let mut wf2 = schedule_workflow("* * * * * *");
+        wf2.nodes[1].parameters = serde_json::json!({"fields": {"fired": true}, "auth": {"credential_id": cred_id.to_string()}});
+        state.storage.create_workflow(&wf2).await.unwrap();
+        fire_schedule(state.storage.clone(), state.registry.clone(), state.execution_events.clone(), wf2.id).await;
+        let runs = state.storage.list_executions_for_workflow(wf2.id, 10).await.unwrap();
+        assert_eq!(runs.len(), 1);
     }
 }

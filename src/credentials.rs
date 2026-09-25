@@ -4,28 +4,55 @@ use std::collections::HashMap;
 use uuid::Uuid;
 use crate::credential_types::{known_credential_types, CredentialTypeSchema, FieldType};
 
-pub async fn resolve_credentials_for_workflow(
-    storage: &dyn Storage,
-    workflow: &Workflow,
-) -> anyhow::Result<HashMap<Uuid, serde_json::Value>> {
-    let mut ids = std::collections::HashSet::new();
-    for node in &workflow.nodes {
-        if let Some(id_str) = node.parameters.get("auth").and_then(|a| a.get("credential_id")).and_then(|v| v.as_str()) {
-            let id = Uuid::parse_str(id_str)
-                .map_err(|e| anyhow::anyhow!("node {} has an invalid credential_id: {e}", node.id))?;
-            ids.insert(id);
+/// Everything a run needs from storage beyond the workflow itself: the
+/// decrypted credentials its nodes and its agents' tools reference, and
+/// the library tools its agents use (spec B1 §5).
+#[derive(Debug, Clone, Default)]
+pub struct RunResources {
+    pub credentials: HashMap<Uuid, serde_json::Value>,
+    pub tools: HashMap<Uuid, crate::domain::Tool>,
+}
+
+fn credential_ref(parameters: &serde_json::Value) -> Option<&str> {
+    parameters.get("auth").and_then(|a| a.get("credential_id")).and_then(|v| v.as_str())
+}
+
+pub async fn resolve_run_resources(storage: &dyn Storage, workflow: &Workflow) -> anyhow::Result<RunResources> {
+    let mut tool_ids = std::collections::HashSet::new();
+    for node in workflow.nodes.iter().filter(|n| n.node_type == "ai.agent") {
+        if let Some(ids) = node.parameters.get("tool_ids").and_then(|v| v.as_array()) {
+            for v in ids {
+                let s = v.as_str().ok_or_else(|| anyhow::anyhow!("node {} has a non-string entry in tool_ids", node.id))?;
+                let id = Uuid::parse_str(s).map_err(|e| anyhow::anyhow!("node {} has an invalid tool id {s}: {e}", node.id))?;
+                tool_ids.insert(id);
+            }
         }
     }
-
-    let mut resolved = HashMap::new();
-    for id in ids {
-        let credential = storage
-            .get_credential(id)
-            .await?
-            .ok_or_else(|| anyhow::anyhow!("referenced credential {id} does not exist"))?;
-        resolved.insert(id, credential.data);
+    let mut tools = HashMap::new();
+    for id in tool_ids {
+        let tool = storage.get_tool(id).await?.ok_or_else(|| anyhow::anyhow!("referenced tool {id} does not exist"))?;
+        tools.insert(id, tool);
     }
-    Ok(resolved)
+
+    let mut credential_ids = std::collections::HashSet::new();
+    for node in &workflow.nodes {
+        if let Some(id_str) = credential_ref(&node.parameters) {
+            let id = Uuid::parse_str(id_str).map_err(|e| anyhow::anyhow!("node {} has an invalid credential_id: {e}", node.id))?;
+            credential_ids.insert(id);
+        }
+    }
+    for tool in tools.values() {
+        if let Some(id_str) = credential_ref(&tool.parameters) {
+            let id = Uuid::parse_str(id_str).map_err(|e| anyhow::anyhow!("tool {} has an invalid credential_id: {e}", tool.name))?;
+            credential_ids.insert(id);
+        }
+    }
+    let mut credentials = HashMap::new();
+    for id in credential_ids {
+        let credential = storage.get_credential(id).await?.ok_or_else(|| anyhow::anyhow!("referenced credential {id} does not exist"))?;
+        credentials.insert(id, credential.data);
+    }
+    Ok(RunResources { credentials, tools })
 }
 
 /// The field schema for a credential type, if it is one of the known types.
@@ -40,11 +67,7 @@ pub fn workflows_using_credential(workflows: &[crate::domain::Workflow], id: Uui
     let id = id.to_string();
     workflows
         .iter()
-        .filter(|wf| {
-            wf.nodes.iter().any(|n| {
-                n.parameters.get("auth").and_then(|a| a.get("credential_id")).and_then(|v| v.as_str()) == Some(id.as_str())
-            })
-        })
+        .filter(|wf| wf.nodes.iter().any(|n| credential_ref(&n.parameters) == Some(id.as_str())))
         .map(|wf| (wf.id, wf.name.clone()))
         .collect()
 }
@@ -154,7 +177,7 @@ mod tests {
         storage.create_credential(&cred).await.unwrap();
 
         let wf = workflow_with_nodes(vec![node_with_credential(cred.id)]);
-        let resolved = resolve_credentials_for_workflow(&storage, &wf).await.unwrap();
+        let resolved = resolve_run_resources(&storage, &wf).await.unwrap().credentials;
         assert_eq!(resolved.get(&cred.id), Some(&serde_json::json!({"token": "secret-value"})));
     }
 
@@ -169,7 +192,7 @@ mod tests {
             disabled: false,
             settings: Default::default(),
         }]);
-        let resolved = resolve_credentials_for_workflow(&storage, &wf).await.unwrap();
+        let resolved = resolve_run_resources(&storage, &wf).await.unwrap().credentials;
         assert!(resolved.is_empty());
     }
 
@@ -177,7 +200,7 @@ mod tests {
     async fn referencing_a_nonexistent_credential_returns_error() {
         let storage = test_storage().await;
         let wf = workflow_with_nodes(vec![node_with_credential(Uuid::new_v4())]);
-        let result = resolve_credentials_for_workflow(&storage, &wf).await;
+        let result = resolve_run_resources(&storage, &wf).await;
         assert!(result.is_err());
     }
 
@@ -262,5 +285,69 @@ mod tests {
         assert_eq!(fields.get("header_name"), Some(&serde_json::json!("X-Key")));
         assert!(!fields.contains_key("value"));
         assert!(non_secret_fields(None, &stored).is_empty());
+    }
+
+    async fn storage() -> std::sync::Arc<dyn Storage> {
+        std::sync::Arc::new(crate::storage::sqlite::SqliteStorage::new("sqlite::memory:", [0u8; 32]).await.unwrap())
+    }
+
+    async fn seed_credential(storage: &dyn Storage, data: serde_json::Value) -> Uuid {
+        let owner = crate::domain::User {
+            id: Uuid::new_v4(),
+            email: format!("{}@x.io", Uuid::new_v4()),
+            password_hash: "x".into(),
+            role: crate::domain::UserRole::Owner,
+            created_at: chrono::Utc::now(),
+        };
+        storage.create_user(&owner).await.unwrap();
+        let id = Uuid::new_v4();
+        storage
+            .create_credential(&crate::domain::Credential {
+                id,
+                name: "c".into(),
+                credential_type: "bearerToken".into(),
+                data,
+                owner_id: owner.id,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        id
+    }
+
+    fn agent_wf(tool_ids: Vec<Uuid>) -> crate::domain::Workflow {
+        let mut wf = wf_with_auth("agent", None);
+        wf.nodes[0].node_type = "ai.agent".into();
+        wf.nodes[0].parameters = serde_json::json!({"tool_ids": tool_ids.iter().map(|i| i.to_string()).collect::<Vec<_>>()});
+        wf
+    }
+
+    #[tokio::test]
+    async fn resolves_agent_tools_and_their_credentials() {
+        let storage = storage().await;
+        let cred = seed_credential(storage.as_ref(), serde_json::json!({"token": "t"})).await;
+        let tool = crate::domain::Tool {
+            id: Uuid::new_v4(),
+            name: "search".into(),
+            description: "d".into(),
+            node_type: "core.httpRequest".into(),
+            argument_schema: serde_json::json!({"type": "object", "properties": {}}),
+            parameters: serde_json::json!({"url": "https://x", "auth": {"type": "bearer", "credential_id": cred.to_string()}}),
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        storage.create_tool(&tool).await.unwrap();
+        let resources = resolve_run_resources(storage.as_ref(), &agent_wf(vec![tool.id])).await.unwrap();
+        assert_eq!(resources.tools.get(&tool.id).unwrap().name, "search");
+        assert_eq!(resources.credentials.get(&cred), Some(&serde_json::json!({"token": "t"})));
+    }
+
+    #[tokio::test]
+    async fn missing_tool_is_an_error_naming_it() {
+        let storage = storage().await;
+        let ghost = Uuid::new_v4();
+        let err = resolve_run_resources(storage.as_ref(), &agent_wf(vec![ghost])).await.unwrap_err().to_string();
+        assert!(err.contains(&ghost.to_string()) && err.contains("tool"), "{err}");
     }
 }
