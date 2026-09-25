@@ -9,6 +9,9 @@ pub struct NodeExecutionContext {
     pub credentials: std::collections::HashMap<uuid::Uuid, serde_json::Value>,
     /// Library tools the run's agents reference (spec B1 §5.2).
     pub tools: std::collections::HashMap<uuid::Uuid, crate::domain::Tool>,
+    /// Set only when this node runs as a library tool: the model's
+    /// arguments, which core.code exposes to its script as `$args`.
+    pub tool_args: Option<serde_json::Value>,
     pub tool_executor: Option<std::sync::Arc<dyn ToolExecutor>>,
 }
 
@@ -35,7 +38,16 @@ impl std::fmt::Debug for NodeExecutionContext {
 /// every `Node::execute()` signature across all existing node types.
 #[async_trait::async_trait]
 pub trait ToolExecutor: Send + Sync {
-    async fn call_tool(&self, node_type: &str, parameters: serde_json::Value) -> Result<NodeOutput, NodeError>;
+    /// Whether `node_type` resolves `{{ }}` expressions in its parameters.
+    /// A node that doesn't (core.code runs its script verbatim) must never
+    /// have model arguments templated into its parameters; it gets them as
+    /// `tool_args` instead.
+    fn resolves_parameters(&self, _node_type: &str) -> bool {
+        true
+    }
+    /// `tool_args`: a library tool call's arguments, bound as `$args` by
+    /// nodes that evaluate code (core.code).
+    async fn call_tool(&self, node_type: &str, parameters: serde_json::Value, tool_args: Option<serde_json::Value>) -> Result<NodeOutput, NodeError>;
 }
 
 #[derive(Debug, thiserror::Error)]

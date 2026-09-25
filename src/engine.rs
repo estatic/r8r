@@ -47,7 +47,16 @@ impl EngineToolExecutor {
 
 #[async_trait::async_trait]
 impl crate::node::ToolExecutor for EngineToolExecutor {
-    async fn call_tool(&self, node_type: &str, parameters: serde_json::Value) -> Result<crate::node::NodeOutput, crate::node::NodeError> {
+    fn resolves_parameters(&self, node_type: &str) -> bool {
+        self.registry.get(node_type).is_none_or(|n| n.resolves_parameters())
+    }
+
+    async fn call_tool(
+        &self,
+        node_type: &str,
+        parameters: serde_json::Value,
+        tool_args: Option<serde_json::Value>,
+    ) -> Result<crate::node::NodeOutput, crate::node::NodeError> {
         let node = self.registry.get(node_type).ok_or_else(|| {
             crate::node::NodeError::ExecutionFailed(format!("unknown tool node_type: {node_type}"))
         })?;
@@ -56,6 +65,7 @@ impl crate::node::ToolExecutor for EngineToolExecutor {
             input_items: vec![],
             credentials: self.credentials.clone(),
             tools: Default::default(),
+            tool_args,
             tool_executor: None,
         };
         node.execute(&ctx).await
@@ -228,6 +238,7 @@ pub async fn execute_workflow_seeded(
             input_items,
             credentials: resources.credentials.clone(),
             tools: resources.tools.clone(),
+            tool_args: None,
             tool_executor: Some(tool_executor.clone()),
         };
         observer.on_node_started(&node_instance.id).await;
@@ -1138,7 +1149,7 @@ mod tests {
     #[tokio::test]
     async fn engine_tool_executor_errors_on_an_unknown_node_type() {
         let tool_executor = EngineToolExecutor::new(registry(), HashMap::new());
-        let result = tool_executor.call_tool("does.not.exist", serde_json::json!({})).await;
+        let result = tool_executor.call_tool("does.not.exist", serde_json::json!({}), None).await;
         assert!(matches!(result, Err(crate::node::NodeError::ExecutionFailed(_))));
     }
 
@@ -1157,9 +1168,40 @@ mod tests {
         // a real registered node type via the registry.
         let tool_executor = EngineToolExecutor::new(registry(), HashMap::new());
         let output = tool_executor
-            .call_tool("core.set", serde_json::json!({"fields": {"x": 1}}))
+            .call_tool("core.set", serde_json::json!({"fields": {"x": 1}}), None)
             .await
             .unwrap();
         assert_eq!(output[0][0].json, serde_json::json!({"x": 1}));
+    }
+
+    #[tokio::test]
+    async fn a_code_tool_reads_args_as_a_global_instead_of_templates() {
+        let executor = EngineToolExecutor::new(registry(), Default::default());
+        assert!(!executor.resolves_parameters("core.code"), "core.code runs its script verbatim");
+        assert!(executor.resolves_parameters("core.httpRequest"));
+        let output = executor
+            .call_tool(
+                "core.code",
+                serde_json::json!({"script": "return [{ json: { result: $args.n * 2 } }]"}),
+                Some(serde_json::json!({"n": 21})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output[0][0].json, serde_json::json!({"result": 42}));
+    }
+
+    #[tokio::test]
+    async fn the_default_code_tool_template_runs() {
+        // The Tools page pre-fills exactly this script for a new Code tool.
+        let executor = EngineToolExecutor::new(registry(), Default::default());
+        let output = executor
+            .call_tool(
+                "core.code",
+                serde_json::json!({"script": "return [{ json: { result: $args } }]"}),
+                Some(serde_json::json!({"q": "hello"})),
+            )
+            .await
+            .unwrap();
+        assert_eq!(output[0][0].json, serde_json::json!({"result": {"q": "hello"}}));
     }
 }

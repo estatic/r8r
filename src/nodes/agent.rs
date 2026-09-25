@@ -210,7 +210,13 @@ pub(crate) async fn run_agent_loop(
                         messages.push(LlmMessage::ToolResult { tool_call_id: call.id.clone(), content: reason, is_error: true });
                         continue;
                     }
-                    let parameters = if decl.template {
+                    let verbatim = decl.template && !tool_executor.resolves_parameters(&decl.node_type);
+                    let parameters = if verbatim {
+                        // A node that runs its parameters as code (core.code)
+                        // gets the arguments as data via `$args`, never
+                        // spliced into its source.
+                        decl.base_parameters.clone()
+                    } else if decl.template {
                         // Library tool: arguments reach the node only where
                         // the tool author placed {{ $args.x }}.
                         let no_items: Vec<serde_json::Value> = Vec::new();
@@ -250,7 +256,8 @@ pub(crate) async fn run_agent_loop(
                         }
                         merged_parameters
                     };
-                    match tool_executor.call_tool(&decl.node_type, parameters).await {
+                    let tool_args = decl.template.then(|| call.arguments.clone());
+                    match tool_executor.call_tool(&decl.node_type, parameters, tool_args).await {
                         Ok(output) => {
                             messages.push(LlmMessage::ToolResult {
                                 tool_call_id: call.id.clone(),
@@ -401,7 +408,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl ToolExecutor for SpyToolExecutor {
-        async fn call_tool(&self, node_type: &str, parameters: serde_json::Value) -> Result<NodeOutput, NodeError> {
+        async fn call_tool(&self, node_type: &str, parameters: serde_json::Value, _tool_args: Option<serde_json::Value>) -> Result<NodeOutput, NodeError> {
             self.calls.lock().unwrap().push((node_type.to_string(), parameters));
             match &self.result {
                 Ok(output) => Ok(output.clone()),
@@ -827,5 +834,38 @@ mod tests {
         let err = run_agent_loop(&provider, "m", "key", "sys", "go".into(), &inline, 10, None, &ctx).await.unwrap_err().to_string();
 
         assert!(err.contains("duplicate tool name \"search\""), "{err}");
+    }
+
+    /// Records calls including the args; reports core.code as a node that
+    /// runs its parameters verbatim, like the real engine executor.
+    struct VerbatimCodeSpy {
+        calls: Mutex<Vec<(String, serde_json::Value, Option<serde_json::Value>)>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ToolExecutor for VerbatimCodeSpy {
+        fn resolves_parameters(&self, node_type: &str) -> bool {
+            node_type != "core.code"
+        }
+        async fn call_tool(&self, node_type: &str, parameters: serde_json::Value, tool_args: Option<serde_json::Value>) -> Result<NodeOutput, NodeError> {
+            self.calls.lock().unwrap().push((node_type.to_string(), parameters, tool_args));
+            Ok(vec![vec![]])
+        }
+    }
+
+    #[tokio::test]
+    async fn a_code_tool_script_is_never_templated_with_model_text() {
+        let mut tool = library_tool("code_tool", serde_json::json!({"script": "return [{ json: { r: '{{ $args.q }}' } }]"}));
+        tool.node_type = "core.code".into();
+        let injection = "x' }}, {json:{pwned: 1+1}}]; var z = [{a:{b:'";
+        let provider = ScriptedProvider { responses: Mutex::new(one_call_then_done("code_tool", serde_json::json!({"q": injection}))) };
+        let spy = std::sync::Arc::new(VerbatimCodeSpy { calls: Mutex::new(Vec::new()) });
+        let ctx = ctx_with_library(spy.clone(), &tool);
+
+        run_agent_loop(&provider, "m", "key", "sys", "go".into(), &serde_json::json!([]), 10, None, &ctx).await.unwrap();
+
+        let calls = spy.calls.lock().unwrap();
+        assert_eq!(calls[0].1, tool.parameters, "the script must reach the node exactly as the author wrote it");
+        assert_eq!(calls[0].2, Some(serde_json::json!({"q": injection})), "arguments travel as data, for the node's $args global");
     }
 }

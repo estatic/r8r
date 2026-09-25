@@ -185,6 +185,7 @@ mod tests {
             input_items: vec![],
             credentials,
             tools: Default::default(),
+            tool_args: None,
             tool_executor: None,
         };
         let result = node.execute(&ctx).await.unwrap();
@@ -219,6 +220,7 @@ mod tests {
             input_items: vec![],
             credentials,
             tools: Default::default(),
+            tool_args: None,
             tool_executor: None,
         };
         let result = node.execute(&ctx).await;
@@ -283,6 +285,7 @@ mod tests {
             input_items: vec![],
             credentials,
             tools: Default::default(),
+            tool_args: None,
             tool_executor: None,
         };
         let result = node.execute(&ctx).await;

@@ -84,6 +84,8 @@ impl Node for CodeNode {
         // between checks (e.g. one dominated by a single very expensive
         // native call) could still run to completion on an orphaned
         // blocking-pool thread after this outer timeout fires.
+        // A library tool call's arguments, exposed to the script as `$args`.
+        let tool_args = ctx.tool_args.clone();
         let handle = tokio::task::spawn_blocking(move || {
             let empty_node_json: HashMap<String, serde_json::Value> = HashMap::new();
             let eval_ctx = EvalContext {
@@ -91,7 +93,7 @@ impl Node for CodeNode {
                 items: &items_json,
                 node_json: &empty_node_json,
                 workflow_name: "",
-                args: None,
+                args: tool_args.as_ref(),
             };
             eval_js(&wrapped_script, &eval_ctx)
         });
