@@ -450,4 +450,17 @@ mod tests {
             serde_json::json!({"a": "{{ 1 + 1 }}", "b": "'); throw new Error('pwned'); ('"})
         );
     }
+
+    #[test]
+    fn args_can_be_url_encoded_inside_a_template() {
+        // The Tools page's HTTP template relies on this to keep model text
+        // from adding query params or path segments.
+        let args = serde_json::json!({"query": "a&b #c/../admin"});
+        let ctx = EvalContext { args: Some(&args), ..empty_ctx() };
+        let params = serde_json::json!({"url": "https://api.example.com/search?q={{ encodeURIComponent($args.query) }}"});
+        assert_eq!(
+            resolve_parameters(&params, &ctx).unwrap(),
+            serde_json::json!({"url": "https://api.example.com/search?q=a%26b%20%23c%2F..%2Fadmin"})
+        );
+    }
 }

@@ -80,7 +80,7 @@ describe('ToolsView', () => {
     await wrapper.find('[data-testid="new-tool"]').trigger('click')
     await flushPromises()
     const params = wrapper.find('textarea[aria-label="Parameters (JSON)"]')
-    expect((params.element as HTMLTextAreaElement).value).toContain('{{ $args.query }}')
+    expect((params.element as HTMLTextAreaElement).value).toContain('{{ encodeURIComponent($args.query) }}')
 
     await wrapper.find('input[aria-label="Name"]').setValue('web_search')
     await wrapper.find('textarea[aria-label="Description"]').setValue('Search the web')
@@ -95,7 +95,7 @@ describe('ToolsView', () => {
       description: 'Search the web',
       node_type: 'core.httpRequest',
       argument_schema: { type: 'object', properties: { query: { type: 'string' } }, required: ['query'] },
-      parameters: { method: 'GET', url: 'https://api.example.com/search?q={{ $args.query }}' },
+      parameters: { method: 'GET', url: 'https://api.example.com/search?q={{ encodeURIComponent($args.query) }}' },
     })
     vi.unstubAllGlobals()
   })

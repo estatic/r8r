@@ -17,7 +17,7 @@ describe('tool schema helpers', () => {
   })
 
   it('offers an $args template per tool node type', () => {
-    expect(JSON.stringify(PARAMETER_TEMPLATES['core.httpRequest'])).toContain('{{ $args.query }}')
+    expect(JSON.stringify(PARAMETER_TEMPLATES['core.httpRequest'])).toContain('{{ encodeURIComponent($args.query) }}')
     expect(JSON.stringify(PARAMETER_TEMPLATES['telegram.sendMessage'])).toContain('{{ $args.message }}')
     expect(JSON.stringify(PARAMETER_TEMPLATES['core.code'])).toContain('$args')
   })

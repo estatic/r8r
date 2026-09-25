@@ -147,7 +147,8 @@ async function save() {
     <label class="block text-xs text-gray-600">
       Parameters (JSON)
       <textarea v-model="paramsText" aria-label="Parameters (JSON)" rows="6" class="w-full border rounded px-2 py-1 text-xs font-mono"></textarea>
-      <span class="text-gray-400">Use {{ '{' + '{ $args.<name> }' + '}' }} to insert an argument. Keep the scheme and host fixed in URLs.</span>
+      <span v-if="nodeType === 'core.code'" class="text-gray-400">The script reads the arguments as <code>$args</code> (e.g. <code>$args.n</code>); they are data, never inserted into the code.</span>
+      <span v-else class="text-gray-400">Use {{ '{' + '{ $args.<name> }' + '}' }} to insert an argument. In URLs keep the scheme and host fixed and wrap values in encodeURIComponent(...).</span>
     </label>
 
     <div class="flex gap-2">

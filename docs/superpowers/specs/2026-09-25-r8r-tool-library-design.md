@@ -152,7 +152,13 @@ calls.
   looked up in `ctx.tools`. A duplicate tool name across the two sets is
   an execution error naming it. A `tool_ids` entry missing from
   `ctx.tools` is an error (cannot happen after §5.1 succeeds).
-- For a **library** tool call: validate the arguments against
+- For a library tool whose node type does **not** resolve its own
+  parameters (`core.code`, whose `script` runs verbatim), the parameters
+  are passed unchanged and the arguments travel as data: the node binds
+  them as the `$args` global (`NodeExecutionContext.tool_args`). Model
+  text is never spliced into a script. (Added after the final review,
+  which showed templating a script let model input run as code.)
+- For a **library** tool call on any other node: validate the arguments against
   `argument_schema` (existing shallow validation, including the
   denied-key list), then compute the node parameters as
   `expr::resolve_parameters(&tool.parameters, &EvalContext { json: {},
@@ -190,7 +196,9 @@ calls.
     table from its schema.
   - **Parameters** JSON editor (everything except `auth`), pre-filled
     per node type when the type is chosen on a new tool:
-    - HTTP: `{"method": "GET", "url": "https://api.example.com/search?q={{ $args.query }}"}`
+    - HTTP: `{"method": "GET", "url": "https://api.example.com/search?q={{ encodeURIComponent($args.query) }}"}`
+      (encoded so model text can't add query params or path segments —
+      changed after the final review)
     - Telegram: `{"chat_id": "", "text": "{{ $args.message }}"}`
     - Code: `{"script": "return [{ json: { result: $args } }]"}`
     with the hint "Use {{ $args.<name> }} to insert an argument."

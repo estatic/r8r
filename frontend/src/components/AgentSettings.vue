@@ -5,7 +5,8 @@ import type { AgentFields } from '../types/domain'
 const fields = defineModel<AgentFields>({ required: true })
 defineProps<{ inlineToolCount: number }>()
 const toolsStore = useToolsStore()
-if (!toolsStore.loaded) toolsStore.fetchAll().catch(() => {})
+// Always refresh: tools may have been added in another tab (Manage tools).
+toolsStore.fetchAll().catch(() => {})
 
 function toggleTool(id: string, on: boolean) {
   const ids = new Set(fields.value.tool_ids)
@@ -44,7 +45,8 @@ function toggleTool(id: string, on: boolean) {
       <input v-model="fields.max_iterations" aria-label="Max iterations" type="number" min="1" max="50" class="w-full border rounded px-2 py-1 text-sm" />
     </label>
     <div class="text-xs text-gray-600 space-y-1">
-      <div class="flex justify-between"><span>Tools</span><router-link to="/tools" class="text-blue-600">Manage tools</router-link></div>
+      <div class="flex justify-between"><span>Tools</span><!-- New tab: leaving the editor would drop unsaved canvas edits. -->
+        <router-link to="/tools" target="_blank" data-testid="manage-tools" class="text-blue-600">Manage tools ↗</router-link></div>
       <label v-for="t in toolsStore.tools" :key="t.id" class="flex gap-2 items-start">
         <input
           type="checkbox"

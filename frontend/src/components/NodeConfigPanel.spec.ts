@@ -1,4 +1,4 @@
-import { describe, it, expect } from 'vitest'
+import { describe, it, expect, vi } from 'vitest'
 import { mount } from '@vue/test-utils'
 import NodeConfigPanel from './NodeConfigPanel.vue'
 import { useCredentialsStore } from '../stores/credentials'
@@ -171,5 +171,21 @@ describe('NodeConfigPanel', () => {
     await wrapper.find('input[aria-label="Use tool search"]').setValue(true)
     await clickApply(wrapper)
     expect((wrapper.emitted('update')![0][0] as NodeInstance).parameters.tool_ids).toEqual(['t1'])
+  })
+
+  it('opens Manage tools in a new tab so unsaved canvas edits are not lost', async () => {
+    const wrapper = mount(NodeConfigPanel, { props: { node: agent({}) }, global: { stubs: { RouterLink: { template: '<a v-bind="$attrs"><slot /></a>' } } } })
+    const link = wrapper.find('[data-testid="manage-tools"]')
+    expect(link.exists()).toBe(true)
+    expect(link.attributes('target')).toBe('_blank')
+  })
+
+  it('refreshes the tool list each time an agent panel opens', async () => {
+    const { useToolsStore } = await import('../stores/tools')
+    const tools = useToolsStore()
+    tools.loaded = true
+    const spy = vi.spyOn(tools, 'fetchAll').mockResolvedValue()
+    mount(NodeConfigPanel, { props: { node: agent({}) } })
+    expect(spy).toHaveBeenCalled()
   })
 })

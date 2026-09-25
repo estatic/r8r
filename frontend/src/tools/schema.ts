@@ -15,7 +15,9 @@ export const TOOL_NODE_TYPES: { value: string; label: string }[] = [
 
 /** Starter parameters per node type, showing where {{ $args.x }} goes. */
 export const PARAMETER_TEMPLATES: Record<string, Record<string, unknown>> = {
-  'core.httpRequest': { method: 'GET', url: 'https://api.example.com/search?q={{ $args.query }}' },
+  // encodeURIComponent keeps model text from adding query params or path
+  // segments on the tool's (possibly credentialed) host.
+  'core.httpRequest': { method: 'GET', url: 'https://api.example.com/search?q={{ encodeURIComponent($args.query) }}' },
   'telegram.sendMessage': { chat_id: '', text: '{{ $args.message }}' },
   'core.code': { script: 'return [{ json: { result: $args } }]' },
 }
