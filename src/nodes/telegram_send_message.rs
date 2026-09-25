@@ -185,6 +185,7 @@ mod tests {
             input_items: vec![],
             credentials,
             tools: Default::default(),
+            credential_types: Default::default(),
             tool_args: None,
             tool_executor: None,
         };
@@ -220,6 +221,7 @@ mod tests {
             input_items: vec![],
             credentials,
             tools: Default::default(),
+            credential_types: Default::default(),
             tool_args: None,
             tool_executor: None,
         };
@@ -285,6 +287,7 @@ mod tests {
             input_items: vec![],
             credentials,
             tools: Default::default(),
+            credential_types: Default::default(),
             tool_args: None,
             tool_executor: None,
         };

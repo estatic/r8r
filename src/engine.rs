@@ -65,6 +65,7 @@ impl crate::node::ToolExecutor for EngineToolExecutor {
             input_items: vec![],
             credentials: self.credentials.clone(),
             tools: Default::default(),
+            credential_types: Default::default(),
             tool_args,
             tool_executor: None,
         };
@@ -237,6 +238,7 @@ pub async fn execute_workflow_seeded(
             parameters,
             input_items,
             credentials: resources.credentials.clone(),
+            credential_types: resources.credential_types.clone(),
             tools: resources.tools.clone(),
             tool_args: None,
             tool_executor: Some(tool_executor.clone()),

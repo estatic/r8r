@@ -7,6 +7,8 @@ pub struct NodeExecutionContext {
     pub parameters: serde_json::Value,
     pub input_items: Vec<Item>,
     pub credentials: std::collections::HashMap<uuid::Uuid, serde_json::Value>,
+    /// Type of each resolved credential (e.g. `openaiApi`).
+    pub credential_types: std::collections::HashMap<uuid::Uuid, String>,
     /// Library tools the run's agents reference (spec B1 §5.2).
     pub tools: std::collections::HashMap<uuid::Uuid, crate::domain::Tool>,
     /// Set only when this node runs as a library tool: the model's

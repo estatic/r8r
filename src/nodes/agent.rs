@@ -300,24 +300,39 @@ impl Node for AgentNode {
 
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
         let str_param = |name: &str| ctx.parameters.get(name).and_then(|v| v.as_str());
+        // No explicit provider: the credential's type already says which
+        // API it is for, so a workflow saved without `provider` still runs.
+        let inferred_provider = ctx
+            .parameters
+            .get("auth")
+            .and_then(|a| a.get("credential_id"))
+            .and_then(|v| v.as_str())
+            .and_then(|s| uuid::Uuid::parse_str(s).ok())
+            .and_then(|id| ctx.credential_types.get(&id))
+            .and_then(|t| match t.as_str() {
+                "openaiApi" => Some("openai"),
+                "anthropicApi" => Some("anthropic"),
+                _ => None,
+            });
+        let provider = str_param("provider").or(inferred_provider);
         // Report every missing required parameter at once: they're edited as
         // raw JSON, so one-at-a-time errors mean one failed run per field.
-        let missing: Vec<&str> = [
-            ("provider", "provider (\"anthropic\" or \"openai\")"),
-            ("model", "model"),
-            ("user_message", "user_message"),
-        ]
-        .iter()
-        .filter(|(key, _)| str_param(key).is_none())
-        .map(|(_, label)| *label)
-        .collect();
+        let mut missing: Vec<&str> = Vec::new();
+        if provider.is_none() {
+            missing.push("provider (\"anthropic\" or \"openai\")");
+        }
+        for key in ["model", "user_message"] {
+            if str_param(key).is_none() {
+                missing.push(key);
+            }
+        }
         if !missing.is_empty() {
             return Err(NodeError::ExecutionFailed(format!(
                 "ai.agent is missing required parameters: {}",
                 missing.join(", ")
             )));
         }
-        let provider_name = str_param("provider").unwrap_or_default();
+        let provider_name = provider.unwrap_or_default();
         let model = str_param("model").unwrap_or_default();
         let system_prompt = str_param("system_prompt").unwrap_or("");
         let user_message = str_param("user_message").unwrap_or_default().to_string();
@@ -867,5 +882,18 @@ mod tests {
         let calls = spy.calls.lock().unwrap();
         assert_eq!(calls[0].1, tool.parameters, "the script must reach the node exactly as the author wrote it");
         assert_eq!(calls[0].2, Some(serde_json::json!({"q": injection})), "arguments travel as data, for the node's $args global");
+    }
+
+    #[tokio::test]
+    async fn provider_is_inferred_from_the_credential_type_at_run_time() {
+        let cred = uuid::Uuid::new_v4();
+        let ctx = NodeExecutionContext {
+            parameters: serde_json::json!({"auth": {"credential_id": cred.to_string()}}),
+            credential_types: std::collections::HashMap::from([(cred, "openaiApi".to_string())]),
+            ..Default::default()
+        };
+        let err = AgentNode.execute(&ctx).await.unwrap_err().to_string();
+        assert!(err.contains("missing required parameters: model, user_message"), "{err}");
+        assert!(!err.contains("provider"), "provider should come from the openaiApi credential: {err}");
     }
 }

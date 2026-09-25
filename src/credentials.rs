@@ -10,6 +10,9 @@ use crate::credential_types::{known_credential_types, CredentialTypeSchema, Fiel
 #[derive(Debug, Clone, Default)]
 pub struct RunResources {
     pub credentials: HashMap<Uuid, serde_json::Value>,
+    /// Each resolved credential's type (e.g. `openaiApi`), so a node can
+    /// infer settings the credential already implies.
+    pub credential_types: HashMap<Uuid, String>,
     pub tools: HashMap<Uuid, crate::domain::Tool>,
 }
 
@@ -48,11 +51,13 @@ pub async fn resolve_run_resources(storage: &dyn Storage, workflow: &Workflow) -
         }
     }
     let mut credentials = HashMap::new();
+    let mut credential_types = HashMap::new();
     for id in credential_ids {
         let credential = storage.get_credential(id).await?.ok_or_else(|| anyhow::anyhow!("referenced credential {id} does not exist"))?;
+        credential_types.insert(id, credential.credential_type);
         credentials.insert(id, credential.data);
     }
-    Ok(RunResources { credentials, tools })
+    Ok(RunResources { credentials, credential_types, tools })
 }
 
 /// The field schema for a credential type, if it is one of the known types.
@@ -362,6 +367,7 @@ mod tests {
         let resources = resolve_run_resources(storage.as_ref(), &agent_wf(vec![tool.id])).await.unwrap();
         assert_eq!(resources.tools.get(&tool.id).unwrap().name, "search");
         assert_eq!(resources.credentials.get(&cred), Some(&serde_json::json!({"token": "t"})));
+        assert_eq!(resources.credential_types.get(&cred).map(String::as_str), Some("bearerToken"));
     }
 
     #[tokio::test]
