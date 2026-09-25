@@ -42,3 +42,15 @@ http-body-util = "0.1"
 wiremock = "0.6"
 tokio-tungstenite = "0.24"
 futures-util = "0.3"
+cucumber = "0.23"
+tempfile = "3"
+aes = "0.8"
+md-5 = "0.10"
+cbc = "0.1"
+
+# BDD conformance suite (cucumber). Runs the r8r binary black-box as a CLI and
+# as a server; see tests/bdd/README.md. `cargo test --test bdd`.
+[[test]]
+name = "bdd"
+path = "tests/bdd/main.rs"
+harness = false

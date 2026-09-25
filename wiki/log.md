@@ -10,3 +10,5 @@ Operations:
 - `shard` — an index was sharded.
 
 ---
+
+## [2026-09-25] ingest | n8n in Rust reimplementation spec -> sources/n8n-in-rust-reimplementation-spec, concepts/bdd-conformance-suite
