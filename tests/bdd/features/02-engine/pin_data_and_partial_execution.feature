@@ -1,12 +1,14 @@
-@spec-2.4 @spec-6.2 @spec-3.1 @phase-1
+@spec-2.4 @spec-6.2 @spec-3.1
 Feature: Pin data and partial execution
   Pinned output replaces a node's execution in manual runs, which makes the
   editor's build-test loop fast. Partial execution runs "up to node X" and
   can reuse earlier run data instead of re-running upstream nodes.
 
-  Scenario: A pinned node is not executed; its pinned items flow downstream
-    Given a mock HTTP service
-    And a workflow with nodes:
+  @phase-2
+  Scenario: In a manual run a pinned node is not executed; its pinned items flow downstream
+    Given a running r8r server with an owner and an API key
+    And a mock HTTP service
+    And a workflow named "Pinned fetch" with nodes:
       | name    | type          | parameters                                      |
       | Start   | manualTrigger |                                                 |
       | Fetch   | httpRequest   | {"url": "%{MOCK_URL}/customers", "options": {}} |
@@ -20,7 +22,8 @@ Feature: Pin data and partial execution
       """
       [{"name": "Ada"}, {"name": "Grace"}]
       """
-    When I execute the workflow
+    When I run the workflow manually from the editor
+    And I wait for that execution to finish
     Then the execution succeeds
     And the node "Shape" outputs:
       """
@@ -28,8 +31,10 @@ Feature: Pin data and partial execution
       """
     And the mock service received no requests
 
-  Scenario: Pinned data on the trigger is the input of the run
-    Given a workflow with nodes:
+  @phase-2
+  Scenario: In a manual run pinned data on the trigger is the input of the run
+    Given a running r8r server with an owner and an API key
+    And a workflow named "Pinned trigger" with nodes:
       | name  | type          |
       | Start | manualTrigger |
       | Echo  | noOp          |
@@ -38,10 +43,29 @@ Feature: Pin data and partial execution
       """
       [{"pinned": 1}, {"pinned": 2}]
       """
-    When I execute the workflow
+    When I run the workflow manually from the editor
+    And I wait for that execution to finish
     Then the node "Echo" outputs:
       """
       [{"pinned": 1}, {"pinned": 2}]
+      """
+
+  @phase-1
+  Scenario: Headless (cli mode) executions ignore pin data, as in n8n
+    Given a workflow with nodes:
+      | name  | type          |
+      | Start | manualTrigger |
+      | Echo  | noOp          |
+    And the connections "Start -> Echo"
+    And the node "Echo" is pinned with the items:
+      """
+      [{"pinned": true}]
+      """
+    When I execute the workflow
+    Then the execution succeeds
+    And the node "Echo" outputs:
+      """
+      [{}]
       """
 
   @phase-2

@@ -1,11 +1,11 @@
-//! Headless execution (`r8r execute --file`) and other CLI commands.
+//! Headless execution and other CLI commands.
 //!
-//! Contract (spec §2.1 `r8n-cli`, Phase 1 "CLI execute", mirroring
-//! `n8n execute`): `r8r execute --file <workflow.json> --rawOutput` runs the
-//! workflow from its manual trigger as a manual execution (pin data is
-//! honoured) and prints the n8n `IRun` JSON (`status`, `mode`,
-//! `data.resultData.runData`, ...) on stdout. Exit code 0 on success,
-//! non-zero on a failed execution; the JSON is printed either way.
+//! Contract (spec §2.1 `r8n-cli`, Phase 1 "CLI execute"), identical to n8n
+//! 2.x: `r8r import:workflow --input=<file>` stores the workflow, then
+//! `r8r execute --id=<id> --rawOutput` runs it in "cli" mode and prints the
+//! `IRun` JSON (`status`, `mode`, `data.resultData.runData`, ...) on stdout
+//! after any log lines. Pin data does not apply in this mode; see
+//! `support::workflow::prepare_for_cli` for how trigger input is fed.
 
 use super::docstring;
 use crate::support::json::{assert_matches, parse_strict, Mode};
@@ -28,13 +28,26 @@ pub fn parse_run_output(stdout: &str) -> Option<Value> {
     stream.next()?.ok()
 }
 
+/// Imports the current workflow and runs it headless, as with n8n:
+/// `import:workflow --input=<file>` then `execute --id=<id> --rawOutput`.
 pub async fn execute_current(w: &mut R8rWorld, timeout: Duration) {
     let spec = w.wf().clone();
-    let json = w.workflow_json(&spec);
-    let file = w.dir.path().join(format!("workflow-{}.json", uuid::Uuid::new_v4()));
+    let mut json = w.workflow_json(&spec);
+    let id = crate::support::workflow::prepare_for_cli(&mut json);
+    let file = w.dir.path().join(format!("workflow-{id}.json"));
     std::fs::write(&file, serde_json::to_vec_pretty(&json).unwrap()).unwrap();
-    let args = vec!["execute".to_string(), format!("--file={}", file.display()), "--rawOutput".to_string()];
-    let out = w.cli(&args, timeout).await;
+    let import = vec!["import:workflow".to_string(), format!("--input={}", file.display())];
+    let out = w.cli(&import, timeout).await;
+    if out.code != Some(0) {
+        w.run = None;
+        return;
+    }
+    let args = vec!["execute".to_string(), format!("--id={id}"), "--rawOutput".to_string()];
+    let started = std::time::Instant::now();
+    let mut out = w.cli(&args, timeout).await;
+    // "finished within" assertions time the execution, not the import.
+    out.elapsed = started.elapsed();
+    w.cli = Some(out.clone());
     w.run = parse_run_output(&out.stdout);
 }
 

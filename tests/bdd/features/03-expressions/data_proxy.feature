@@ -155,20 +155,20 @@ Feature: Expression data proxy
       [{"name": "Invoice sync", "active": false}]
       """
 
-  Scenario: $execution exposes the id and the test/production mode
+  Scenario: $execution exposes the id and the resume URL
     Given a workflow with nodes:
       | name  | type          |
       | Start | manualTrigger |
       | Probe | set           |
     And the node "Probe" sets the fields:
       """
-      {"id": "={{ $execution.id }}", "mode": "={{ $execution.mode }}", "resumeUrl": "={{ $execution.resumeUrl }}"}
+      {"id": "={{ $execution.id }}", "resumeUrl": "={{ $execution.resumeUrl }}"}
       """
     And the connections "Start -> Probe"
     When I execute the workflow
     Then the node "Probe" outputs:
       """
-      [{"id": "$nonempty", "mode": "test", "resumeUrl": "$contains:/webhook-waiting/"}]
+      [{"id": "$nonempty", "resumeUrl": "$contains:/webhook-waiting/"}]
       """
 
   Scenario: $execution.customData stores searchable metadata

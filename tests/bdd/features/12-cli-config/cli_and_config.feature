@@ -32,10 +32,10 @@ Feature: One binary, typed configuration
     And the command output contains "Usage"
 
   @phase-1
-  Scenario: execute reports a missing file clearly
-    When I run "r8r execute --file=does-not-exist.json"
+  Scenario: execute reports an unknown workflow id clearly
+    When I run "r8r execute --id=does-not-exist"
     Then the command fails
-    And the command output contains "does-not-exist.json"
+    And the command output contains "does-not-exist"
 
   @phase-1
   Scenario: execute runs an imported workflow by id

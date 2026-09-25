@@ -51,7 +51,8 @@ Feature: n8n workflow JSON is a frozen contract
       """
 
   Scenario: A workflow exported from n8n runs unchanged
-    When I run "r8r execute --file=order-flow.json --rawOutput"
+    Given I successfully run "r8r import:workflow --input=order-flow.json"
+    When I run "r8r execute --id=wf-order-flow --rawOutput"
     Then the execution succeeds
     And the node "Mark new" outputs:
       """
@@ -59,12 +60,13 @@ Feature: n8n workflow JSON is a frozen contract
       """
 
   Scenario: Import then export preserves every field, including unknown ones
+    # Like n8n, export:workflow writes an array even for a single --id.
     Given I successfully run "r8r import:workflow --input=order-flow.json"
     When I run "r8r export:workflow --id=wf-order-flow --output=exported.json"
     Then the command succeeds
     And the file "exported.json" contains JSON matching:
       """
-      {
+      [{
         "id": "wf-order-flow",
         "name": "Order flow",
         "nodes": [
@@ -89,14 +91,14 @@ Feature: n8n workflow JSON is a frozen contract
         "settings": {"executionOrder": "v1", "saveManualExecutions": true, "callerPolicy": "workflowsFromSameOwner"},
         "meta": {"templateCredsSetupCompleted": true, "instanceId": "abc123"},
         "x-custom-top-level": {"answer": 42}
-      }
+      }]
       """
 
   Scenario: Export keeps the key order of nodes and parameters
     Given I successfully run "r8r import:workflow --input=order-flow.json"
     When I run "r8r export:workflow --id=wf-order-flow --output=exported.json"
-    Then the object at "nodes[1]" in the file "exported.json" has the keys in the order "parameters, id, name, type, typeVersion, position"
-    And the object at "nodes[1].parameters" in the file "exported.json" has the keys in the order "mode, assignments, includeOtherFields, options"
+    Then the object at "[0].nodes[1]" in the file "exported.json" has the keys in the order "parameters, id, name, type, typeVersion, position"
+    And the object at "[0].nodes[1].parameters" in the file "exported.json" has the keys in the order "mode, assignments, includeOtherFields, options"
 
   Scenario: Exporting all workflows returns an array
     Given I successfully run "r8r import:workflow --input=order-flow.json"
@@ -163,7 +165,7 @@ Feature: n8n workflow JSON is a frozen contract
       """
     When I run "r8r import:workflow --input=unknown.json"
     Then the command succeeds
-    When I run "r8r execute --file=unknown.json --rawOutput"
+    When I run "r8r execute --id=wf-unknown --rawOutput"
     Then the execution fails
     And the execution error message contains "n8n-nodes-community.doesNotExist"
 

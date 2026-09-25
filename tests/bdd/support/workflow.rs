@@ -226,6 +226,49 @@ impl WorkflowSpec {
     }
 }
 
+/// Prepares workflow JSON for `execute --id`, which (like `n8n execute`)
+/// runs in "cli" mode where pin data is ignored and a trigger is required.
+/// Items pinned on a manual trigger are fed instead by renaming the trigger
+/// to "<name> (trigger)" and inserting a Code node under the original name
+/// that returns those items. Downstream node names, `$('<name>')`
+/// references and paired items are unchanged. Also gives the workflow an
+/// id if it has none.
+pub fn prepare_for_cli(workflow: &mut Value) -> String {
+    if workflow.get("id").and_then(Value::as_str).is_none() {
+        workflow["id"] = json!(format!("bdd{}", &uuid::Uuid::new_v4().simple().to_string()[..13]));
+    }
+    let id = workflow["id"].as_str().unwrap().to_string();
+    let Some(nodes) = workflow["nodes"].as_array().cloned() else { return id };
+    let Some(first) = nodes.first() else { return id };
+    let name = first["name"].as_str().unwrap_or_default().to_string();
+    let is_manual = first["type"] == "n8n-nodes-base.manualTrigger";
+    let pinned = workflow.pointer(&format!("/pinData/{}", name.replace('~', "~0").replace('/', "~1"))).cloned();
+    let (true, Some(Value::Array(items))) = (is_manual, pinned) else { return id };
+
+    let trigger_name = format!("{name} (trigger)");
+    let jsons: Vec<Value> = items.iter().map(|i| json!({ "json": i.get("json").cloned().unwrap_or(json!({})) })).collect();
+    let position = first["position"].clone();
+    let mut new_nodes = nodes.clone();
+    new_nodes[0]["name"] = json!(trigger_name);
+    new_nodes[0]["position"] = json!([position[0].as_f64().unwrap_or(0.0) - 200.0, position[1].as_f64().unwrap_or(0.0)]);
+    new_nodes.insert(
+        1,
+        json!({
+            "id": uuid::Uuid::new_v4().to_string(),
+            "name": name,
+            "type": "n8n-nodes-base.code",
+            "typeVersion": 2,
+            "position": position,
+            "parameters": {"mode": "runOnceForAllItems", "language": "javaScript",
+                           "jsCode": format!("return {};", serde_json::to_string(&jsons).unwrap())}
+        }),
+    );
+    workflow["nodes"] = Value::Array(new_nodes);
+    workflow["connections"][trigger_name.as_str()] = json!({"main": [[{"node": name, "type": "main", "index": 0}]]});
+    workflow["pinData"].as_object_mut().map(|p| p.remove(&name));
+    id
+}
+
 fn split_index(endpoint: &str) -> (String, usize) {
     match endpoint.rsplit_once(':') {
         Some((name, idx)) if idx.trim().parse::<usize>().is_ok() => (name.trim().to_string(), idx.trim().parse().unwrap()),
