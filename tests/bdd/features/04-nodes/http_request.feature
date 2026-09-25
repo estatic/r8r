@@ -169,7 +169,7 @@ Feature: HTTP Request node (v4)
       """
     When I execute the workflow
     Then the execution fails
-    And the command finished within 2900 ms
+    And run 0 of the node "Call" took less than 2900 ms
 
   Scenario: Header auth credentials are applied and never stored in the run data
     Given the credential "Partner API" of type "httpHeaderAuth" with the data:

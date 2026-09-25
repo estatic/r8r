@@ -74,7 +74,7 @@ Feature: n8n extension methods and Luxon dates
       | ={{ ({a: 1, b: 2}).values() }}                   | [1, 2]             |
       | ={{ ({a: 1}).hasField('a') }}                    | true               |
       | ={{ ({a: 1, b: 2}).removeField('a') }}           | {"b": 2}           |
-      | ={{ ({a: 1, b: 2}).keepFieldsContaining('1') }}  | {"a": 1}           |
+      | ={{ ({a: 'x1', b: 'y'}).keepFieldsContaining('1') }} | {"a": "x1"}    |
       | ={{ ({}).isEmpty() }}                            | true               |
 
   Scenario Outline: Luxon dates

@@ -30,10 +30,12 @@ Feature: Execution order v1 (depth-first) and legacy v0 (breadth-first)
     Then the execution succeeds
     And the nodes ran in the order "Start, Bottom, Top, Bottom 2, Top 2"
 
-  Scenario: A workflow without executionOrder runs as v1
+  # Checked against n8n 2.35: a missing setting means the legacy order, so
+  # old workflows keep their behaviour. New workflows are saved with "v1".
+  Scenario: A workflow without executionOrder runs as v0
     Given the workflow has no "executionOrder" setting
     When I execute the workflow
-    Then the node "Top 2" ran before the node "Bottom"
+    Then the nodes ran in the order "Start, Bottom, Top, Bottom 2, Top 2"
 
   Scenario: Canvas position, not connection order, decides which branch goes first
     Given I edit the workflow "BDD workflow"

@@ -8,7 +8,7 @@ Feature: Expression data proxy
   Scenario Outline: $json and $input read the current input
     Given the input items:
       """
-      [{"name": "Ada", "tags": ["x", "y"], "nested": {"deep": {"value": 42}}}, {"name": "Grace"}]
+      [{"name": "Ada", "tags": ["x", "y"], "nested": {"deep": {"value": 42}}}, {"name": "Grace", "tags": [], "nested": {"deep": {"value": 0}}}]
       """
     When I evaluate the expression "<expression>"
     Then the result is <result>
@@ -63,7 +63,7 @@ Feature: Expression data proxy
         "score": "={{ $json.score }}",
         "firstCustomer": "={{ $('Customer').first().json.name }}",
         "customers": "={{ $('Customer').all().length }}",
-        "legacy": "={{ $node['Customer'].json.name }}"
+        "legacyPaired": "={{ $node['Customer'].json.name }}"
       }
       """
     And the connections "Start -> Customer -> Lookup -> Report"
@@ -76,8 +76,8 @@ Feature: Expression data proxy
     And the node "Report" outputs:
       """
       [
-        {"name": "Ada", "score": 100, "firstCustomer": "Ada", "customers": 2, "legacy": "Ada"},
-        {"name": "Grace", "score": 200, "firstCustomer": "Ada", "customers": 2, "legacy": "Ada"}
+        {"name": "Ada", "score": 100, "firstCustomer": "Ada", "customers": 2, "legacyPaired": "Ada"},
+        {"name": "Grace", "score": 200, "firstCustomer": "Ada", "customers": 2, "legacyPaired": "Grace"}
       ]
       """
 

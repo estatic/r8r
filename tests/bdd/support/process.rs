@@ -42,6 +42,9 @@ pub fn base_env(user_folder: &Path) -> BTreeMap<String, String> {
     // must be told that's allowed. The SSRF feature clears this.
     env.insert("R8R_SSRF_ALLOWED_HOSTS".into(), "127.0.0.1,localhost".into());
     env.insert("TZ".into(), "UTC".into());
+    // n8n's task broker defaults to port 5679; give every process its own
+    // so parallel scenarios don't collide.
+    env.insert("N8N_RUNNERS_BROKER_PORT".into(), free_port().to_string());
     env.insert("GENERIC_TIMEZONE".into(), "UTC".into());
     env
 }

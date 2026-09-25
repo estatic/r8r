@@ -223,6 +223,13 @@ async fn run_matches(w: &mut R8rWorld, step: &Step) {
     assert_matches(&expected, w.run(), Mode::Subset).unwrap_or_else(|e| panic!("{e}\nexecution:\n{}", pretty(w.run())));
 }
 
+#[then(expr = "run {int} of the node {string} took less than {int} ms")]
+async fn run_took_less(w: &mut R8rWorld, run: usize, node: String, ms: i64) {
+    let runs = w.node_runs(&node);
+    let t = runs.get(run).and_then(|r| r["executionTime"].as_i64()).unwrap_or(i64::MAX);
+    assert!(t < ms, "run {run} of \"{node}\" took {t} ms");
+}
+
 #[then(expr = "run {int} of the node {string} took at least {int} ms")]
 async fn run_took(w: &mut R8rWorld, run: usize, node: String, ms: i64) {
     let runs = w.node_runs(&node);

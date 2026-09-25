@@ -37,7 +37,7 @@ async fn evaluate(w: &mut R8rWorld, expression: String) {
 
 #[when(expr = "I evaluate the expression:")]
 async fn evaluate_block(w: &mut R8rWorld, step: &Step) {
-    w.expr.expression = Some(docstring(step).trim_end().to_string());
+    w.expr.expression = Some(docstring(step).trim().to_string());
     run_expression(w).await;
 }
 
@@ -112,6 +112,28 @@ async fn results_each(w: &mut R8rWorld, expected: String) {
     let expected = parse_strict(&expected, "expected results");
     let actual: Vec<Value> = results(w).iter().map(|i| i.get("result").cloned().unwrap_or(Value::Null)).collect();
     assert_matches(&expected, &Value::Array(actual), Mode::Exact).unwrap_or_else(|e| panic!("{e}"));
+}
+
+/// Either outcome denies the escape: the expression errors, or it evaluates
+/// to "blocked" (the scenario's own catch branch).
+#[then(expr = "the expression is blocked")]
+async fn blocked(w: &mut R8rWorld) {
+    let status = w.run()["status"].as_str().unwrap_or("").to_string();
+    if status == "error" {
+        return;
+    }
+    let items = results(w);
+    let actual = items.first().and_then(|i| i.get("result")).cloned().unwrap_or(Value::Null);
+    assert_eq!(actual, json!("blocked"), "the expression was not blocked");
+}
+
+/// Time the "Expression" node ran, from its run data (process start-up
+/// excluded).
+#[then(expr = "the expression was stopped within {int} ms")]
+async fn stopped_within(w: &mut R8rWorld, ms: i64) {
+    fails(w).await;
+    let t = w.node_runs("Expression").last().and_then(|r| r["executionTime"].as_i64()).unwrap_or(i64::MAX);
+    assert!(t <= ms, "the expression ran for {t} ms");
 }
 
 #[then(expr = "the expression fails")]

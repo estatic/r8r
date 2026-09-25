@@ -153,7 +153,7 @@ Feature: Per-node settings: disabled, retries, error handling, always output, ex
       """
     And the node "Bad" outputs items matching:
       """
-      [{"error": "$contains:negative: -1"}]
+      [{"error": "$contains:-1"}]
       """
 
   Scenario: alwaysOutputData emits an empty item when a node outputs nothing

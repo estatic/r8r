@@ -59,6 +59,9 @@ Feature: n8n workflow JSON is a frozen contract
       [{"status": "new"}]
       """
 
+  # n8n 2.35 drops unknown top-level fields on export; the spec requires
+  # r8r to keep them (§4.3 "unknown fields preserved in extra").
+  @beyond-n8n
   Scenario: Import then export preserves every field, including unknown ones
     # Like n8n, export:workflow writes an array even for a single --id.
     Given I successfully run "r8r import:workflow --input=order-flow.json"

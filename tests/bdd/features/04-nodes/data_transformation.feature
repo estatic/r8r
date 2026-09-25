@@ -89,7 +89,7 @@ Feature: Data transformation nodes
     When I execute the workflow
     Then the node "Node" outputs:
       """
-      [{"sku": "x", "order": "A"}, {"sku": "y", "order": "A"}]
+      [{"lines": {"sku": "x"}, "order": "A"}, {"lines": {"sku": "y"}, "order": "A"}]
       """
 
   Scenario: Remove duplicates compared on one field
