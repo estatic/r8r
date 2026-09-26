@@ -22,3 +22,5 @@ Operations:
 ## [2026-09-26] query | AI cluster nodes implemented; BDD 392/392 (default run); updated concepts/bdd-conformance-suite
 
 ## [2026-09-26] query | Queue mode, Python runner, performance work; BDD 397/397 with opt-ins, @perf 3/4; updated concepts/bdd-conformance-suite
+
+## [2026-09-26] query | PostgreSQL storage (DB_TYPE=postgresdb); BDD 397/397 on SQLite and on PostgreSQL; updated concepts/bdd-conformance-suite

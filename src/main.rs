@@ -52,7 +52,7 @@ async fn start_server() -> anyhow::Result<()> {
         &r8r::logging::LogOptions { level: Some(config.log_level.clone()), json: config.log_format == "json" },
     )?;
 
-    let database_url = config.database_url.clone();
+    let database_url = config.legacy_database_url.clone();
     if let Some(parent) = database_url.strip_prefix("sqlite:").map(|p| std::path::Path::new(p.split('?').next().unwrap_or(p)).to_path_buf()).and_then(|p| p.parent().map(|d| d.to_path_buf())) {
         if !parent.as_os_str().is_empty() {
             std::fs::create_dir_all(&parent).ok();
@@ -76,7 +76,7 @@ async fn start_server() -> anyhow::Result<()> {
     for line in r8r::logging::startup_summary(&r8r::logging::StartupInfo {
         version: env!("CARGO_PKG_VERSION").to_string(),
         port,
-        database_url: database_url.clone(),
+        database_url: config.database_url.clone(),
         open_registration,
         node_types: registry.type_names().len(),
         log_file: log_file.clone(),

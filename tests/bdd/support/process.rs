@@ -46,6 +46,17 @@ pub fn base_env(user_folder: &Path) -> BTreeMap<String, String> {
     // so parallel scenarios don't collide.
     env.insert("N8N_RUNNERS_BROKER_PORT".into(), free_port().to_string());
     env.insert("GENERIC_TIMEZONE".into(), "UTC".into());
+    // R8R_BDD_STORAGE=postgres runs every scenario on PostgreSQL storage,
+    // each in its own schema (derived from the scenario's folder).
+    if std::env::var("R8R_BDD_STORAGE").is_ok_and(|s| s == "postgres") {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        user_folder.hash(&mut h);
+        let url = std::env::var("R8R_BDD_POSTGRES_URL").unwrap_or_else(|_| "postgres://postgres:postgres@127.0.0.1:5432/postgres".into());
+        env.insert("DB_TYPE".into(), "postgresdb".into());
+        env.insert("R8R_DATABASE_URL".into(), url);
+        env.insert("DB_POSTGRESDB_SCHEMA".into(), format!("bdd_{:016x}", h.finish()));
+    }
     env
 }
 

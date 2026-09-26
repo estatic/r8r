@@ -10,7 +10,11 @@ pub struct Config {
     pub encryption_key: String,
     pub port: u16,
     pub listen_address: String,
+    /// `sqlite:...` or, with `DB_TYPE=postgresdb`, `postgres://...`.
     pub database_url: String,
+    /// The legacy `/rest/r8r` API keeps its tables in SQLite whatever
+    /// `DB_TYPE` says.
+    pub legacy_database_url: String,
     pub executions_mode: String,
     pub db_type: String,
     pub log_level: String,
@@ -114,10 +118,11 @@ impl Config {
             Some(v) => v.parse().map_err(|_| err("R8R_EXPRESSION_TIMEOUT_MS", format!("expected milliseconds, got \"{v}\"")))?,
         };
         let n8n_dir = user_folder.join(".n8n");
-        let database_url = var("DATABASE_URL").unwrap_or_else(|| {
+        let sqlite_url = var("DATABASE_URL").filter(|u| u.starts_with("sqlite:")).unwrap_or_else(|| {
             let file = var("DB_SQLITE_DATABASE").map(PathBuf::from).unwrap_or_else(|| n8n_dir.join("database.sqlite"));
             format!("sqlite:{}", file.display())
         });
+        let database_url = if db_type == "postgresdb" { postgres_url()? } else { sqlite_url.clone() };
         let encryption_key = match var("N8N_ENCRYPTION_KEY") {
             Some(k) => k,
             None => load_or_create_key(&n8n_dir).map_err(|e| err("N8N_ENCRYPTION_KEY", e.to_string()))?,
@@ -127,6 +132,7 @@ impl Config {
             port,
             listen_address: var("N8N_LISTEN_ADDRESS").unwrap_or_else(|| "0.0.0.0".into()),
             database_url,
+            legacy_database_url: sqlite_url,
             executions_mode,
             db_type,
             log_level,
@@ -174,6 +180,34 @@ impl Config {
             ("R8R_EXPRESSION_TIMEOUT_MS", self.expression_timeout_ms.to_string()),
         ]
     }
+}
+
+/// The PostgreSQL URL: `R8R_DATABASE_URL`, or n8n's `DB_POSTGRESDB_HOST`,
+/// `_PORT`, `_DATABASE`, `_USER`, `_PASSWORD` (the schema comes from
+/// `DB_POSTGRESDB_SCHEMA` when the store connects).
+fn postgres_url() -> Result<String, ConfigError> {
+    if let Some(url) = var("R8R_DATABASE_URL") {
+        if !(url.starts_with("postgres://") || url.starts_with("postgresql://")) {
+            return Err(err("R8R_DATABASE_URL", "expected a postgres:// URL when DB_TYPE=postgresdb"));
+        }
+        return Ok(url);
+    }
+    let enc = |s: String| -> String {
+        s.bytes()
+            .map(|b| match b {
+                b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => (b as char).to_string(),
+                _ => format!("%{b:02X}"),
+            })
+            .collect()
+    };
+    let host = var("DB_POSTGRESDB_HOST").unwrap_or_else(|| "localhost".into());
+    let port = var("DB_POSTGRESDB_PORT").unwrap_or_else(|| "5432".into());
+    port.parse::<u16>().map_err(|_| err("DB_POSTGRESDB_PORT", format!("expected a port number, got \"{port}\"")))?;
+    let database = var("DB_POSTGRESDB_DATABASE").unwrap_or_else(|| "n8n".into());
+    let user = var("DB_POSTGRESDB_USER").unwrap_or_else(|| "postgres".into());
+    let password = var("DB_POSTGRESDB_PASSWORD").unwrap_or_default();
+    let ssl = if var("DB_POSTGRESDB_SSL_ENABLED").as_deref() == Some("true") { "?sslmode=require" } else { "" };
+    Ok(format!("postgres://{}:{}@{host}:{port}/{}{ssl}", enc(user), enc(password), enc(database)))
 }
 
 fn load_or_create_key(n8n_dir: &std::path::Path) -> anyhow::Result<String> {

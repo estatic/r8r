@@ -156,9 +156,6 @@ impl N8n {
         } else {
             None
         };
-        if config.db_type == "postgresdb" {
-            tracing::warn!("DB_TYPE=postgresdb: workflows and executions are still stored in SQLite ({}); PostgreSQL storage is not implemented yet", crate::logging::redact_url(&config.database_url));
-        }
         let state = Arc::new_cyclic(|weak: &std::sync::Weak<N8n>| {
             let mut services = Services::new(config.clone(), Some(store.clone()));
             services.sub_workflows = Some(Arc::new(runner::SubRunner(weak.clone())));
