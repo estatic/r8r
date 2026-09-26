@@ -84,11 +84,22 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
-    /// Migrates an n8n database so r8r can use it.
+    /// Imports an n8n database (SQLite or PostgreSQL) into r8r's. The n8n
+    /// database is only read. Use the n8n instance's N8N_ENCRYPTION_KEY.
     #[command(name = "migrate-from-n8n")]
     MigrateFromN8n {
+        /// `sqlite:<path>`, a path, or a `postgres://` URL.
         #[arg(long)]
         db: String,
+        /// PostgreSQL schema of the n8n tables (default: public).
+        #[arg(long)]
+        schema: Option<String>,
+        /// n8n's DB_TABLE_PREFIX, if it used one.
+        #[arg(long, default_value = "")]
+        table_prefix: String,
+        /// Leave the execution history behind.
+        #[arg(long)]
+        skip_executions: bool,
     },
 }
 
@@ -204,13 +215,11 @@ async fn run_inner(command: Command) -> anyhow::Result<i32> {
             write_output(output.as_ref(), &Value::Array(list), pretty)?;
             Ok(0)
         }
-        Command::MigrateFromN8n { db } => {
-            let path = db.trim_start_matches("sqlite://").trim_start_matches("sqlite:");
-            let bytes = std::fs::read(path).map_err(|e| anyhow::anyhow!("cannot read the n8n database {path}: {e}"))?;
-            if !bytes.starts_with(b"SQLite format 3\0") {
-                anyhow::bail!("{path} is not an n8n SQLite database");
-            }
-            anyhow::bail!("migrating {path} from n8n is not implemented yet (roadmap Phase 3)")
+        Command::MigrateFromN8n { db, schema, table_prefix, skip_executions } => {
+            let config = Config::load()?;
+            let report = crate::n8n::migrate::run(&config, crate::n8n::migrate::Options { db, schema, table_prefix, skip_executions }).await?;
+            print!("{report}");
+            Ok(0)
         }
         Command::Execute { id, file, raw_output } => execute(id, file, raw_output).await,
     }

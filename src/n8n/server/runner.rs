@@ -30,6 +30,9 @@ pub struct RunRequest {
     /// Run in this process even in queue mode (workers, and executions that
     /// need a live connection back to the caller).
     pub local: bool,
+    /// The execution's resume token (`?signature=` of its resume URLs), kept
+    /// when a paused execution continues.
+    pub resume_token: Option<String>,
 }
 
 impl RunRequest {
@@ -49,6 +52,7 @@ impl RunRequest {
             parent_execution: None,
             resume: None,
             local: false,
+            resume_token: None,
         }
     }
 
@@ -67,6 +71,7 @@ impl RunRequest {
             "retryOf": self.retry_of,
             "parentExecution": self.parent_execution,
             "startedAt": self.resume.as_ref().and_then(|r| r.1.clone()),
+            "resumeToken": self.resume_token,
         })
     }
 
@@ -82,6 +87,7 @@ impl RunRequest {
         req.retry_of = job["retryOf"].as_str().map(String::from);
         req.parent_execution = job["parentExecution"].as_str().map(String::from);
         req.resume = Some((id, job["startedAt"].as_str().map(String::from)));
+        req.resume_token = job["resumeToken"].as_str().map(String::from);
         req.local = true;
         Ok(req)
     }
@@ -178,6 +184,12 @@ impl RunOutcome {
 pub struct RunHandle {
     pub execution_id: i64,
     pub done: tokio::sync::oneshot::Receiver<Arc<RunOutcome>>,
+}
+
+/// 32 random bytes as hex, like n8n's resume tokens.
+pub fn new_resume_token() -> String {
+    let bytes: [u8; 32] = rand::random();
+    hex::encode(bytes)
 }
 
 pub fn mode_from_str(s: &str) -> Mode {
@@ -321,7 +333,10 @@ async fn start_inner(n8n: &Arc<N8n>, req: RunRequest) -> anyhow::Result<RunHandl
     options.previous_run_data = req.previous_run_data;
     options.start_source = req.start_source;
     options.response = req.response;
-    options.resume_signature = Some(n8n.resume_signature(&exec_str));
+    // Like n8n, each execution gets a random token that its resume URLs
+    // carry as `?signature=`; it is stored with the execution's data.
+    let resume_token = req.resume_token.clone().unwrap_or_else(new_resume_token);
+    options.resume_signature = Some(resume_token.clone());
     options.hooks = Some(Arc::new(PushHooks {
         n8n: Arc::downgrade(n8n),
         push_ref: req.push_ref.clone(),
@@ -371,6 +386,7 @@ async fn start_inner(n8n: &Arc<N8n>, req: RunRequest) -> anyhow::Result<RunHandl
         if let Some(started) = &started_at {
             irun["startedAt"] = json!(started);
         }
+        irun["data"]["resumeToken"] = json!(resume_token);
         let started = irun["startedAt"].as_str().unwrap_or_default().to_string();
         let stopped = irun["stoppedAt"].as_str().map(String::from);
         let saved = should_save(&workflow_json, mode, &status_);
@@ -493,6 +509,7 @@ pub async fn resume(n8n: &Arc<N8n>, id: i64, items: Option<Vec<Item>>) -> Result
     req.previous_run_data = Some(run_data);
     req.retry_of = row.retry_of.clone();
     req.resume = Some((id, Some(row.started_at.clone())));
+    req.resume_token = row.data.as_ref().and_then(|d| d["resumeToken"].as_str()).map(String::from);
     Ok(start(n8n, req).await?)
 }
 

@@ -93,6 +93,16 @@ parameters are typed INT4 (so the statement cache is off and COALESCE on
 a parameter is avoided), nullable columns need unchecked reads, and new
 row ids come from `lastval()` / `last_insert_rowid()`.
 
+`r8r migrate-from-n8n` (spec goal G3) imports an n8n 1.x/2.x database,
+SQLite or PostgreSQL, read-only: users with their bcrypt passwords, API
+keys (r8r stores their hash), team projects, workflows (the published
+version of active ones), tags, credentials still encrypted, variables and
+executions (n8n's "flatted" data unpacked). r8r adopted n8n's per-execution
+resume tokens, so waiting executions resume from the URLs n8n issued. Its
+scenarios run on a SQL dump of a real n8n 2.35.7 database
+(`tests/bdd/fixtures/n8n-2.35-sqlite.sql`): 403/403 on SQLite and on
+PostgreSQL storage. User guide: `docs/migrating-from-n8n.md`.
+
 ## Where this fits
 
 - [[n8n-in-rust-reimplementation-spec]]

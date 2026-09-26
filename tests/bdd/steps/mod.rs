@@ -8,6 +8,7 @@ pub mod credentials;
 pub mod execution;
 pub mod expressions;
 pub mod http;
+pub mod migrate;
 pub mod mocks;
 pub mod perf;
 pub mod push;

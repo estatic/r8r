@@ -268,6 +268,8 @@ impl N8n {
         }
     }
 
+    /// The resume signature of executions paused before per-execution
+    /// resume tokens were stored.
     pub fn resume_signature(&self, execution_id: &str) -> String {
         use hmac::Mac;
         let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(self.config.encryption_key.as_bytes()).expect("any key length");

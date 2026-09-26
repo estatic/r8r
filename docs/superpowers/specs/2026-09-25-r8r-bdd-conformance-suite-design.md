@@ -187,6 +187,7 @@ listed in `tests/bdd/README.md` so the team can confirm or change them:
 | r8r with queue mode and the Python runner, opt-ins included (`@requires-redis`, `@requires-postgres`, `@requires-python-runner`, `@slow`) | 397 | 397 |
 | r8r, `@perf` (release build, 4 cores shared with the load generator) | 4 | 3 (webhook p99 ~18–25 ms vs the 15 ms target) |
 | r8r on PostgreSQL storage (`R8R_BDD_STORAGE=postgres`, opt-ins included) | 397 | 397 |
+| r8r with `migrate-from-n8n` (SQLite and PostgreSQL storage, opt-ins included) | 403 | 403 on each |
 | n8n 2.35.7, all n8n-applicable scenarios (excl. `@beyond-n8n`, `@n8n-licensed`, `@r8r-only`, `@perf`, `@slow`, `@requires-*`) | 358 | 358 |
 
 The opt-in scenarios run with local services: Redis and PostgreSQL for
