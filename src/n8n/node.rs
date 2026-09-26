@@ -146,6 +146,9 @@ pub struct RunState {
     pub custom_data: Map<String, Value>,
     pub static_data: Value,
     pub console: Vec<String>,
+    /// Runs of sub-nodes (AI models, tools, memory) made by the running
+    /// root node, recorded in run data under the sub-node's name.
+    pub sub_runs: Vec<(String, Value)>,
 }
 
 pub struct ExecCtx<'a> {
@@ -226,6 +229,17 @@ impl<'a> ExecCtx<'a> {
         ev.resolve(raw).map_err(|e| NodeError::from(e).at(item))
     }
 
+    /// Resolves expressions in any value (e.g. a sub-node's parameters) in
+    /// this node's context, for item `item`.
+    pub fn resolve_value(&self, raw: &Value, item: usize) -> NodeResult<Value> {
+        if !contains_expression(raw) {
+            return Ok(raw.clone());
+        }
+        let ev = self.evaluator()?;
+        ev.set_item(item).map_err(|e| NodeError::from(e).at(item))?;
+        ev.resolve(raw).map_err(|e| NodeError::from(e).at(item))
+    }
+
     pub fn param_str(&self, path: &str, item: usize, default: &str) -> NodeResult<String> {
         Ok(match self.param(path, item)? {
             Value::Null => default.to_string(),
@@ -265,11 +279,16 @@ impl<'a> ExecCtx<'a> {
 
     /// Decrypted data of the credential the node has for `cred_type`.
     pub async fn credentials(&self, cred_type: &str) -> NodeResult<(String, Value)> {
-        let reference = self
-            .node
+        self.credentials_for(self.node, cred_type).await
+    }
+
+    /// Decrypted data of the credential `node` (e.g. a sub-node) has for
+    /// `cred_type`.
+    pub async fn credentials_for(&self, node: &Node, cred_type: &str) -> NodeResult<(String, Value)> {
+        let reference = node
             .credentials
             .get(cred_type)
-            .ok_or_else(|| NodeError::new(format!("Node \"{}\" does not have any credentials of type \"{cred_type}\" set", self.node.name)))?;
+            .ok_or_else(|| NodeError::new(format!("Node \"{}\" does not have any credentials of type \"{cred_type}\" set", node.name)))?;
         let id = reference["id"].as_str().map(String::from).unwrap_or_default();
         let store = self.services.store.as_ref().ok_or_else(|| NodeError::new("Credentials are not available in this mode"))?;
         let record = match store.get_credential(&id).await.map_err(|e| NodeError::new(e.to_string()))? {

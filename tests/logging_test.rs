@@ -152,7 +152,7 @@ async fn api_requests_are_logged_at_debug_with_method_path_and_status() {
         execution_events: tokio::sync::broadcast::channel(16).0,
         open_registration: false,
     };
-    let path = format!("/rest/executions/{}", Uuid::new_v4());
+    let path = format!("/rest/r8r/executions/{}", Uuid::new_v4());
     let response = r8r::api::build_router(state)
         .oneshot(Request::builder().uri(&path).body(Body::empty()).unwrap())
         .await
@@ -198,12 +198,12 @@ async fn logs_login_outcomes_without_the_password() {
     let email = format!("{}@example.com", Uuid::new_v4());
     let creds = |pw: &str| serde_json::json!({"email": email, "password": pw});
 
-    assert_eq!(post_json(app.clone(), "/rest/auth/register", creds("right-pass-123")).await, StatusCode::CREATED);
-    assert_eq!(post_json(app.clone(), "/rest/auth/login", creds("wrong-pass-456")).await, StatusCode::UNAUTHORIZED);
-    assert_eq!(post_json(app.clone(), "/rest/auth/login", creds("right-pass-123")).await, StatusCode::OK);
+    assert_eq!(post_json(app.clone(), "/rest/r8r/auth/register", creds("right-pass-123")).await, StatusCode::CREATED);
+    assert_eq!(post_json(app.clone(), "/rest/r8r/auth/login", creds("wrong-pass-456")).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(post_json(app.clone(), "/rest/r8r/auth/login", creds("right-pass-123")).await, StatusCode::OK);
     let unknown = format!("{}@example.com", Uuid::new_v4());
     let unknown_body = serde_json::json!({"email": unknown, "password": "x"});
-    assert_eq!(post_json(app, "/rest/auth/login", unknown_body).await, StatusCode::UNAUTHORIZED);
+    assert_eq!(post_json(app, "/rest/r8r/auth/login", unknown_body).await, StatusCode::UNAUTHORIZED);
 
     let lines = lines_mentioning(&email);
     assert!(lines.iter().any(|l| l.contains("user registered") && l.contains("INFO")), "{lines:?}");

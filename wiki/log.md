@@ -18,3 +18,5 @@ Operations:
 ## [2026-09-26] compact | auto compaction (summary text unavailable)
 
 ## [2026-09-26] query | Phase 2 server implemented; BDD 387/392 (phase 1 223/223, phase 2 123/123); updated concepts/bdd-conformance-suite
+
+## [2026-09-26] query | AI cluster nodes implemented; BDD 392/392 (default run); updated concepts/bdd-conformance-suite

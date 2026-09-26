@@ -183,6 +183,7 @@ listed in `tests/bdd/README.md` so the team can confirm or change them:
 | Current r8r (`claude/elegant-archimedes-u5hrus`, 2026-09-25, before Phase 1) | 393 | 0 |
 | r8r after the Phase 1 core (`src/n8n`, CLI) | 392 | 258 (phase 1: 222/223) |
 | r8r after the Phase 2 server (`src/n8n/server`) | 392 | 387 (phase 1: 223/223, phase 2: 123/123) |
+| r8r after the AI nodes (`src/n8n/nodes/ai.rs`) | 392 | 392 |
 | n8n 2.35.7, all n8n-applicable scenarios (excl. `@beyond-n8n`, `@n8n-licensed`, `@r8r-only`, `@perf`, `@slow`, `@requires-*`) | 358 | 358 |
 
 Not run anywhere yet: the opt-in `@perf` (4), `@slow` (1),
@@ -201,6 +202,7 @@ What makes the r8r column move, in order:
    webhooks, credentials and push; and so on.
 
 `cargo test --test bdd -- --tags @phase-1` is the Phase 1 exit gate in
-executable form; `--tags @phase-2` is Phase 2's. After Phase 2 the only
-failing scenarios are the five in `10-ai/agents.feature` (LLM chain,
-agent, tools, memory), which need the LangChain-style AI nodes.
+executable form; `--tags @phase-2` is Phase 2's. With the AI nodes
+(Agent, Basic LLM Chain, OpenAI chat model, Calculator tool, Simple
+Memory) every default-run scenario passes; the opt-in tags above are
+what is left to run.

@@ -96,6 +96,9 @@ const DESCRIPTIONS: &[Desc] = &[
     d("n8n-nodes-base.discord", "Discord", "output", &[2.0], "Sends data to Discord", 1, 1, &["resource", "operation", "content", "options"], &["discordBotApi", "discordWebhookApi"]),
     d("@n8n/n8n-nodes-langchain.openAi", "OpenAI", "transform", &[1.0, 1.8], "Message an assistant or GPT, analyze images, generate audio, etc.", 1, 1, &["resource", "operation", "modelId", "messages", "options"], &["openAiApi"]),
     d("@n8n/n8n-nodes-langchain.agent", "AI Agent", "transform", &[1.0, 1.9, 2.0], "Generates an action plan and executes it. Can use external tools.", 1, 1, &["promptType", "text", "options"], &[]),
+    d("@n8n/n8n-nodes-langchain.chainLlm", "Basic LLM Chain", "transform", &[1.0, 1.5, 1.7], "A simple chain to prompt a large language model", 1, 1, &["promptType", "text", "messages"], &[]),
+    d("@n8n/n8n-nodes-langchain.toolCalculator", "Calculator", "transform", &[1.0], "Make it easier for AI agents to perform arithmetic", 0, 1, &[], &[]),
+    d("@n8n/n8n-nodes-langchain.memoryBufferWindow", "Simple Memory", "transform", &[1.0, 1.3], "Stores in n8n memory, so no credentials required", 0, 1, &["sessionIdType", "sessionKey", "contextWindowLength"], &[]),
     d("@n8n/n8n-nodes-langchain.lmChatOpenAi", "OpenAI Chat Model", "transform", &[1.0, 1.2], "For advanced usage with an AI chain", 0, 1, &["model", "options"], &["openAiApi"]),
 ];
 

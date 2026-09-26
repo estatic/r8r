@@ -323,6 +323,14 @@ pub async fn execute(
             }
         };
 
+        // Sub-node runs (AI models, tools) made by this node come first.
+        let sub_runs = std::mem::take(&mut run_state.lock().unwrap().sub_runs);
+        for (sub, mut task) in sub_runs {
+            task["executionIndex"] = json!(execution_index);
+            execution_index += 1;
+            let runs = run_data.entry(sub).or_insert_with(|| Value::Array(vec![]));
+            runs.as_array_mut().unwrap().push(task);
+        }
         let task_end = now_ms();
         execution_index += 1;
         let source = entry.source.clone();

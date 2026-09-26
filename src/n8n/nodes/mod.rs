@@ -1,5 +1,6 @@
 //! Native node implementations (spec §6.6), keyed by n8n type name.
 
+mod ai;
 mod code;
 mod conditions;
 mod core;
@@ -55,6 +56,9 @@ impl Default for Registry {
             r.add(n);
         }
         for n in utility::all() {
+            r.add(n);
+        }
+        for n in ai::all() {
             r.add(n);
         }
         for n in server_nodes::all() {

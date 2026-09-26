@@ -69,7 +69,13 @@ After the Phase 2 server landed (`src/n8n/server`: editor REST API and
 response modes and auth, forms, signed resume URLs, schedules, push,
 error workflows, sub-workflows, save policies, crash recovery, graceful
 shutdown, health and metrics), 387 of 392 pass: every phase-1 and
-phase-2 scenario. The five left are the AI-node scenarios.
+phase-2 scenario. The five left were the AI-node scenarios.
+
+With the AI cluster nodes (`src/n8n/nodes/ai.rs`: AI Agent with tool
+calling and max iterations, Basic LLM Chain, OpenAI chat model with token
+usage in run data, Calculator tool, window buffer memory), all 392
+default-run scenarios pass. Still unrun: the opt-in `@perf`, `@slow` and
+`@requires-*` scenarios.
 
 ## Where this fits
 
