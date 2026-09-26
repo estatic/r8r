@@ -19,7 +19,10 @@ async fn main() -> anyhow::Result<()> {
             // CLI output (e.g. `execute --rawOutput`) owns stdout; logs go to stderr.
             let _ = tracing_subscriber::fmt()
                 .with_writer(std::io::stderr)
-                .with_env_filter(tracing_subscriber::EnvFilter::new(std::env::var("RUST_LOG").unwrap_or_else(|_| "warn".into())))
+                .with_env_filter(tracing_subscriber::EnvFilter::new(std::env::var("RUST_LOG").unwrap_or_else(|_| {
+                    // Long-running queue processes log like the server; one-shot commands stay quiet.
+                    if matches!(command, r8r::cli::Command::Worker { .. } | r8r::cli::Command::Webhook) { "r8r=info,warn".into() } else { "warn".into() }
+                })))
                 .try_init();
             std::process::exit(r8r::cli::run(command).await);
         }
@@ -125,7 +128,7 @@ async fn start_server() -> anyhow::Result<()> {
         .map_err(|e| anyhow::anyhow!("cannot listen on port {port}: {e} (set PORT to use another port)"))?;
     tracing::info!("r8r ready on http://localhost:{port}");
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(r8r::n8n::server::shutdown_signal())
         .await?;
     // Let running executions finish (N8N_GRACEFUL_SHUTDOWN_TIMEOUT, as n8n).
     let grace = std::env::var("N8N_GRACEFUL_SHUTDOWN_TIMEOUT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(30);
@@ -134,24 +137,3 @@ async fn start_server() -> anyhow::Result<()> {
     Ok(())
 }
 
-async fn shutdown_signal() {
-    let ctrl_c = async {
-        let _ = tokio::signal::ctrl_c().await;
-    };
-    #[cfg(unix)]
-    let term = async {
-        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-            Ok(mut s) => {
-                s.recv().await;
-            }
-            Err(_) => std::future::pending::<()>().await,
-        }
-    };
-    #[cfg(not(unix))]
-    let term = std::future::pending::<()>();
-    tokio::select! {
-        _ = ctrl_c => {},
-        _ = term => {},
-    }
-    tracing::info!("shutdown requested, finishing in-flight requests and executions");
-}

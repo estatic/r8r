@@ -74,8 +74,16 @@ phase-2 scenario. The five left were the AI-node scenarios.
 With the AI cluster nodes (`src/n8n/nodes/ai.rs`: AI Agent with tool
 calling and max iterations, Basic LLM Chain, OpenAI chat model with token
 usage in run data, Calculator tool, window buffer memory), all 392
-default-run scenarios pass. Still unrun: the opt-in `@perf`, `@slow` and
-`@requires-*` scenarios.
+default-run scenarios pass.
+
+Queue mode (`r8r worker`, `r8r webhook`; Redis or PostgreSQL job queue
+with leases and heartbeats) and the Python runner then made every opt-in
+scenario pass too: 397/397 with `@requires-*` and `@slow`. Of the `@perf`
+scenarios 3/4 pass; the webhook p99 under load (~18–25 ms against a 15 ms
+target) was measured with the load generator on the same 4 cores. The
+performance work behind it: pooled expression VMs, lazy run data in the
+VM, SQLite WAL with one writer and group commit, and a separate runtime
+for executions.
 
 ## Where this fits
 

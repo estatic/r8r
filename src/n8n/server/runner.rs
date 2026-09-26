@@ -24,8 +24,12 @@ pub struct RunRequest {
     pub response: Option<ResponseSlot>,
     pub retry_of: Option<String>,
     pub parent_execution: Option<String>,
-    /// Continue this (waiting) execution, started at this time.
-    pub resume: Option<(i64, String)>,
+    /// Run under this existing execution row (a resumed wait, or a job a
+    /// worker took), keeping its start time when given.
+    pub resume: Option<(i64, Option<String>)>,
+    /// Run in this process even in queue mode (workers, and executions that
+    /// need a live connection back to the caller).
+    pub local: bool,
 }
 
 impl RunRequest {
@@ -44,8 +48,100 @@ impl RunRequest {
             retry_of: None,
             parent_execution: None,
             resume: None,
+            local: false,
         }
     }
+
+    /// The job a worker runs for this request (queue mode).
+    fn to_job(&self, execution_id: i64) -> Value {
+        json!({
+            "executionId": execution_id,
+            "workflow": self.workflow,
+            "mode": self.mode.as_str(),
+            "startItems": self.start_items,
+            "startNode": self.start_node,
+            "destinationNode": self.destination_node,
+            "previousRunData": self.previous_run_data,
+            "startSource": self.start_source,
+            "usePinData": self.use_pin_data,
+            "retryOf": self.retry_of,
+            "parentExecution": self.parent_execution,
+            "startedAt": self.resume.as_ref().and_then(|r| r.1.clone()),
+        })
+    }
+
+    fn from_job(job: &Value) -> anyhow::Result<Self> {
+        let id = job["executionId"].as_i64().ok_or_else(|| anyhow::anyhow!("job without an execution id"))?;
+        let mut req = RunRequest::new(job["workflow"].clone(), mode_from_str(job["mode"].as_str().unwrap_or("webhook")));
+        req.start_items = serde_json::from_value(job["startItems"].clone()).ok().flatten();
+        req.start_node = job["startNode"].as_str().map(String::from);
+        req.destination_node = job["destinationNode"].as_str().map(String::from);
+        req.previous_run_data = job["previousRunData"].as_object().cloned();
+        req.start_source = serde_json::from_value(job["startSource"].clone()).ok().flatten();
+        req.use_pin_data = job["usePinData"].as_bool().unwrap_or(false);
+        req.retry_of = job["retryOf"].as_str().map(String::from);
+        req.parent_execution = job["parentExecution"].as_str().map(String::from);
+        req.resume = Some((id, job["startedAt"].as_str().map(String::from)));
+        req.local = true;
+        Ok(req)
+    }
+}
+
+/// Whether a request goes to the queue in queue mode. Editor runs and
+/// sub-workflows stay in the calling process (as in n8n), and so does
+/// anything that must answer a waiting HTTP caller from inside the run.
+fn queueable(req: &RunRequest) -> bool {
+    !req.local && req.response.is_none() && matches!(req.mode, Mode::Webhook | Mode::Trigger | Mode::Error | Mode::Retry)
+}
+
+/// Queue mode: records the execution as `new`, enqueues it, and follows
+/// its row until a worker has finished it.
+async fn enqueue(n8n: &Arc<N8n>, queue: &Arc<dyn crate::n8n::queue::Queue>, req: RunRequest) -> anyhow::Result<RunHandle> {
+    let execution_id = match &req.resume {
+        Some((id, _)) => {
+            n8n.store.transition_execution(*id, status::RUNNING, "new").await?;
+            *id
+        }
+        None => n8n.store.insert_execution(&req.workflow, req.mode.as_str(), req.retry_of.as_deref(), req.parent_execution.as_deref(), "new").await?,
+    };
+    queue.push(&req.to_job(execution_id)).await?;
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let store = n8n.store.clone();
+    tokio::spawn(async move {
+        let outcome = loop {
+            match store.get_execution(execution_id).await {
+                Ok(Some(row)) if row.status == "new" || row.status == status::RUNNING => {}
+                Ok(Some(row)) => {
+                    let irun = json!({
+                        "data": row.data.clone().unwrap_or(json!({"resultData": {"runData": {}}})),
+                        "mode": row.mode,
+                        "status": row.status,
+                        "startedAt": row.started_at,
+                        "stoppedAt": row.stopped_at,
+                        "waitTill": row.wait_till,
+                        "finished": row.finished,
+                    });
+                    break RunOutcome { execution_id, status: row.status, irun, saved: true };
+                }
+                // The worker ran it and, by the save policy, didn't keep it.
+                Ok(None) => break RunOutcome { execution_id, status: status::SUCCESS.into(), irun: json!({"data": {"resultData": {"runData": {}}}}), saved: false },
+                Err(_) => {}
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        };
+        let _ = tx.send(Arc::new(outcome));
+    });
+    Ok(RunHandle { execution_id, done: rx })
+}
+
+/// Runs a job taken from the queue (worker side) to completion.
+pub async fn run_job(n8n: &Arc<N8n>, job: &Value) -> anyhow::Result<()> {
+    let req = RunRequest::from_job(job)?;
+    let id = req.resume.as_ref().map(|r| r.0).unwrap_or_default();
+    n8n.store.transition_execution(id, "new", status::RUNNING).await?;
+    let handle = start(n8n, req).await?;
+    let _ = handle.done.await;
+    Ok(())
 }
 
 /// How an execution ended (or paused).
@@ -205,11 +301,16 @@ pub fn start(n8n: &Arc<N8n>, req: RunRequest) -> std::pin::Pin<Box<dyn std::futu
 }
 
 async fn start_inner(n8n: &Arc<N8n>, req: RunRequest) -> anyhow::Result<RunHandle> {
+    if let Some(queue) = &n8n.queue {
+        if queueable(&req) {
+            return enqueue(n8n, queue, req).await;
+        }
+    }
     let workflow = Workflow::from_json(&req.workflow)?;
     let workflow_id = workflow.id.clone().unwrap_or_default();
     let (execution_id, started_at) = match &req.resume {
-        Some((id, started)) => (*id, Some(started.clone())),
-        None => (n8n.store.insert_execution(&req.workflow, req.mode.as_str(), req.retry_of.as_deref(), req.parent_execution.as_deref()).await?, None),
+        Some((id, started)) => (*id, started.clone()),
+        None => (n8n.store.insert_execution(&req.workflow, req.mode.as_str(), req.retry_of.as_deref(), req.parent_execution.as_deref(), status::RUNNING).await?, None),
     };
     let exec_str = execution_id.to_string();
     let mut options = ExecuteOptions::new(req.mode, exec_str.clone());
@@ -391,7 +492,7 @@ pub async fn resume(n8n: &Arc<N8n>, id: i64, items: Option<Vec<Item>>) -> Result
     req.start_source = Some(wait.source.clone());
     req.previous_run_data = Some(run_data);
     req.retry_of = row.retry_of.clone();
-    req.resume = Some((id, row.started_at.clone()));
+    req.resume = Some((id, Some(row.started_at.clone())));
     Ok(start(n8n, req).await?)
 }
 

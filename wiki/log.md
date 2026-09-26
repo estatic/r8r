@@ -20,3 +20,5 @@ Operations:
 ## [2026-09-26] query | Phase 2 server implemented; BDD 387/392 (phase 1 223/223, phase 2 123/123); updated concepts/bdd-conformance-suite
 
 ## [2026-09-26] query | AI cluster nodes implemented; BDD 392/392 (default run); updated concepts/bdd-conformance-suite
+
+## [2026-09-26] query | Queue mode, Python runner, performance work; BDD 397/397 with opt-ins, @perf 3/4; updated concepts/bdd-conformance-suite

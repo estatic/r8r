@@ -184,12 +184,16 @@ listed in `tests/bdd/README.md` so the team can confirm or change them:
 | r8r after the Phase 1 core (`src/n8n`, CLI) | 392 | 258 (phase 1: 222/223) |
 | r8r after the Phase 2 server (`src/n8n/server`) | 392 | 387 (phase 1: 223/223, phase 2: 123/123) |
 | r8r after the AI nodes (`src/n8n/nodes/ai.rs`) | 392 | 392 |
+| r8r with queue mode and the Python runner, opt-ins included (`@requires-redis`, `@requires-postgres`, `@requires-python-runner`, `@slow`) | 397 | 397 |
+| r8r, `@perf` (release build, 4 cores shared with the load generator) | 4 | 3 (webhook p99 ~18–25 ms vs the 15 ms target) |
 | n8n 2.35.7, all n8n-applicable scenarios (excl. `@beyond-n8n`, `@n8n-licensed`, `@r8r-only`, `@perf`, `@slow`, `@requires-*`) | 358 | 358 |
 
-Not run anywhere yet: the opt-in `@perf` (4), `@slow` (1),
-`@requires-redis` (3), `@requires-postgres` (1) and
-`@requires-python-runner` (1) scenarios, which need reference hardware or
-extra services. Their steps are defined and statically checked.
+The opt-in scenarios run with local services: Redis and PostgreSQL for
+`@requires-redis` / `@requires-postgres` (see `R8R_BDD_REDIS_*`,
+`R8R_BDD_POSTGRES_URL`), `python3` for `@requires-python-runner`. The
+`@perf` numbers were measured on a shared 4-core container; the one miss
+(webhook p99 under load) is dominated by the load generator competing for
+the same cores, and should be re-measured on the reference hardware.
 
 What makes the r8r column move, in order:
 

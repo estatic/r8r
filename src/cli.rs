@@ -141,8 +141,13 @@ fn as_list(value: Value) -> Vec<Value> {
 async fn run_inner(command: Command) -> anyhow::Result<i32> {
     match command {
         Command::Start => unreachable!("the server is started by main"),
-        Command::Worker { .. } | Command::Webhook => {
-            anyhow::bail!("queue mode (worker and webhook processes) is not implemented yet (roadmap Phase 4)")
+        Command::Worker { concurrency } => {
+            crate::n8n::server::worker::run_worker(concurrency.unwrap_or(10)).await?;
+            Ok(0)
+        }
+        Command::Webhook => {
+            crate::n8n::server::worker::run_webhook_process().await?;
+            Ok(0)
         }
         Command::Config { action: ConfigAction::Check } => {
             let config = Config::load()?;

@@ -436,14 +436,15 @@ impl Store {
         rx.await.map_err(|_| anyhow::anyhow!("the database writer has stopped"))?.map_err(|e| anyhow::anyhow!(e))
     }
 
-    pub async fn insert_execution(&self, workflow: &Value, mode: &str, retry_of: Option<&str>, parent: Option<&str>) -> anyhow::Result<i64> {
+    pub async fn insert_execution(&self, workflow: &Value, mode: &str, retry_of: Option<&str>, parent: Option<&str>, status: &str) -> anyhow::Result<i64> {
         let (_, id) = self
             .batched(
                 "INSERT INTO execution_entity (workflow_id, mode, status, finished, retry_of, started_at, workflow_data, parent_execution_id)
-                 VALUES (?, ?, 'running', 0, ?, ?, ?, ?)",
+                 VALUES (?, ?, ?, 0, ?, ?, ?, ?)",
                 vec![
                     Bind::Text(workflow.get("id").and_then(Value::as_str).map(String::from)),
                     Bind::Text(Some(mode.to_string())),
+                    Bind::Text(Some(status.to_string())),
                     Bind::Text(retry_of.map(String::from)),
                     Bind::Text(Some(now())),
                     Bind::Text(Some(serde_json::to_string(workflow)?)),

@@ -13,6 +13,7 @@ pub mod expr;
 pub mod node;
 pub mod node_types;
 pub mod nodes;
+pub mod queue;
 pub mod server;
 pub mod store;
 mod store_batch;

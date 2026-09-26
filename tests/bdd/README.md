@@ -35,6 +35,15 @@ R8R_BIN=/path/to/r8r cargo test --test bdd             # test another build
 
 `--tags` replaces the opt-in filter, so `--tags @perf` runs perf scenarios.
 
+Measure `@perf` against a release build, one scenario at a time, and
+with the harness built in release too (its load generator shares the
+machine):
+
+```sh
+cargo build --release
+R8R_BIN=$PWD/target/release/r8r R8R_BDD_CONCURRENCY=1 cargo test --release --test bdd -- --tags @perf
+```
+
 ## How it works
 
 The binary is driven **black-box**; no step imports `r8r::*`. The spec

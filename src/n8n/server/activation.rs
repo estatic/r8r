@@ -183,7 +183,11 @@ pub async fn register(n8n: &Arc<N8n>, workflow_json: &Value) -> Result<(), ApiEr
     let mut cached = workflow_json.clone();
     cached["active"] = json!(true);
     n8n.active.write().unwrap().insert(id.clone(), Arc::new(cached));
-    let handles: Vec<_> = schedules.into_iter().map(|(node, rule)| spawn_rule(n8n, id.clone(), node, tz, rule)).collect();
+    let handles: Vec<_> = if n8n.schedules_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+        schedules.into_iter().map(|(node, rule)| spawn_rule(n8n, id.clone(), node, tz, rule)).collect()
+    } else {
+        Vec::new()
+    };
     n8n.schedules.lock().unwrap().insert(id.clone(), handles);
     tracing::info!(workflowId = %id, "Activated workflow \"{}\"", workflow.name);
     Ok(())

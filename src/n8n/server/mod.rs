@@ -9,6 +9,7 @@ pub mod push;
 pub mod rest;
 pub mod runner;
 pub mod webhooks;
+pub mod worker;
 
 use super::config::Config;
 use super::node::Services;
@@ -53,6 +54,11 @@ pub struct N8n {
     /// Executions run here, apart from the runtime serving HTTP, so CPU-heavy
     /// node work can't hold up requests.
     pub exec: tokio::runtime::Handle,
+    /// Set in queue mode (`EXECUTIONS_MODE=queue`): production executions
+    /// go to workers through it.
+    pub queue: Option<Arc<dyn crate::n8n::queue::Queue>>,
+    /// False in `r8r webhook`, which leaves schedules to the main process.
+    pub schedules_enabled: std::sync::atomic::AtomicBool,
 }
 
 #[derive(Default)]
@@ -143,6 +149,16 @@ impl N8n {
             tokio::runtime::Builder::new_multi_thread().worker_threads(threads.max(1)).thread_name("r8r-exec").enable_all().build()?,
         ));
         let exec = exec_runtime.handle().clone();
+        let queue = if config.executions_mode == "queue" {
+            let q = crate::n8n::queue::connect().await?;
+            tracing::info!("queue mode: executions go through {}", q.describe());
+            Some(q)
+        } else {
+            None
+        };
+        if config.db_type == "postgresdb" {
+            tracing::warn!("DB_TYPE=postgresdb: workflows and executions are still stored in SQLite ({}); PostgreSQL storage is not implemented yet", crate::logging::redact_url(&config.database_url));
+        }
         let state = Arc::new_cyclic(|weak: &std::sync::Weak<N8n>| {
             let mut services = Services::new(config.clone(), Some(store.clone()));
             services.sub_workflows = Some(Arc::new(runner::SubRunner(weak.clone())));
@@ -164,6 +180,8 @@ impl N8n {
                 login_failures: Mutex::new(HashMap::new()),
                 payload_limit,
                 exec,
+                queue,
+                schedules_enabled: std::sync::atomic::AtomicBool::new(true),
             }
         });
         Ok(state)
@@ -171,10 +189,16 @@ impl N8n {
 
     /// Start-up work: crash recovery, reactivation, background timers.
     pub async fn start_background(self: &Arc<Self>) {
-        match self.store.mark_crashed().await {
-            Ok(n) if n > 0 => tracing::warn!("marked {n} execution(s) interrupted by a previous shutdown as crashed"),
-            Ok(_) => {}
-            Err(e) => tracing::error!(error = %e, "crash recovery failed"),
+        // In queue mode running executions belong to workers, whose jobs are
+        // re-leased if they die; only a single process may call them crashed.
+        if self.queue.is_none() {
+            match self.store.mark_crashed().await {
+                Ok(n) if n > 0 => tracing::warn!("marked {n} execution(s) interrupted by a previous shutdown as crashed"),
+                Ok(_) => {}
+                Err(e) => tracing::error!(error = %e, "crash recovery failed"),
+            }
+        } else {
+            self.spawn_requeuer();
         }
         match self.store.workflow_rows().await {
             Ok(rows) => {
@@ -210,6 +234,23 @@ impl N8n {
                 if ticks % 3600 == 1 && env_bool("EXECUTIONS_DATA_PRUNE", true) {
                     let cutoff = chrono::Utc::now() - chrono::Duration::hours(n8n.config.executions_data_max_age_hours as i64);
                     let _ = n8n.store.prune_executions(&cutoff.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)).await;
+                }
+            }
+        });
+    }
+
+    /// Queue mode: puts jobs whose worker stopped heartbeating back in the
+    /// queue.
+    pub fn spawn_requeuer(self: &Arc<Self>) {
+        let Some(queue) = self.queue.clone() else { return };
+        tokio::spawn(async move {
+            let mut tick = tokio::time::interval(queue.lease_duration() / 2);
+            loop {
+                tick.tick().await;
+                match queue.requeue_expired().await {
+                    Ok(n) if n > 0 => tracing::warn!("re-queued {n} job(s) whose worker stopped responding"),
+                    Ok(_) => {}
+                    Err(e) => tracing::warn!(error = %e, "could not check job leases"),
                 }
             }
         });
@@ -325,4 +366,27 @@ pub fn workflow_json(row: &super::store_ext::WorkflowRow, tags: Vec<Value>) -> V
         w["shared"] = json!([{"projectId": p, "role": "workflow:owner"}]);
     }
     w
+}
+
+/// Resolves on SIGTERM or Ctrl-C.
+pub async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let term = async {
+        match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+            Ok(mut s) => {
+                s.recv().await;
+            }
+            Err(_) => std::future::pending::<()>().await,
+        }
+    };
+    #[cfg(not(unix))]
+    let term = std::future::pending::<()>();
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = term => {},
+    }
+    tracing::info!("shutdown requested, finishing in-flight requests and executions");
 }
