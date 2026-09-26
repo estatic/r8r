@@ -41,7 +41,7 @@ pub async fn handle_webhook(
         workflow_id = %workflow.id,
         workflow_name = %workflow.name,
         %method,
-        path = %format!("/webhook/{workflow_id}/{path}"),
+        path = %format!("/webhook-r8r/{workflow_id}/{path}"),
         "webhook received"
     );
     let trigger_item = build_trigger_item(&headers, &query, &body);

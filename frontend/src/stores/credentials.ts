@@ -21,11 +21,11 @@ export const useCredentialsStore = defineStore('credentials', {
   }),
   actions: {
     async fetchAll() {
-      this.credentials = await api.get<CredentialSummary[]>('/rest/credentials')
+      this.credentials = await api.get<CredentialSummary[]>('/rest/r8r/credentials')
       this.loaded = true
     },
     async create(name: string, credentialType: string, data: Record<string, unknown>): Promise<CredentialSummary> {
-      const summary = await api.post<CredentialSummary>('/rest/credentials', {
+      const summary = await api.post<CredentialSummary>('/rest/r8r/credentials', {
         name,
         credential_type: credentialType,
         data,
@@ -35,15 +35,15 @@ export const useCredentialsStore = defineStore('credentials', {
       return withUsage
     },
     async get(id: string): Promise<CredentialDetail> {
-      return api.get<CredentialDetail>(`/rest/credentials/${id}`)
+      return api.get<CredentialDetail>(`/rest/r8r/credentials/${id}`)
     },
     async update(id: string, patch: { name?: string; data?: Record<string, unknown> }): Promise<CredentialSummary> {
-      const summary = await api.patch<CredentialSummary>(`/rest/credentials/${id}`, patch)
+      const summary = await api.patch<CredentialSummary>(`/rest/r8r/credentials/${id}`, patch)
       await this.fetchAll()
       return summary
     },
     async remove(id: string): Promise<void> {
-      await api.delete<void>(`/rest/credentials/${id}`)
+      await api.delete<void>(`/rest/r8r/credentials/${id}`)
       await this.fetchAll()
     },
   },

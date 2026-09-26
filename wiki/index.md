@@ -10,7 +10,7 @@ When this file exceeds ~300 lines or the wiki passes ~150 pages, shard into `wik
 
 ## Sources
 
-(populated as sources are ingested)
+- [[n8n-in-rust-reimplementation-spec]] — target spec for r8r: n8n-compatible Rust rewrite, frozen contracts, goals G1–G6, roadmap.
 
 ## Entities
 
@@ -18,7 +18,7 @@ When this file exceeds ~300 lines or the wiki passes ~150 pages, shard into `wik
 
 ## Concepts
 
-(populated as concept pages are created)
+- [[bdd-conformance-suite]] — black-box cucumber scenarios in `tests/bdd/` that define "behaves like n8n"; harness contracts and status.
 
 ## Synthesis
 

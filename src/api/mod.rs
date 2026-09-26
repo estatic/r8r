@@ -13,37 +13,37 @@ use axum::Router;
 
 pub fn build_router(state: AppState) -> Router {
     let router = Router::new()
-        .route("/rest/auth/register", post(auth::register))
-        .route("/rest/auth/login", post(auth::login))
-        .route("/rest/workflows", post(workflows::create_workflow).get(workflows::list_workflows))
+        .route("/rest/r8r/auth/register", post(auth::register))
+        .route("/rest/r8r/auth/login", post(auth::login))
+        .route("/rest/r8r/workflows", post(workflows::create_workflow).get(workflows::list_workflows))
         .route(
-            "/rest/workflows/:id",
+            "/rest/r8r/workflows/:id",
             get(workflows::get_workflow)
                 .put(workflows::update_workflow)
                 .delete(workflows::delete_workflow),
         )
-        .route("/rest/workflows/:id/execute", post(workflows::execute_workflow))
-        .route("/rest/workflows/:id/active", axum::routing::patch(workflows::set_workflow_active))
-        .route("/rest/workflows/:id/executions", get(executions::list_executions_for_workflow))
+        .route("/rest/r8r/workflows/:id/execute", post(workflows::execute_workflow))
+        .route("/rest/r8r/workflows/:id/active", axum::routing::patch(workflows::set_workflow_active))
+        .route("/rest/r8r/workflows/:id/executions", get(executions::list_executions_for_workflow))
         .route("/ws/workflows/:id/executions", get(executions::subscribe_executions))
-        .route("/rest/credential-types", get(credential_types::list_credential_types))
-        .route("/rest/tools", post(tools::create_tool).get(tools::list_tools))
+        .route("/rest/r8r/credential-types", get(credential_types::list_credential_types))
+        .route("/rest/r8r/tools", post(tools::create_tool).get(tools::list_tools))
         .route(
-            "/rest/tools/:id",
+            "/rest/r8r/tools/:id",
             get(tools::get_tool).patch(tools::update_tool).delete(tools::delete_tool),
         )
-        .route("/rest/node-types", get(node_types::list_node_types))
-        .route("/rest/node-types/:type_name/output-ports", post(node_types::output_ports_for_type))
-        .route("/rest/executions/:id", get(executions::get_execution))
-        .route("/rest/credentials", post(credentials::create_credential).get(credentials::list_credentials))
+        .route("/rest/r8r/node-types", get(node_types::list_node_types))
+        .route("/rest/r8r/node-types/:type_name/output-ports", post(node_types::output_ports_for_type))
+        .route("/rest/r8r/executions/:id", get(executions::get_execution))
+        .route("/rest/r8r/credentials", post(credentials::create_credential).get(credentials::list_credentials))
         .route(
-            "/rest/credentials/:id",
+            "/rest/r8r/credentials/:id",
             get(credentials::get_credential)
                 .patch(credentials::update_credential)
                 .delete(credentials::delete_credential),
         )
         .route(
-            "/webhook/:workflow_id/:path",
+            "/webhook-r8r/:workflow_id/:path",
             axum::routing::get(webhook::handle_webhook).post(webhook::handle_webhook),
         )
         .route("/health", get(|| async { "ok" }))

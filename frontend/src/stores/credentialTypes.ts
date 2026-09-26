@@ -10,7 +10,7 @@ export const useCredentialTypesStore = defineStore('credentialTypes', {
   actions: {
     async fetchAll() {
       if (this.loaded) return
-      this.types = await api.get<CredentialTypeSchema[]>('/rest/credential-types')
+      this.types = await api.get<CredentialTypeSchema[]>('/rest/r8r/credential-types')
       this.loaded = true
     },
   },

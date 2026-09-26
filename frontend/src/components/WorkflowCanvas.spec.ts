@@ -34,7 +34,7 @@ function stubFetch(nodeTypesResponse: unknown = NODE_TYPES, portsResponse: strin
   vi.stubGlobal(
     'fetch',
     vi.fn((url: string) => {
-      if (url === '/rest/node-types') {
+      if (url === '/rest/r8r/node-types') {
         return Promise.resolve({ ok: true, status: 200, json: async () => nodeTypesResponse })
       }
       if (url.includes('/output-ports')) {
@@ -112,7 +112,7 @@ describe('WorkflowCanvas', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((url: string) => {
-        if (url === '/rest/node-types') {
+        if (url === '/rest/r8r/node-types') {
           return Promise.resolve({ ok: true, status: 200, json: async () => NODE_TYPES })
         }
         return Promise.reject(new Error('network error'))

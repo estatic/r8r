@@ -8,7 +8,7 @@ export const useExecutionsStore = defineStore('executions', {
   }),
   actions: {
     async fetchHistory(workflowId: string, limit = 50) {
-      this.history = await api.get<Execution[]>(`/rest/workflows/${workflowId}/executions?limit=${limit}`)
+      this.history = await api.get<Execution[]>(`/rest/r8r/workflows/${workflowId}/executions?limit=${limit}`)
     },
   },
 })

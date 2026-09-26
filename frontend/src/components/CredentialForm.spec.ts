@@ -12,13 +12,13 @@ const SCHEMAS = [
 
 function stub(detail: unknown, onPatch: (body: unknown) => void) {
   vi.stubGlobal('fetch', vi.fn((url: string, options?: RequestInit) => {
-    if (url === '/rest/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => SCHEMAS })
-    if (url === '/rest/credentials/c1' && !options?.method) return Promise.resolve({ ok: true, status: 200, json: async () => detail })
-    if (url === '/rest/credentials/c1' && options?.method === 'PATCH') {
+    if (url === '/rest/r8r/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => SCHEMAS })
+    if (url === '/rest/r8r/credentials/c1' && !options?.method) return Promise.resolve({ ok: true, status: 200, json: async () => detail })
+    if (url === '/rest/r8r/credentials/c1' && options?.method === 'PATCH') {
       onPatch(JSON.parse(options.body as string))
       return Promise.resolve({ ok: true, status: 200, json: async () => ({ ...(detail as object), used_by: 0 }) })
     }
-    if (url === '/rest/credentials') return Promise.resolve({ ok: true, status: 200, json: async () => [] })
+    if (url === '/rest/r8r/credentials') return Promise.resolve({ ok: true, status: 200, json: async () => [] })
     return Promise.reject(new Error(`unexpected fetch: ${url}`))
   }))
 }
@@ -55,18 +55,18 @@ describe('CredentialForm', () => {
   it('edit mode sends null for a pre-filled optional text field the user cleared', async () => {
     let patched: unknown = null
     vi.stubGlobal('fetch', vi.fn((url: string, options?: RequestInit) => {
-      if (url === '/rest/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => [
+      if (url === '/rest/r8r/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => [
         { credential_type: 'openaiApi', display_name: 'OpenAI API', generic: false, fields: [
           { name: 'api_key', label: 'API Key', field_type: 'password', required: true },
           { name: 'base_url', label: 'Base URL (optional)', field_type: 'text', required: false },
         ] },
       ] })
-      if (url === '/rest/credentials/c1' && !options?.method) return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'c1', name: 'AI', credential_type: 'openaiApi', owner_id: 'u', created_at: '', updated_at: '', used_by: 0, fields: { base_url: 'http://local:8080' } }) })
-      if (url === '/rest/credentials/c1' && options?.method === 'PATCH') {
+      if (url === '/rest/r8r/credentials/c1' && !options?.method) return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'c1', name: 'AI', credential_type: 'openaiApi', owner_id: 'u', created_at: '', updated_at: '', used_by: 0, fields: { base_url: 'http://local:8080' } }) })
+      if (url === '/rest/r8r/credentials/c1' && options?.method === 'PATCH') {
         patched = JSON.parse(options.body as string)
         return Promise.resolve({ ok: true, status: 200, json: async () => ({ id: 'c1', name: 'AI', credential_type: 'openaiApi', owner_id: 'u', created_at: '', updated_at: '', used_by: 0 }) })
       }
-      if (url === '/rest/credentials') return Promise.resolve({ ok: true, status: 200, json: async () => [] })
+      if (url === '/rest/r8r/credentials') return Promise.resolve({ ok: true, status: 200, json: async () => [] })
       return Promise.reject(new Error(`unexpected fetch: ${url}`))
     }))
     const wrapper = mount(CredentialForm, { props: { mode: 'edit', credentialId: 'c1' } })

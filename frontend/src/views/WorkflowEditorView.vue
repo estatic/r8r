@@ -53,7 +53,7 @@ function messageFor(e: unknown, fallback: string): string {
 onMounted(async () => {
   live.connect()
   try {
-    workflow.value = await api.get<Workflow>(`/rest/workflows/${workflowId}`)
+    workflow.value = await api.get<Workflow>(`/rest/r8r/workflows/${workflowId}`)
     changes.markSaved()
   } catch (e) {
     loadError.value = messageFor(e, 'Failed to load workflow.')
@@ -107,7 +107,7 @@ async function save(): Promise<boolean> {
   actionError.value = ''
   saving.value = true
   try {
-    workflow.value = await api.put<Workflow>(`/rest/workflows/${workflowId}`, {
+    workflow.value = await api.put<Workflow>(`/rest/r8r/workflows/${workflowId}`, {
       name: workflow.value.name,
       nodes: workflow.value.nodes,
       connections: workflow.value.connections,

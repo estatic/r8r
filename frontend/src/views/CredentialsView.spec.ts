@@ -11,8 +11,8 @@ const CREDS = [
 function stub(deleteStatus: number, deleteBody = '') {
   let list = [...CREDS]
   vi.stubGlobal('fetch', vi.fn((url: string, options?: RequestInit) => {
-    if (url === '/rest/credentials') return Promise.resolve({ ok: true, status: 200, json: async () => list })
-    if (url === '/rest/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => [] })
+    if (url === '/rest/r8r/credentials') return Promise.resolve({ ok: true, status: 200, json: async () => list })
+    if (url === '/rest/r8r/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => [] })
     if (options?.method === 'DELETE') {
       if (deleteStatus === 204) {
         list = list.filter((c) => !url.endsWith(c.id))
