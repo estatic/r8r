@@ -47,7 +47,28 @@ pub fn start_timeout() -> Duration {
 }
 
 /// Starts `r8r <args>` as the scenario's main server on a free port.
+///
+/// A port from `free_port()` can be taken by another process before r8r
+/// binds it; then r8r exits with "Address already in use" while the other
+/// process answers on the port. The first start of a scenario retries on a
+/// new port when that happens. (Restarts keep their port: remembered URLs
+/// such as resume URLs include it.)
 pub async fn start_main(w: &mut R8rWorld, args: &[&str]) -> Result<(), String> {
+    let fresh = w.port.is_none();
+    let mut attempt = 0;
+    loop {
+        attempt += 1;
+        match start_main_once(w, args).await {
+            Err(e) if fresh && attempt < 4 && e.contains("Address already in use") => {
+                w.port = Some(process::free_port());
+                continue;
+            }
+            other => return other,
+        }
+    }
+}
+
+async fn start_main_once(w: &mut R8rWorld, args: &[&str]) -> Result<(), String> {
     let port = match w.port {
         Some(p) => p,
         None => {
@@ -69,12 +90,16 @@ pub async fn start_main(w: &mut R8rWorld, args: &[&str]) -> Result<(), String> {
     let args: Vec<String> = args.iter().map(|s| s.to_string()).collect();
     let log = w.dir.path().join(format!("server-{}.log", w.servers.len()));
     let wait_port = if w.unset_env.contains("N8N_PORT") { 5678 } else { port };
-    let server = spawn_server(&args, &env, w.dir.path(), wait_port, log, true, start_timeout()).await?;
+    let mut server = spawn_server(&args, &env, w.dir.path(), wait_port, log, true, start_timeout()).await?;
     // Listening is not ready: n8n, for one, answers "n8n is starting up"
-    // until migrations finish. Wait for /healthz/readiness to settle.
+    // until migrations finish. Wait for /healthz/readiness to settle, and
+    // make sure the process answering is ours.
     let ready_url = format!("http://127.0.0.1:{wait_port}/healthz/readiness");
     let deadline = std::time::Instant::now() + start_timeout();
     loop {
+        if let Ok(Some(status)) = server.child.try_wait() {
+            return Err(format!("`r8r {}` exited with {status}\n--- log (tail) ---\n{}", args.join(" "), process::tail(&server.log(), 40)));
+        }
         let settled = match w.http.get(&ready_url).send().await {
             Ok(r) => r.status().as_u16() != 503 && !r.text().await.unwrap_or_default().contains("starting up"),
             Err(_) => false,
@@ -83,6 +108,11 @@ pub async fn start_main(w: &mut R8rWorld, args: &[&str]) -> Result<(), String> {
             break;
         }
         tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+    // A process that lost the port race exits right after logging it.
+    tokio::time::sleep(Duration::from_millis(50)).await;
+    if let Ok(Some(status)) = server.child.try_wait() {
+        return Err(format!("`r8r {}` exited with {status}\n--- log (tail) ---\n{}", args.join(" "), process::tail(&server.log(), 40)));
     }
     w.servers.insert("main".into(), server);
     if wait_port != port {

@@ -30,7 +30,8 @@ R8R_BIN=/path/to/r8r cargo test --test bdd             # test another build
 | `R8R_BDD_CONCURRENCY` | 8 | Scenarios run in parallel |
 | `R8R_BDD_INCLUDE` | – | Opt-in tags to add: `perf`, `slow`, `requires-redis`, `requires-postgres`, `requires-python-runner` |
 | `R8R_BDD_REDIS_HOST` / `_PORT` | 127.0.0.1 / 6379 | Redis for `@requires-redis` |
-| `R8R_BDD_POSTGRES_URL` | `postgres://postgres:postgres@127.0.0.1:5432/postgres` | PostgreSQL for `@requires-postgres` |
+| `R8R_BDD_POSTGRES_URL` | `postgres://postgres:postgres@127.0.0.1:5432/postgres` | PostgreSQL for `@requires-postgres` and `R8R_BDD_STORAGE=postgres` |
+| `R8R_BDD_STORAGE` | sqlite | `postgres` runs every scenario with `DB_TYPE=postgresdb`, one schema per scenario |
 | `R8R_BDD_START_TIMEOUT` | 30 | Seconds a server may take to become ready |
 
 `--tags` replaces the opt-in filter, so `--tags @perf` runs perf scenarios.

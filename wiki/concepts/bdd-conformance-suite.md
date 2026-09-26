@@ -85,6 +85,14 @@ performance work behind it: pooled expression VMs, lazy run data in the
 VM, SQLite WAL with one writer and group commit, and a separate runtime
 for executions.
 
+PostgreSQL storage (`DB_TYPE=postgresdb`, n8n's `DB_POSTGRESDB_*`
+variables or `R8R_DATABASE_URL`) runs the same store on sqlx's `Any`
+driver. `R8R_BDD_STORAGE=postgres` runs the whole suite that way, one
+schema per scenario: 397/397. Driver quirks worked around: NULL
+parameters are typed INT4 (so the statement cache is off and COALESCE on
+a parameter is avoided), nullable columns need unchecked reads, and new
+row ids come from `lastval()` / `last_insert_rowid()`.
+
 ## Where this fits
 
 - [[n8n-in-rust-reimplementation-spec]]
