@@ -49,15 +49,11 @@ pub fn base_env(user_folder: &Path) -> BTreeMap<String, String> {
     env
 }
 
-/// Variables the pre-spec server needs to start at all. Harmless to a
-/// spec-compliant build; delete once `src/main.rs` reads n8n names.
-pub fn legacy_server_env(user_folder: &Path, port: u16) -> BTreeMap<String, String> {
+/// Server-only variables on top of [`base_env`]. The server and the CLI
+/// share `<user folder>/.n8n/database.sqlite`, as n8n's do.
+pub fn legacy_server_env(_user_folder: &Path, port: u16) -> BTreeMap<String, String> {
     let mut env = BTreeMap::new();
     env.insert("PORT".into(), port.to_string());
-    env.insert("JWT_SECRET".into(), "bdd-jwt-secret".into());
-    // base64 of 32 bytes of 0x07.
-    env.insert("CREDENTIALS_KEY".into(), "BwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwcHBwc=".into());
-    env.insert("DATABASE_URL".into(), format!("sqlite:{}/r8r.db?mode=rwc", user_folder.display()));
     env
 }
 

@@ -25,7 +25,7 @@ anyhow = "1"
 tower = { version = "0.4", features = ["util"] }
 tower-http = { version = "0.6", features = ["catch-panic"] }
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
 tracing-appender = "0.2"
 rquickjs = { version = "0.6", features = ["parallel"] }
 tokio-cron-scheduler = "0.10"
@@ -47,6 +47,8 @@ quick-xml = { version = "0.36", default-features = false }
 pulldown-cmark = { version = "0.12", default-features = false, features = ["html"] }
 chrono-tz = "0.10"
 regex = "1"
+bcrypt = "0.15"
+croner = "2"
 
 [dev-dependencies]
 tokio = { version = "1", features = ["full", "test-util"] }

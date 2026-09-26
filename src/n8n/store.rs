@@ -8,7 +8,7 @@ use std::str::FromStr;
 
 #[derive(Clone)]
 pub struct Store {
-    pool: SqlitePool,
+    pub(super) pool: SqlitePool,
     encryption_key: String,
 }
 
@@ -23,7 +23,7 @@ pub struct CredentialRecord {
     pub updated_at: String,
 }
 
-fn now() -> String {
+pub(super) fn now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
 }
 

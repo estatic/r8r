@@ -22,24 +22,24 @@ export const useToolsStore = defineStore('tools', {
   }),
   actions: {
     async fetchAll() {
-      this.tools = await api.get<Tool[]>('/rest/tools')
+      this.tools = await api.get<Tool[]>('/rest/r8r/tools')
       this.loaded = true
     },
     async get(id: string): Promise<Tool> {
-      return api.get<Tool>(`/rest/tools/${id}`)
+      return api.get<Tool>(`/rest/r8r/tools/${id}`)
     },
     async create(body: ToolBody): Promise<Tool> {
-      const tool = await api.post<Tool>('/rest/tools', body)
+      const tool = await api.post<Tool>('/rest/r8r/tools', body)
       await this.fetchAll()
       return tool
     },
     async update(id: string, patch: Partial<ToolBody>): Promise<Tool> {
-      const tool = await api.patch<Tool>(`/rest/tools/${id}`, patch)
+      const tool = await api.patch<Tool>(`/rest/r8r/tools/${id}`, patch)
       await this.fetchAll()
       return tool
     },
     async remove(id: string): Promise<void> {
-      await api.delete<void>(`/rest/tools/${id}`)
+      await api.delete<void>(`/rest/r8r/tools/${id}`)
       await this.fetchAll()
     },
   },

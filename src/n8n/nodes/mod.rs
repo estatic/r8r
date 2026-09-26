@@ -6,6 +6,7 @@ mod core;
 mod http;
 mod merge;
 mod routing;
+mod server_nodes;
 mod set;
 mod transform;
 mod utility;
@@ -54,6 +55,9 @@ impl Default for Registry {
             r.add(n);
         }
         for n in utility::all() {
+            r.add(n);
+        }
+        for n in server_nodes::all() {
             r.add(n);
         }
         r

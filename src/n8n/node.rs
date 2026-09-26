@@ -45,15 +45,29 @@ pub struct NodeError {
     pub name: &'static str,
     /// Set when the error should end the run whatever the node's `onError`.
     pub fatal: bool,
+    /// Not a failure: the node asks to pause the execution until resumed
+    /// (by its resume URL, or at the given time in epoch ms).
+    pub wait: Option<WaitRequest>,
+}
+
+#[derive(Debug, Clone)]
+pub struct WaitRequest {
+    /// `None` = until the resume URL is called.
+    pub till_ms: Option<i64>,
 }
 
 impl NodeError {
     pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into(), description: None, item_index: None, http_code: None, name: "NodeOperationError", fatal: false }
+        Self { message: message.into(), description: None, item_index: None, http_code: None, name: "NodeOperationError", fatal: false, wait: None }
     }
 
     pub fn api(message: impl Into<String>, http_code: Option<u16>, description: Option<String>) -> Self {
         Self { http_code: http_code.map(|c| c.to_string()), description, name: "NodeApiError", ..Self::new(message) }
+    }
+
+    /// Pauses the execution (see [`WaitRequest`]).
+    pub fn waiting(till_ms: Option<i64>) -> Self {
+        Self { wait: Some(WaitRequest { till_ms }), fatal: true, ..Self::new("waiting") }
     }
 
     pub fn at(mut self, item: usize) -> Self {
@@ -92,11 +106,21 @@ impl From<ExprError> for NodeError {
 
 pub type NodeResult<T> = Result<T, NodeError>;
 
+/// Runs another workflow for the Execute Workflow node (implemented by the
+/// server, which owns persistence and publishing rules).
+#[async_trait::async_trait]
+pub trait SubWorkflowRunner: Send + Sync {
+    async fn run_sub_workflow(&self, parent_workflow_id: Option<&str>, workflow_id: &str, items: Vec<Item>, wait: bool) -> NodeResult<Vec<Item>>;
+}
+
 /// Shared services for node runs.
 pub struct Services {
     pub config: Config,
     pub store: Option<Store>,
     pub http: reqwest::Client,
+    /// Set when running inside the server: waits can persist and
+    /// sub-workflows can run.
+    pub sub_workflows: Option<std::sync::Arc<dyn SubWorkflowRunner>>,
 }
 
 impl Services {
@@ -105,7 +129,11 @@ impl Services {
             .redirect(reqwest::redirect::Policy::limited(21))
             .build()
             .expect("HTTP client");
-        Self { config, store, http }
+        Self { config, store, http, sub_workflows: None }
+    }
+
+    pub fn is_server(&self) -> bool {
+        self.sub_workflows.is_some()
     }
 }
 
@@ -129,6 +157,7 @@ pub struct ExecCtx<'a> {
     pub mode: Mode,
     pub execution_id: String,
     pub services: &'a Services,
+    pub options: &'a super::engine::ExecuteOptions,
     pub run: Arc<Mutex<RunState>>,
     /// Builds the JSON the expression VM sees (see `js/prelude.js`).
     pub expr_data: Box<dyn Fn() -> Value + Send + Sync + 'a>,
@@ -147,10 +176,11 @@ impl<'a> ExecCtx<'a> {
         mode: Mode,
         execution_id: String,
         services: &'a Services,
+        options: &'a super::engine::ExecuteOptions,
         run: Arc<Mutex<RunState>>,
         expr_data: Box<dyn Fn() -> Value + Send + Sync + 'a>,
     ) -> Self {
-        Self { node, workflow, inputs, run_index, mode, execution_id, services, run, expr_data, error_items: Vec::new(), evaluator: OnceLock::new() }
+        Self { node, workflow, inputs, run_index, mode, execution_id, services, options, run, expr_data, error_items: Vec::new(), evaluator: OnceLock::new() }
     }
 
     /// Main input 0.

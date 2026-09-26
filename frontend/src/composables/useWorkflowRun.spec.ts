@@ -10,7 +10,7 @@ function exec(id: string, status: Execution['status'], outputs: Execution['node_
 function stubFetch(postResult: Execution, getResults: Execution[] = []) {
   const fetchMock = vi.fn((url: string, options?: RequestInit) => {
     if (options?.method === 'POST') return Promise.resolve({ ok: true, status: 202, json: async () => postResult })
-    if (url.startsWith('/rest/executions/')) {
+    if (url.startsWith('/rest/r8r/executions/')) {
       const next = getResults.shift() ?? postResult
       return Promise.resolve({ ok: true, status: 200, json: async () => next })
     }

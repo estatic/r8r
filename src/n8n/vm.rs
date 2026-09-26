@@ -122,8 +122,9 @@ impl Vm {
                 "__r8r_hash",
                 rquickjs::Function::new(
                     ctx.clone(),
-                    |alg: String, text: String, key: rquickjs::function::Opt<String>, enc: rquickjs::function::Opt<String>| {
-                        digest(&alg, text.as_bytes(), key.0.as_deref().map(str::as_bytes), enc.0.as_deref().unwrap_or("hex")).unwrap_or_default()
+                    |alg: String, text: String, key: rquickjs::function::Opt<Option<String>>, enc: rquickjs::function::Opt<Option<String>>| {
+                        let (key, enc) = (key.0.flatten(), enc.0.flatten());
+                        digest(&alg, text.as_bytes(), key.as_deref().map(str::as_bytes), enc.as_deref().unwrap_or("hex")).unwrap_or_default()
                     },
                 ),
             )?;
@@ -163,31 +164,27 @@ impl Vm {
         let started = Instant::now();
         self.eval_wrapped(&src, timeout)?;
         // Drive promises until the body settles or time runs out.
-        loop {
-            let settled = self.with_deadline(timeout.saturating_sub(started.elapsed()), |ctx| {
-                while ctx.execute_pending_job() {}
-                let done: bool = ctx.globals().get("__r8r_async_done").unwrap_or(false);
-                Ok(done)
-            });
-            match settled {
-                Ok(true) => break,
-                Ok(false) => {
-                    if started.elapsed() >= timeout {
-                        return Err(VmError::Timeout(timeout.as_millis() as u64));
-                    }
-                    // Nothing can make progress without host I/O, which the
-                    // sandbox doesn't offer: a pending promise never settles.
-                    return Err(VmError::Js {
-                        message: "The code awaited something that never finished".into(),
-                        name: "Error".into(),
-                        stack: String::new(),
-                    });
-                }
-                Err(e) => return Err(self.timeout_or(e, timeout)),
+        let settled = self.with_deadline(timeout.saturating_sub(started.elapsed()), |ctx| {
+            while ctx.execute_pending_job() {}
+            let done: bool = ctx.globals().get("__r8r_async_done").unwrap_or(false);
+            Ok(done)
+        });
+        match settled {
+            Ok(true) => {}
+            Ok(false) if started.elapsed() >= timeout => return Err(VmError::Timeout(timeout.as_millis() as u64)),
+            // Nothing can make progress without host I/O, which the sandbox
+            // doesn't offer: a pending promise never settles.
+            Ok(false) => {
+                return Err(VmError::Js {
+                    message: "The code awaited something that never finished".into(),
+                    name: "Error".into(),
+                    stack: String::new(),
+                })
             }
+            Err(e) => return Err(self.timeout_or(e, timeout)),
         }
         let text: String = self.context.with(|ctx| ctx.globals().get("__r8r_async_result").unwrap_or_default());
-        decode_result(&text)
+        decode_result(&text).map_err(|e| self.timeout_or(e, timeout))
     }
 
     fn eval_wrapped(&self, src: &str, timeout: Duration) -> Result<Option<Value>, VmError> {
@@ -197,7 +194,7 @@ impl Vm {
                 Ok(v.as_string().and_then(|s| s.to_string().ok()).unwrap_or_default())
             })
             .map_err(|e| self.timeout_or(e, timeout))?;
-        decode_result(&text)
+        decode_result(&text).map_err(|e| self.timeout_or(e, timeout))
     }
 
     fn with_deadline<T>(&self, timeout: Duration, f: impl FnOnce(rquickjs::Ctx) -> Result<T, VmError>) -> Result<T, VmError> {

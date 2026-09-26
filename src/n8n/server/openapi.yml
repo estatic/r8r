@@ -1,0 +1,74 @@
+openapi: 3.0.0
+info:
+  title: r8r Public API
+  description: n8n-compatible public API served by r8r. Authenticate with the X-N8N-API-KEY header.
+  version: 1.1.1
+servers:
+  - url: /api/v1
+security:
+  - ApiKeyAuth: []
+components:
+  securitySchemes:
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-N8N-API-KEY
+paths:
+  /workflows:
+    get: {summary: Retrieve all workflows, tags: [Workflow], responses: {'200': {description: Operation successful.}}}
+    post: {summary: Create a workflow, tags: [Workflow], responses: {'200': {description: A workflow object}, '400': {description: The request is invalid.}}}
+  /workflows/{id}:
+    get: {summary: Retrieves a workflow, tags: [Workflow], responses: {'200': {description: Operation successful.}, '404': {description: The specified resource was not found.}}}
+    put: {summary: Update a workflow, tags: [Workflow], responses: {'200': {description: Workflow object}}}
+    delete: {summary: Delete a workflow, tags: [Workflow], responses: {'200': {description: Operation successful.}}}
+  /workflows/{id}/activate:
+    post: {summary: Activate a workflow, tags: [Workflow], responses: {'200': {description: Workflow object}}}
+  /workflows/{id}/deactivate:
+    post: {summary: Deactivate a workflow, tags: [Workflow], responses: {'200': {description: Workflow object}}}
+  /workflows/{id}/tags:
+    get: {summary: Get workflow tags, tags: [Workflow], responses: {'200': {description: List of tags}}}
+    put: {summary: Update tags of a workflow, tags: [Workflow], responses: {'200': {description: List of tags}}}
+  /workflows/{id}/transfer:
+    put: {summary: Transfer a workflow to another project, tags: [Workflow], responses: {'204': {description: Operation successful.}}}
+  /executions:
+    get: {summary: Retrieve all executions, tags: [Execution], responses: {'200': {description: Operation successful.}}}
+  /executions/{id}:
+    get: {summary: Retrieve an execution, tags: [Execution], responses: {'200': {description: Operation successful.}}}
+    delete: {summary: Delete an execution, tags: [Execution], responses: {'200': {description: Operation successful.}}}
+  /executions/{id}/retry:
+    post: {summary: Retry an execution, tags: [Execution], responses: {'200': {description: Operation successful.}}}
+  /credentials:
+    post: {summary: Create a credential, tags: [Credential], responses: {'200': {description: Operation successful.}}}
+  /credentials/{id}:
+    delete: {summary: Delete credential by ID, tags: [Credential], responses: {'200': {description: Operation successful.}}}
+  /credentials/schema/{credentialTypeName}:
+    get: {summary: Show credential data schema, tags: [Credential], responses: {'200': {description: Operation successful.}}}
+  /tags:
+    get: {summary: Retrieve all tags, tags: [Tags], responses: {'200': {description: Operation successful.}}}
+    post: {summary: Create a tag, tags: [Tags], responses: {'201': {description: A tag object}, '409': {description: Conflict}}}
+  /tags/{id}:
+    get: {summary: Retrieves a tag, tags: [Tags], responses: {'200': {description: Operation successful.}}}
+    put: {summary: Update a tag, tags: [Tags], responses: {'200': {description: Tag object}}}
+    delete: {summary: Delete a tag, tags: [Tags], responses: {'200': {description: Operation successful.}}}
+  /variables:
+    get: {summary: Retrieve variables, tags: [Variables], responses: {'200': {description: Operation successful.}}}
+    post: {summary: Create a variable, tags: [Variables], responses: {'201': {description: Operation successful.}}}
+  /variables/{id}:
+    put: {summary: Update a variable, tags: [Variables], responses: {'204': {description: Operation successful.}}}
+    delete: {summary: Delete a variable, tags: [Variables], responses: {'204': {description: Operation successful.}}}
+  /users:
+    get: {summary: Retrieve all users, tags: [User], responses: {'200': {description: Operation successful.}}}
+    post: {summary: Create multiple users, tags: [User], responses: {'201': {description: Operation successful.}}}
+  /users/{id}:
+    get: {summary: Get user by ID/Email, tags: [User], responses: {'200': {description: Operation successful.}}}
+    delete: {summary: Delete a user, tags: [User], responses: {'204': {description: Operation successful.}}}
+  /audit:
+    post: {summary: Generate an audit, tags: [Audit], responses: {'200': {description: Operation successful.}}}
+  /projects:
+    get: {summary: Retrieve projects, tags: [Projects], responses: {'200': {description: Operation successful.}}}
+    post: {summary: Create a project, tags: [Projects], responses: {'201': {description: Operation successful.}}}
+  /projects/{projectId}:
+    put: {summary: Update a project, tags: [Projects], responses: {'204': {description: Operation successful.}}}
+    delete: {summary: Delete a project, tags: [Projects], responses: {'204': {description: Operation successful.}}}
+  /projects/{projectId}/users:
+    post: {summary: Add users to a project, tags: [Projects], responses: {'201': {description: Operation successful.}}}

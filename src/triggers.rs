@@ -50,7 +50,7 @@ pub async fn activate_workflow_triggers(
         "core.webhook" => tracing::info!(
             workflow_id = %workflow.id,
             workflow_name = %workflow.name,
-            url = %format!("/webhook/{}/{}", workflow.id, start_node.parameters.get("path").and_then(|v| v.as_str()).unwrap_or("")),
+            url = %format!("/webhook-r8r/{}/{}", workflow.id, start_node.parameters.get("path").and_then(|v| v.as_str()).unwrap_or("")),
             "webhook trigger active"
         ),
         "telegram.trigger" => tracing::info!(

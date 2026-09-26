@@ -32,7 +32,7 @@ describe('executions store', () => {
     const fetchSpy = vi.mocked(globalThis.fetch)
     const store = useExecutionsStore()
     await store.fetchHistory('wf-1', 10)
-    expect(fetchSpy.mock.calls[0][0]).toBe('/rest/workflows/wf-1/executions?limit=10')
+    expect(fetchSpy.mock.calls[0][0]).toBe('/rest/r8r/workflows/wf-1/executions?limit=10')
     vi.unstubAllGlobals()
   })
 })

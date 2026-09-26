@@ -23,9 +23,9 @@ function stubFetch(nodeTypes: unknown[], credentials: unknown[] = [], credential
   vi.stubGlobal(
     'fetch',
     vi.fn((url: string) => {
-      if (url === '/rest/node-types') return Promise.resolve({ ok: true, status: 200, json: async () => nodeTypes })
-      if (url === '/rest/credentials') return Promise.resolve({ ok: true, status: 200, json: async () => credentials })
-      if (url === '/rest/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => credentialTypes })
+      if (url === '/rest/r8r/node-types') return Promise.resolve({ ok: true, status: 200, json: async () => nodeTypes })
+      if (url === '/rest/r8r/credentials') return Promise.resolve({ ok: true, status: 200, json: async () => credentials })
+      if (url === '/rest/r8r/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => credentialTypes })
       return Promise.reject(new Error(`unexpected fetch: ${url}`))
     }),
   )
@@ -103,10 +103,10 @@ describe('CredentialPicker', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((url: string, options?: RequestInit) => {
-        if (url === '/rest/node-types') return Promise.resolve({ ok: true, status: 200, json: async () => [{ type_name: 'telegram.trigger', display_name: 'Telegram Trigger', icon: '📨', category: 'trigger', description: '', credential_types: ['telegramApi'], output_ports: ['main'] }] })
-        if (url === '/rest/credentials' && (!options || options.method === undefined)) return Promise.resolve({ ok: true, status: 200, json: async () => [] })
-        if (url === '/rest/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => CREDENTIAL_TYPE_SCHEMAS })
-        if (url === '/rest/credentials' && options?.method === 'POST') {
+        if (url === '/rest/r8r/node-types') return Promise.resolve({ ok: true, status: 200, json: async () => [{ type_name: 'telegram.trigger', display_name: 'Telegram Trigger', icon: '📨', category: 'trigger', description: '', credential_types: ['telegramApi'], output_ports: ['main'] }] })
+        if (url === '/rest/r8r/credentials' && (!options || options.method === undefined)) return Promise.resolve({ ok: true, status: 200, json: async () => [] })
+        if (url === '/rest/r8r/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => CREDENTIAL_TYPE_SCHEMAS })
+        if (url === '/rest/r8r/credentials' && options?.method === 'POST') {
           const body = JSON.parse(options.body as string)
           expect(body.data).toEqual({ bot_token: 'secret-token-value' })
           return Promise.resolve({ ok: true, status: 201, json: async () => ({ id: 'new-id', name: body.name, credential_type: body.credential_type, owner_id: 'u', created_at: '', updated_at: '' }) })
@@ -129,10 +129,10 @@ describe('CredentialPicker', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((url: string, options?: RequestInit) => {
-        if (url === '/rest/node-types') return Promise.resolve({ ok: true, status: 200, json: async () => [{ type_name: 'ai.agent', display_name: 'AI Agent', icon: '🤖', category: 'action', description: '', credential_types: ['openaiApi', 'anthropicApi'], output_ports: ['main'] }] })
-        if (url === '/rest/credentials' && (!options || options.method === undefined)) return Promise.resolve({ ok: true, status: 200, json: async () => [] })
-        if (url === '/rest/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => AI_AGENT_CREDENTIAL_TYPES })
-        if (url === '/rest/credentials' && options?.method === 'POST') {
+        if (url === '/rest/r8r/node-types') return Promise.resolve({ ok: true, status: 200, json: async () => [{ type_name: 'ai.agent', display_name: 'AI Agent', icon: '🤖', category: 'action', description: '', credential_types: ['openaiApi', 'anthropicApi'], output_ports: ['main'] }] })
+        if (url === '/rest/r8r/credentials' && (!options || options.method === undefined)) return Promise.resolve({ ok: true, status: 200, json: async () => [] })
+        if (url === '/rest/r8r/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => AI_AGENT_CREDENTIAL_TYPES })
+        if (url === '/rest/r8r/credentials' && options?.method === 'POST') {
           const body = JSON.parse(options.body as string)
           expect(body.data).toEqual({ api_key: 'anthropic-key' })
           return Promise.resolve({ ok: true, status: 201, json: async () => ({ id: 'new-id', name: body.name, credential_type: body.credential_type, owner_id: 'u', created_at: '', updated_at: '' }) })
@@ -162,10 +162,10 @@ describe('CredentialPicker', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((url: string, options?: RequestInit) => {
-        if (url === '/rest/node-types') return Promise.resolve({ ok: true, status: 200, json: async () => [{ type_name: 'ai.agent', display_name: 'AI Agent', icon: '🤖', category: 'action', description: '', credential_types: ['openaiApi'], output_ports: ['main'] }] })
-        if (url === '/rest/credentials' && (!options || options.method === undefined)) return Promise.resolve({ ok: true, status: 200, json: async () => [] })
-        if (url === '/rest/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => AI_AGENT_CREDENTIAL_TYPES })
-        if (url === '/rest/credentials' && options?.method === 'POST') {
+        if (url === '/rest/r8r/node-types') return Promise.resolve({ ok: true, status: 200, json: async () => [{ type_name: 'ai.agent', display_name: 'AI Agent', icon: '🤖', category: 'action', description: '', credential_types: ['openaiApi'], output_ports: ['main'] }] })
+        if (url === '/rest/r8r/credentials' && (!options || options.method === undefined)) return Promise.resolve({ ok: true, status: 200, json: async () => [] })
+        if (url === '/rest/r8r/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => AI_AGENT_CREDENTIAL_TYPES })
+        if (url === '/rest/r8r/credentials' && options?.method === 'POST') {
           const body = JSON.parse(options.body as string)
           expect(body.data).toEqual({ api_key: 'openai-key' })
           expect(Object.prototype.hasOwnProperty.call(body.data, 'base_url')).toBe(false)
@@ -210,10 +210,10 @@ describe('CredentialPicker', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((url: string, options?: RequestInit) => {
-        if (url === '/rest/node-types') return Promise.resolve({ ok: true, status: 200, json: async () => [{ type_name: 'ai.agent', display_name: 'AI Agent', icon: '🤖', category: 'action', description: '', credential_types: ['openaiApi'], output_ports: ['main'] }] })
-        if (url === '/rest/credentials' && (!options || options.method === undefined)) return Promise.resolve({ ok: true, status: 200, json: async () => [] })
-        if (url === '/rest/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => AI_AGENT_CREDENTIAL_TYPES })
-        if (url === '/rest/credentials' && options?.method === 'POST') {
+        if (url === '/rest/r8r/node-types') return Promise.resolve({ ok: true, status: 200, json: async () => [{ type_name: 'ai.agent', display_name: 'AI Agent', icon: '🤖', category: 'action', description: '', credential_types: ['openaiApi'], output_ports: ['main'] }] })
+        if (url === '/rest/r8r/credentials' && (!options || options.method === undefined)) return Promise.resolve({ ok: true, status: 200, json: async () => [] })
+        if (url === '/rest/r8r/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => AI_AGENT_CREDENTIAL_TYPES })
+        if (url === '/rest/r8r/credentials' && options?.method === 'POST') {
           const body = JSON.parse(options.body as string)
           expect(body.data).toEqual({ api_key: 'openai-key' })
           return Promise.resolve({ ok: true, status: 201, json: async () => ({ id: 'new-id', name: body.name, credential_type: body.credential_type, owner_id: 'u', created_at: '', updated_at: '' }) })
@@ -254,9 +254,9 @@ describe('CredentialPicker', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn((url: string) => {
-        if (url === '/rest/node-types') return new Promise((r) => { resolveNodeTypes = r })
-        if (url === '/rest/credentials') return Promise.resolve({ ok: true, status: 200, json: async () => [] })
-        if (url === '/rest/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => [...CREDENTIAL_TYPE_SCHEMAS, ...AI_AGENT_CREDENTIAL_TYPES] })
+        if (url === '/rest/r8r/node-types') return new Promise((r) => { resolveNodeTypes = r })
+        if (url === '/rest/r8r/credentials') return Promise.resolve({ ok: true, status: 200, json: async () => [] })
+        if (url === '/rest/r8r/credential-types') return Promise.resolve({ ok: true, status: 200, json: async () => [...CREDENTIAL_TYPE_SCHEMAS, ...AI_AGENT_CREDENTIAL_TYPES] })
         return Promise.reject(new Error(`unexpected fetch: ${url}`))
       }),
     )

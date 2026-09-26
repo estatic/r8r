@@ -11,8 +11,8 @@ const TOOLS = [
 function stub(opts: { deleteStatus?: number; deleteBody?: string; onPost?: (body: unknown) => void } = {}) {
   let list = [...TOOLS]
   vi.stubGlobal('fetch', vi.fn((url: string, options?: RequestInit) => {
-    if (url === '/rest/tools' && !options?.method) return Promise.resolve({ ok: true, status: 200, json: async () => list })
-    if (url === '/rest/tools' && options?.method === 'POST') {
+    if (url === '/rest/r8r/tools' && !options?.method) return Promise.resolve({ ok: true, status: 200, json: async () => list })
+    if (url === '/rest/r8r/tools' && options?.method === 'POST') {
       const body = JSON.parse(options.body as string)
       opts.onPost?.(body)
       return Promise.resolve({ ok: true, status: 201, json: async () => ({ ...body, id: 't9', created_at: '', updated_at: '' }) })
@@ -24,7 +24,7 @@ function stub(opts: { deleteStatus?: number; deleteBody?: string; onPost?: (body
       }
       return Promise.resolve({ ok: false, status: opts.deleteStatus, text: async () => opts.deleteBody ?? '' })
     }
-    if (url === '/rest/credentials' || url === '/rest/node-types' || url === '/rest/credential-types') {
+    if (url === '/rest/r8r/credentials' || url === '/rest/r8r/node-types' || url === '/rest/r8r/credential-types') {
       return Promise.resolve({ ok: true, status: 200, json: async () => [] })
     }
     return Promise.reject(new Error(`unexpected fetch: ${url}`))

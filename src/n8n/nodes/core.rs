@@ -81,7 +81,9 @@ impl NodeType for Wait {
     }
     async fn execute(&self, ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
         let resume = ctx.param_str("resume", 0, "timeInterval")?;
+        let server = ctx.services.is_server();
         match resume.as_str() {
+            "webhook" | "form" if server => return Err(NodeError::waiting(None)),
             "timeInterval" => {
                 let amount = ctx.param_f64("amount", 0, 1.0)?;
                 let unit = ctx.param_str("unit", 0, "hours")?;
@@ -93,12 +95,19 @@ impl NodeType for Wait {
                         "days" => 86400.0,
                         _ => 1.0,
                     };
+                // Like n8n, waits over 65 s are persisted instead of held in memory.
+                if server && secs > 65.0 {
+                    return Err(NodeError::waiting(Some(chrono::Utc::now().timestamp_millis() + (secs * 1000.0) as i64)));
+                }
                 tokio::time::sleep(std::time::Duration::from_secs_f64(secs.max(0.0))).await;
             }
             "specificTime" => {
                 let when = ctx.param_str("dateTime", 0, "")?;
                 if let Ok(t) = chrono::NaiveDateTime::parse_from_str(&when, "%Y-%m-%dT%H:%M:%S") {
                     let wait = t.and_utc().timestamp_millis() - chrono::Utc::now().timestamp_millis();
+                    if wait > 65_000 && server {
+                        return Err(NodeError::waiting(Some(t.and_utc().timestamp_millis())));
+                    }
                     if wait > 65_000 {
                         return Err(NodeError::new("Waiting this long needs a running r8r server; the CLI can't persist a waiting execution").describe(format!("resume at {when}")));
                     }

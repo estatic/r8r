@@ -178,10 +178,9 @@ team decides otherwise.
    Redis Streams), with the database from `R8R_DATABASE_URL`.
 5. **Environment**: every process starts from an empty environment plus
    n8n variable names (`N8N_USER_FOLDER`, `N8N_ENCRYPTION_KEY`, `N8N_PORT`,
-   `WEBHOOK_URL`, `GENERIC_TIMEZONE`, ...). Servers also get the variables
-   the current pre-spec binary needs to boot (`PORT`, `JWT_SECRET`,
-   `CREDENTIALS_KEY`, `DATABASE_URL`, see `legacy_server_env`); delete them
-   once `src/main.rs` reads n8n names.
+   `WEBHOOK_URL`, `GENERIC_TIMEZONE`, ...). Servers also get `PORT` (see
+   `legacy_server_env`). Server and CLI share
+   `<user folder>/.n8n/database.sqlite`, as n8n's do.
 6. **API keys**: `POST /rest/api-keys` with `label`, `scopes`, `expiresAt`
    returns `data.rawApiKey`, as n8n does.
 7. **Readiness**: a server is used once its port is open *and*

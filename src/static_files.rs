@@ -31,7 +31,7 @@ pub async fn serve_frontend(uri: Uri) -> Response {
 /// Matches the namespace itself (`rest`) as well as anything under it
 /// (`rest/...`).
 fn is_api_path(path: &str) -> bool {
-    ["rest", "webhook", "ws"]
+    ["rest", "webhook", "webhook-test", "webhook-waiting", "form-waiting", "api", "ws"]
         .iter()
         .any(|prefix| path == *prefix || path.strip_prefix(prefix).is_some_and(|rest| rest.starts_with('/')))
 }

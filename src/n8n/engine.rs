@@ -16,6 +16,33 @@ use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
+/// Execution lifecycle callbacks (push messages, logs).
+#[async_trait::async_trait]
+pub trait Hooks: Send + Sync {
+    async fn node_before(&self, _node: &str, _task: &Value) {}
+    async fn node_after(&self, _node: &str, _task: &Value) {}
+}
+
+/// Responds to the webhook call that started the execution (Respond to
+/// Webhook node).
+pub type ResponseSlot = Arc<Mutex<Option<tokio::sync::oneshot::Sender<WebhookResponse>>>>;
+
+#[derive(Debug, Clone)]
+pub struct WebhookResponse {
+    pub status: u16,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
+
+/// Where a paused execution continues.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct WaitState {
+    pub node: String,
+    pub till_ms: Option<i64>,
+    pub input: Vec<Item>,
+    pub source: Vec<Option<SourceData>>,
+}
+
 /// Guards against runaway loops.
 const MAX_NODE_RUNS: usize = 100_000;
 
@@ -34,7 +61,16 @@ pub struct ExecuteOptions {
     pub destination_node: Option<String>,
     /// Run data from an earlier run to reuse for nodes before `start_node`.
     pub previous_run_data: Option<Map<String, Value>>,
+    /// Source recorded for the start node (e.g. a resumed Wait node's parent).
+    pub start_source: Option<Vec<Option<SourceData>>>,
     pub cancel: Arc<AtomicBool>,
+    pub cancel_notify: Arc<tokio::sync::Notify>,
+    pub hooks: Option<Arc<dyn Hooks>>,
+    pub response: Option<ResponseSlot>,
+    /// `?signature=` appended to resume URLs.
+    pub resume_signature: Option<String>,
+    /// Instance variables (`$vars`).
+    pub vars: Map<String, Value>,
 }
 
 impl ExecuteOptions {
@@ -47,8 +83,19 @@ impl ExecuteOptions {
             start_node: None,
             destination_node: None,
             previous_run_data: None,
+            start_source: None,
             cancel: Arc::new(AtomicBool::new(false)),
+            cancel_notify: Arc::new(tokio::sync::Notify::new()),
+            hooks: None,
+            response: None,
+            resume_signature: None,
+            vars: Map::new(),
         }
+    }
+
+    pub fn cancel(&self) {
+        self.cancel.store(true, Ordering::SeqCst);
+        self.cancel_notify.notify_waiters();
     }
 }
 
@@ -64,6 +111,8 @@ pub struct RunResult {
     pub custom_data: Map<String, Value>,
     pub static_data: Value,
     pub console: Vec<String>,
+    /// Set when the execution paused at a Wait node.
+    pub waiting: Option<WaitState>,
 }
 
 impl RunResult {
@@ -201,8 +250,12 @@ pub async fn execute(
     if let Some(items) = &options.start_items {
         start_entry.inputs = vec![Some(items.clone())];
     }
+    if let Some(source) = &options.start_source {
+        start_entry.source = source.clone();
+    }
     stack.push_back(start_entry);
     let mut runs = 0usize;
+    let mut waiting_state: Option<WaitState> = None;
 
     loop {
         if options.cancel.load(Ordering::SeqCst) {
@@ -229,7 +282,7 @@ pub async fn execute(
         let node = workflow.node(&entry.node).expect("scheduled nodes exist");
         let run_index = run_data.get(&node.name).and_then(Value::as_array).map(Vec::len).unwrap_or(0);
         let inputs: Vec<Vec<Item>> = entry.inputs.iter().map(|i| i.clone().unwrap_or_default()).collect();
-        let is_start = node.name == start && run_index == 0 && entry.source.is_empty();
+        let is_start = runs == 1;
         let task_start = now_ms();
 
         let pinned = if options.use_pin_data { workflow.pin_data.get(&node.name) } else { None };
@@ -247,18 +300,26 @@ pub async fn execute(
         } else {
             let node_type = registry.get(&node.node_type).expect("checked before the run");
             let remaining = timeout_at.map(|t| (t - now_ms()).max(1) as u64);
+            if let Some(h) = &options.hooks {
+                h.node_before(&node.name, &json!({"startTime": task_start, "executionIndex": execution_index, "source": entry.source})).await;
+            }
             let run = run_node(node, node_type, workflow, services, &options, &run_data, &entry.source, inputs.clone(), run_index, run_state.clone());
-            match remaining {
-                Some(ms) => match tokio::time::timeout(std::time::Duration::from_millis(ms), run).await {
-                    Ok(r) => r,
-                    Err(_) => {
-                        final_status = status::CANCELED;
-                        error = Some(json!({"message": "The execution was cancelled because it timed out", "name": "TimeoutExecutionCancelledError"}));
-                        last_node = Some(node.name.clone());
-                        break;
-                    }
-                },
-                None => run.await,
+            let sleep_ms = remaining.unwrap_or(u64::MAX / 4);
+            let cancelled = options.cancel_notify.notified();
+            tokio::select! {
+                r = run => r,
+                _ = tokio::time::sleep(std::time::Duration::from_millis(sleep_ms)) => {
+                    final_status = status::CANCELED;
+                    error = Some(json!({"message": "The execution was cancelled because it timed out", "name": "TimeoutExecutionCancelledError"}));
+                    last_node = Some(node.name.clone());
+                    break;
+                }
+                _ = cancelled => {
+                    final_status = status::CANCELED;
+                    error = Some(json!({"message": "The execution was cancelled", "name": "ExecutionCancelledError"}));
+                    last_node = Some(node.name.clone());
+                    break;
+                }
             }
         };
 
@@ -279,6 +340,16 @@ pub async fn execute(
 
         let outputs = match outcome {
             Ok(outputs) => outputs,
+            Err(e) if e.wait.is_some() => {
+                waiting_state = Some(WaitState {
+                    node: node.name.clone(),
+                    till_ms: e.wait.as_ref().and_then(|w| w.till_ms),
+                    input: inputs.first().cloned().unwrap_or_default(),
+                    source: entry.source.clone(),
+                });
+                final_status = status::WAITING;
+                break;
+            }
             Err(e) if !e.fatal && node.on_error != OnError::StopWorkflow => {
                 let mut item = Map::new();
                 item.insert("error".into(), json!(e.message));
@@ -305,6 +376,9 @@ pub async fn execute(
 
         task.data = Some(main_data(&outputs));
         push_task(&mut run_data, &node.name, &task);
+        if let Some(h) = &options.hooks {
+            h.node_after(&node.name, &serde_json::to_value(&task).unwrap()).await;
+        }
 
         if options.destination_node.as_deref() == Some(node.name.as_str()) {
             break;
@@ -324,6 +398,7 @@ pub async fn execute(
         custom_data: state.custom_data.clone(),
         static_data: state.static_data.clone(),
         console: state.console.clone(),
+        waiting: waiting_state,
     })
 }
 
@@ -387,6 +462,7 @@ async fn run_node(
             options.mode,
             options.execution_id.clone(),
             services,
+            options,
             run_state.clone(),
             Box::new(expr_data),
         );
@@ -475,12 +551,12 @@ fn expression_data(
         "execution": {
             "id": options.execution_id,
             "mode": options.mode.as_str(),
-            "resumeUrl": format!("{}webhook-waiting/{}", config.webhook_url, options.execution_id),
-            "resumeFormUrl": format!("{}form-waiting/{}", config.webhook_url, options.execution_id),
+            "resumeUrl": format!("{}webhook-waiting/{}{}", config.webhook_url, options.execution_id, options.resume_signature.as_ref().map(|s| format!("?signature={s}")).unwrap_or_default()),
+            "resumeFormUrl": format!("{}form-waiting/{}{}", config.webhook_url, options.execution_id, options.resume_signature.as_ref().map(|s| format!("?signature={s}")).unwrap_or_default()),
         },
         "customData": state.custom_data,
         "staticData": {"global": state.static_data.get("global").cloned().unwrap_or(json!({})), "node": json!({})},
-        "vars": {},
+        "vars": options.vars,
         "env": env,
     })
 }

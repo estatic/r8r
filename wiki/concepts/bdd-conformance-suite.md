@@ -4,7 +4,7 @@ title: "BDD conformance suite"
 tags: [testing, n8n-compatibility, spec]
 sources: [n8n-in-rust-reimplementation-spec]
 created: 2026-09-25
-updated: 2026-09-25
+updated: 2026-09-26
 ---
 
 # BDD conformance suite
@@ -63,6 +63,13 @@ defect.
 After the Phase 1 core landed (`src/n8n`: engine, expressions, nodes,
 credentials, CLI), 258 of 392 pass, including 222 of 223 phase-1
 scenarios. The rest need the Phase 2 server work.
+
+After the Phase 2 server landed (`src/n8n/server`: editor REST API and
+`n8n-auth` sessions, public API `/api/v1` with scoped keys, webhooks with
+response modes and auth, forms, signed resume URLs, schedules, push,
+error workflows, sub-workflows, save policies, crash recovery, graceful
+shutdown, health and metrics), 387 of 392 pass: every phase-1 and
+phase-2 scenario. The five left are the AI-node scenarios.
 
 ## Where this fits
 

@@ -12,7 +12,7 @@ export const useNodeTypesStore = defineStore('nodeTypes', {
   actions: {
     async fetchAll() {
       if (this.loaded) return
-      this.types = await api.get<NodeTypeMeta[]>('/rest/node-types')
+      this.types = await api.get<NodeTypeMeta[]>('/rest/r8r/node-types')
       this.loaded = true
     },
     async portsFor(typeName: string, parameters: Record<string, unknown>): Promise<string[]> {
@@ -22,7 +22,7 @@ export const useNodeTypesStore = defineStore('nodeTypes', {
       const inFlight = this.portsInFlight[key]
       if (inFlight) return inFlight
       const request = api
-        .post<{ output_ports: string[] }>(`/rest/node-types/${encodeURIComponent(typeName)}/output-ports`, { parameters })
+        .post<{ output_ports: string[] }>(`/rest/r8r/node-types/${encodeURIComponent(typeName)}/output-ports`, { parameters })
         .then((result) => {
           this.portsCache[key] = result.output_ports
           delete this.portsInFlight[key]

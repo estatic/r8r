@@ -42,8 +42,37 @@ pub fn file_writer(
 /// (without ANSI colors) when given. Filter from `RUST_LOG`, else
 /// `DEFAULT_FILTER`.
 pub fn init(log_file: Option<&Path>) -> anyhow::Result<LogGuard> {
-    let directive = filter_directive(std::env::var("RUST_LOG").ok().as_deref());
-    let terminal = fmt::layer().with_filter(EnvFilter::new(&directive));
+    init_with(log_file, &LogOptions::default())
+}
+
+/// n8n's logging settings (`N8N_LOG_LEVEL`, `N8N_LOG_FORMAT`).
+#[derive(Default)]
+pub struct LogOptions {
+    /// `error`, `warn`, `info`, `debug` or `silent`; `None` keeps the default.
+    pub level: Option<String>,
+    /// One JSON object per line instead of text.
+    pub json: bool,
+}
+
+/// The filter for an n8n log level (`RUST_LOG` still wins when set).
+pub fn level_directive(level: Option<&str>) -> String {
+    match level {
+        Some("silent") => "off".into(),
+        Some(l @ ("error" | "warn" | "info" | "debug")) => format!("r8r={l},warn"),
+        _ => DEFAULT_FILTER.into(),
+    }
+}
+
+pub fn init_with(log_file: Option<&Path>, options: &LogOptions) -> anyhow::Result<LogGuard> {
+    let directive = match std::env::var("RUST_LOG").ok().filter(|v| !v.trim().is_empty()) {
+        Some(v) => v,
+        None => level_directive(options.level.as_deref()),
+    };
+    let terminal = if options.json {
+        fmt::layer().json().flatten_event(true).with_current_span(false).with_span_list(false).with_filter(EnvFilter::new(&directive)).boxed()
+    } else {
+        fmt::layer().with_filter(EnvFilter::new(&directive)).boxed()
+    };
     let (file, guard) = match log_file {
         Some(path) => {
             let (writer, guard) = file_writer(path)?;

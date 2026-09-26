@@ -10,12 +10,12 @@ export const useAuthStore = defineStore('auth', {
   },
   actions: {
     async login(email: string, password: string) {
-      const response = await api.post<{ token: string }>('/rest/auth/login', { email, password })
+      const response = await api.post<{ token: string }>('/rest/r8r/auth/login', { email, password })
       this.token = response.token
       setToken(response.token)
     },
     async register(email: string, password: string) {
-      const response = await api.post<{ token: string }>('/rest/auth/register', { email, password })
+      const response = await api.post<{ token: string }>('/rest/r8r/auth/register', { email, password })
       this.token = response.token
       setToken(response.token)
     },

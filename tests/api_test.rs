@@ -173,7 +173,7 @@ async fn register_then_login_returns_tokens() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/auth/register")
+                .uri("/rest/r8r/auth/register")
                 .header("content-type", "application/json")
                 .body(Body::from(register_body.to_string()))
                 .unwrap(),
@@ -190,7 +190,7 @@ async fn register_then_login_returns_tokens() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/auth/login")
+                .uri("/rest/r8r/auth/login")
                 .header("content-type", "application/json")
                 .body(Body::from(login_body.to_string()))
                 .unwrap(),
@@ -210,7 +210,7 @@ async fn second_registration_is_rejected_by_default() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/auth/register")
+                .uri("/rest/r8r/auth/register")
                 .header("content-type", "application/json")
                 .body(Body::from(register_body.to_string()))
                 .unwrap(),
@@ -230,7 +230,7 @@ async fn second_registration_succeeds_when_open_registration_is_enabled() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/auth/register")
+                .uri("/rest/r8r/auth/register")
                 .header("content-type", "application/json")
                 .body(Body::from(register_body.to_string()))
                 .unwrap(),
@@ -248,7 +248,7 @@ async fn login_with_wrong_password_returns_401() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/auth/register")
+                .uri("/rest/r8r/auth/register")
                 .header("content-type", "application/json")
                 .body(Body::from(register_body.to_string()))
                 .unwrap(),
@@ -261,7 +261,7 @@ async fn login_with_wrong_password_returns_401() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/auth/login")
+                .uri("/rest/r8r/auth/login")
                 .header("content-type", "application/json")
                 .body(Body::from(login_body.to_string()))
                 .unwrap(),
@@ -284,7 +284,7 @@ async fn login_with_unregistered_email_returns_401() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/auth/login")
+                .uri("/rest/r8r/auth/login")
                 .header("content-type", "application/json")
                 .body(Body::from(login_body.to_string()))
                 .unwrap(),
@@ -300,7 +300,7 @@ async fn register_and_get_token(app: &axum::Router, email: &str) -> String {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/auth/register")
+                .uri("/rest/r8r/auth/register")
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap(),
@@ -320,7 +320,7 @@ async fn wait_for_execution(app: &axum::Router, token: &str, execution_id: &str)
             let response = app.clone()
                 .oneshot(
                     Request::builder()
-                        .uri(format!("/rest/executions/{execution_id}"))
+                        .uri(format!("/rest/r8r/executions/{execution_id}"))
                         .header("authorization", format!("Bearer {token}"))
                         .body(Body::empty())
                         .unwrap(),
@@ -347,7 +347,7 @@ async fn create_workflow_requires_auth() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .body(Body::from(body.to_string()))
                 .unwrap(),
@@ -367,7 +367,7 @@ async fn create_then_get_then_list_workflow() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(body.to_string()))
@@ -383,7 +383,7 @@ async fn create_then_get_then_list_workflow() {
     let response = app.clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/rest/workflows/{id}"))
+                .uri(format!("/rest/r8r/workflows/{id}"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -395,7 +395,7 @@ async fn create_then_get_then_list_workflow() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -427,7 +427,7 @@ async fn create_execute_and_fetch_execution_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(workflow_body.to_string()))
@@ -444,7 +444,7 @@ async fn create_execute_and_fetch_execution_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                .uri(format!("/rest/r8r/workflows/{workflow_id}/execute"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -463,7 +463,7 @@ async fn create_execute_and_fetch_execution_end_to_end() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/rest/executions/{execution_id}"))
+                .uri(format!("/rest/r8r/executions/{execution_id}"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -487,7 +487,7 @@ async fn list_executions_for_workflow_returns_newest_first_and_honors_limit() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(workflow_body.to_string()))
@@ -504,7 +504,7 @@ async fn list_executions_for_workflow_returns_newest_first_and_honors_limit() {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                    .uri(format!("/rest/r8r/workflows/{workflow_id}/execute"))
                     .header("authorization", format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -521,7 +521,7 @@ async fn list_executions_for_workflow_returns_newest_first_and_honors_limit() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/rest/workflows/{workflow_id}/executions?limit=2"))
+                .uri(format!("/rest/r8r/workflows/{workflow_id}/executions?limit=2"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -545,7 +545,7 @@ async fn list_executions_for_a_nonexistent_workflow_returns_404() {
     let response = app
         .oneshot(
             Request::builder()
-                .uri(format!("/rest/workflows/{}/executions", uuid::Uuid::new_v4()))
+                .uri(format!("/rest/r8r/workflows/{}/executions", uuid::Uuid::new_v4()))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -581,7 +581,7 @@ async fn branching_workflow_with_if_and_merge_executes_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(workflow_body.to_string()))
@@ -598,7 +598,7 @@ async fn branching_workflow_with_if_and_merge_executes_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                .uri(format!("/rest/r8r/workflows/{workflow_id}/execute"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -633,7 +633,7 @@ async fn activate_workflow_with_valid_schedule_succeeds() {
         "connections": []
     });
     let response = app.clone()
-        .oneshot(Request::builder().method("POST").uri("/rest/workflows")
+        .oneshot(Request::builder().method("POST").uri("/rest/r8r/workflows")
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::from(workflow_body.to_string())).unwrap())
@@ -643,7 +643,7 @@ async fn activate_workflow_with_valid_schedule_succeeds() {
     let workflow_id = workflow["id"].as_str().unwrap();
 
     let response = app
-        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/r8r/workflows/{workflow_id}/active"))
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::from(serde_json::json!({"active": true}).to_string())).unwrap())
@@ -667,7 +667,7 @@ async fn activate_workflow_with_invalid_cron_param_returns_400() {
         "connections": []
     });
     let response = app.clone()
-        .oneshot(Request::builder().method("POST").uri("/rest/workflows")
+        .oneshot(Request::builder().method("POST").uri("/rest/r8r/workflows")
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::from(workflow_body.to_string())).unwrap())
@@ -677,7 +677,7 @@ async fn activate_workflow_with_invalid_cron_param_returns_400() {
     let workflow_id = workflow["id"].as_str().unwrap();
 
     let response = app
-        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/r8r/workflows/{workflow_id}/active"))
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::from(serde_json::json!({"active": true}).to_string())).unwrap())
@@ -701,7 +701,7 @@ async fn webhook_trigger_executes_workflow_end_to_end_then_404s_after_deactivati
         ]
     });
     let response = app.clone()
-        .oneshot(Request::builder().method("POST").uri("/rest/workflows")
+        .oneshot(Request::builder().method("POST").uri("/rest/r8r/workflows")
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::from(workflow_body.to_string())).unwrap())
@@ -712,7 +712,7 @@ async fn webhook_trigger_executes_workflow_end_to_end_then_404s_after_deactivati
     let workflow_id = workflow["id"].as_str().unwrap();
 
     let response = app.clone()
-        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/r8r/workflows/{workflow_id}/active"))
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::from(serde_json::json!({"active": true}).to_string())).unwrap())
@@ -721,7 +721,7 @@ async fn webhook_trigger_executes_workflow_end_to_end_then_404s_after_deactivati
 
     // Fire the webhook — no authorization header, matching real external callers.
     let response = app.clone()
-        .oneshot(Request::builder().method("POST").uri(format!("/webhook/{workflow_id}/my-test-hook"))
+        .oneshot(Request::builder().method("POST").uri(format!("/webhook-r8r/{workflow_id}/my-test-hook"))
             .header("content-type", "application/json")
             .body(Body::from(serde_json::json!({"name": "Ada"}).to_string())).unwrap())
         .await.unwrap();
@@ -733,7 +733,7 @@ async fn webhook_trigger_executes_workflow_end_to_end_then_404s_after_deactivati
 
     // Deactivate, then confirm the webhook path is dark.
     let response = app.clone()
-        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/r8r/workflows/{workflow_id}/active"))
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::from(serde_json::json!({"active": false}).to_string())).unwrap())
@@ -741,7 +741,7 @@ async fn webhook_trigger_executes_workflow_end_to_end_then_404s_after_deactivati
     assert_eq!(response.status(), StatusCode::OK);
 
     let response = app
-        .oneshot(Request::builder().method("POST").uri(format!("/webhook/{workflow_id}/my-test-hook"))
+        .oneshot(Request::builder().method("POST").uri(format!("/webhook-r8r/{workflow_id}/my-test-hook"))
             .header("content-type", "application/json")
             .body(Body::from(serde_json::json!({"name": "Ada"}).to_string())).unwrap())
         .await.unwrap();
@@ -769,7 +769,7 @@ async fn webhook_run_that_succeeds_but_fails_to_persist_still_returns_200_with_t
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(create_body.to_string()))
@@ -785,7 +785,7 @@ async fn webhook_run_that_succeeds_but_fails_to_persist_still_returns_200_with_t
         .oneshot(
             Request::builder()
                 .method("PATCH")
-                .uri(format!("/rest/workflows/{workflow_id}/active"))
+                .uri(format!("/rest/r8r/workflows/{workflow_id}/active"))
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(serde_json::json!({"active": true}).to_string()))
@@ -801,7 +801,7 @@ async fn webhook_run_that_succeeds_but_fails_to_persist_still_returns_200_with_t
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/webhook/{workflow_id}/persist-fail"))
+                .uri(format!("/webhook-r8r/{workflow_id}/persist-fail"))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -835,7 +835,7 @@ async fn activate_then_deactivate_updates_trigger_registry_correctly() {
     let token = register_and_get_token(&app, "registry-happy-path@example.com").await;
 
     let response = app.clone()
-        .oneshot(Request::builder().method("POST").uri("/rest/workflows")
+        .oneshot(Request::builder().method("POST").uri("/rest/r8r/workflows")
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::from(scheduled_workflow_body().to_string())).unwrap())
@@ -847,7 +847,7 @@ async fn activate_then_deactivate_updates_trigger_registry_correctly() {
     let workflow_uuid: uuid::Uuid = workflow_id.parse().unwrap();
 
     let response = app.clone()
-        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/r8r/workflows/{workflow_id}/active"))
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::from(serde_json::json!({"active": true}).to_string())).unwrap())
@@ -862,7 +862,7 @@ async fn activate_then_deactivate_updates_trigger_registry_correctly() {
     state.trigger_registry.record_cron_job(workflow_uuid, job_id.unwrap());
 
     let response = app
-        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/r8r/workflows/{workflow_id}/active"))
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::from(serde_json::json!({"active": false}).to_string())).unwrap())
@@ -887,7 +887,7 @@ async fn activation_persist_failure_unregisters_the_cron_job() {
     let token = register_and_get_token(&app, "compensate-activate@example.com").await;
 
     let response = app.clone()
-        .oneshot(Request::builder().method("POST").uri("/rest/workflows")
+        .oneshot(Request::builder().method("POST").uri("/rest/r8r/workflows")
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::from(scheduled_workflow_body().to_string())).unwrap())
@@ -901,7 +901,7 @@ async fn activation_persist_failure_unregisters_the_cron_job() {
     fail_update.store(true, Ordering::SeqCst);
 
     let response = app
-        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/r8r/workflows/{workflow_id}/active"))
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::from(serde_json::json!({"active": true}).to_string())).unwrap())
@@ -925,7 +925,7 @@ async fn deactivation_persist_failure_reregisters_the_cron_job() {
     let token = register_and_get_token(&app, "compensate-deactivate@example.com").await;
 
     let response = app.clone()
-        .oneshot(Request::builder().method("POST").uri("/rest/workflows")
+        .oneshot(Request::builder().method("POST").uri("/rest/r8r/workflows")
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::from(scheduled_workflow_body().to_string())).unwrap())
@@ -939,7 +939,7 @@ async fn deactivation_persist_failure_reregisters_the_cron_job() {
     // Activate normally first, while update_workflow still succeeds, so the
     // workflow is genuinely persisted active=true with a registered cron job.
     let response = app.clone()
-        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/r8r/workflows/{workflow_id}/active"))
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::from(serde_json::json!({"active": true}).to_string())).unwrap())
@@ -950,7 +950,7 @@ async fn deactivation_persist_failure_reregisters_the_cron_job() {
     fail_update.store(true, Ordering::SeqCst);
 
     let response = app
-        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/r8r/workflows/{workflow_id}/active"))
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::from(serde_json::json!({"active": false}).to_string())).unwrap())
@@ -973,7 +973,7 @@ async fn create_credential_never_returns_data_field() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/credentials")
+                .uri("/rest/r8r/credentials")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
@@ -1006,7 +1006,7 @@ async fn list_credentials_returns_created_ones_without_data() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/credentials")
+                .uri("/rest/r8r/credentials")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
@@ -1021,7 +1021,7 @@ async fn list_credentials_returns_created_ones_without_data() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/rest/credentials")
+                .uri("/rest/r8r/credentials")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1087,7 +1087,7 @@ async fn execute_workflow_with_nonexistent_credential_returns_400_before_touchin
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(workflow_body.to_string()))
@@ -1106,7 +1106,7 @@ async fn execute_workflow_with_nonexistent_credential_returns_400_before_touchin
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                .uri(format!("/rest/r8r/workflows/{workflow_id}/execute"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1142,7 +1142,7 @@ async fn execute_workflow_with_nonexistent_credential_returns_400_before_touchin
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(workflow_body_2.to_string()))
@@ -1159,7 +1159,7 @@ async fn execute_workflow_with_nonexistent_credential_returns_400_before_touchin
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/rest/workflows/{workflow_2_id}/execute"))
+                .uri(format!("/rest/r8r/workflows/{workflow_2_id}/execute"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1181,7 +1181,7 @@ async fn create_credential_requires_auth() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/credentials")
+                .uri("/rest/r8r/credentials")
                 .header("content-type", "application/json")
                 .body(Body::from(
                     serde_json::json!({"name": "x", "credential_type": "bearer", "data": {}}).to_string(),
@@ -1210,7 +1210,7 @@ async fn credential_authenticated_http_request_executes_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/credentials")
+                .uri("/rest/r8r/credentials")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
@@ -1243,7 +1243,7 @@ async fn credential_authenticated_http_request_executes_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(workflow_body.to_string()))
@@ -1260,7 +1260,7 @@ async fn credential_authenticated_http_request_executes_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                .uri(format!("/rest/r8r/workflows/{workflow_id}/execute"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1294,7 +1294,7 @@ async fn credential_authenticated_telegram_send_message_executes_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/credentials")
+                .uri("/rest/r8r/credentials")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
@@ -1328,7 +1328,7 @@ async fn credential_authenticated_telegram_send_message_executes_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(workflow_body.to_string()))
@@ -1345,7 +1345,7 @@ async fn credential_authenticated_telegram_send_message_executes_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                .uri(format!("/rest/r8r/workflows/{workflow_id}/execute"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1408,7 +1408,7 @@ async fn telegram_trigger_fires_downstream_node_on_incoming_update() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/credentials")
+                .uri("/rest/r8r/credentials")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
@@ -1426,7 +1426,7 @@ async fn telegram_trigger_fires_downstream_node_on_incoming_update() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/credentials")
+                .uri("/rest/r8r/credentials")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
@@ -1462,7 +1462,7 @@ async fn telegram_trigger_fires_downstream_node_on_incoming_update() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(workflow_body.to_string()))
@@ -1478,7 +1478,7 @@ async fn telegram_trigger_fires_downstream_node_on_incoming_update() {
         .oneshot(
             Request::builder()
                 .method("PATCH")
-                .uri(format!("/rest/workflows/{workflow_id}/active"))
+                .uri(format!("/rest/r8r/workflows/{workflow_id}/active"))
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(serde_json::json!({"active": true}).to_string()))
@@ -1512,7 +1512,7 @@ async fn telegram_trigger_fires_downstream_node_on_incoming_update() {
         .oneshot(
             Request::builder()
                 .method("PATCH")
-                .uri(format!("/rest/workflows/{workflow_id}/active"))
+                .uri(format!("/rest/r8r/workflows/{workflow_id}/active"))
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(serde_json::json!({"active": false}).to_string()))
@@ -1533,7 +1533,7 @@ async fn update_workflow_persists_new_nodes_and_name() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
@@ -1556,7 +1556,7 @@ async fn update_workflow_persists_new_nodes_and_name() {
         .oneshot(
             Request::builder()
                 .method("PUT")
-                .uri(format!("/rest/workflows/{workflow_id}"))
+                .uri(format!("/rest/r8r/workflows/{workflow_id}"))
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(update_body.to_string()))
@@ -1580,7 +1580,7 @@ async fn update_workflow_on_missing_id_returns_404() {
         .oneshot(
             Request::builder()
                 .method("PUT")
-                .uri(format!("/rest/workflows/{}", uuid::Uuid::new_v4()))
+                .uri(format!("/rest/r8r/workflows/{}", uuid::Uuid::new_v4()))
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(serde_json::json!({"name": "x", "nodes": [], "connections": []}).to_string()))
@@ -1601,7 +1601,7 @@ async fn delete_workflow_removes_it_and_then_404s() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(serde_json::json!({"name": "to-delete", "nodes": [], "connections": []}).to_string()))
@@ -1617,7 +1617,7 @@ async fn delete_workflow_removes_it_and_then_404s() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri(format!("/rest/workflows/{workflow_id}"))
+                .uri(format!("/rest/r8r/workflows/{workflow_id}"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1630,7 +1630,7 @@ async fn delete_workflow_removes_it_and_then_404s() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri(format!("/rest/workflows/{workflow_id}"))
+                .uri(format!("/rest/r8r/workflows/{workflow_id}"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1655,7 +1655,7 @@ async fn deleting_an_active_workflow_deactivates_its_trigger_first() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(create_body.to_string()))
@@ -1671,7 +1671,7 @@ async fn deleting_an_active_workflow_deactivates_its_trigger_first() {
         .oneshot(
             Request::builder()
                 .method("PATCH")
-                .uri(format!("/rest/workflows/{workflow_id}/active"))
+                .uri(format!("/rest/r8r/workflows/{workflow_id}/active"))
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(serde_json::json!({"active": true}).to_string()))
@@ -1687,7 +1687,7 @@ async fn deleting_an_active_workflow_deactivates_its_trigger_first() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri(format!("/rest/workflows/{workflow_id}"))
+                .uri(format!("/rest/r8r/workflows/{workflow_id}"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1716,7 +1716,7 @@ async fn deleting_an_executed_workflow_succeeds() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(create_body.to_string()))
@@ -1732,7 +1732,7 @@ async fn deleting_an_executed_workflow_succeeds() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                .uri(format!("/rest/r8r/workflows/{workflow_id}/execute"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1748,7 +1748,7 @@ async fn deleting_an_executed_workflow_succeeds() {
         .oneshot(
             Request::builder()
                 .method("DELETE")
-                .uri(format!("/rest/workflows/{workflow_id}"))
+                .uri(format!("/rest/r8r/workflows/{workflow_id}"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1767,7 +1767,7 @@ async fn node_types_lists_registered_types_with_metadata() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/rest/node-types")
+                .uri("/rest/r8r/node-types")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -1797,7 +1797,7 @@ async fn output_ports_for_switch_reflects_case_count() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/node-types/core.switch/output-ports")
+                .uri("/rest/r8r/node-types/core.switch/output-ports")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(body.to_string()))
@@ -1821,7 +1821,7 @@ async fn output_ports_for_unknown_type_returns_404() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/node-types/does.not.exist/output-ports")
+                .uri("/rest/r8r/node-types/does.not.exist/output-ports")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(body.to_string()))
@@ -1873,7 +1873,7 @@ async fn rest_routes_still_take_priority_over_the_frontend_fallback() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/auth/login")
+                .uri("/rest/r8r/auth/login")
                 .header("content-type", "application/json")
                 .body(Body::from("not valid json"))
                 .unwrap(),
@@ -1891,7 +1891,7 @@ async fn unmatched_api_paths_return_404_not_the_spa() {
     // unmatched path under /rest or /webhook reaches the SPA fallback, and
     // must get a clean 404 rather than 200 + index.html -- otherwise a
     // frontend typo or a renamed endpoint looks like a successful HTML page.
-    for uri in ["/rest/definitely-not-a-real-route", "/webhook/definitely-not-a-real-route"] {
+    for uri in ["/rest/r8r/definitely-not-a-real-route", "/webhook/definitely-not-a-real-route"] {
         let app = test_app().await;
         let response = app.oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap()).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND, "{uri} must 404");
@@ -1922,7 +1922,7 @@ async fn websocket_streams_node_events_during_a_run_and_a_bad_token_closes_it() 
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
@@ -1980,7 +1980,7 @@ async fn websocket_streams_node_events_during_a_run_and_a_bad_token_closes_it() 
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/rest/workflows/{exec_workflow_id}/execute"))
+                    .uri(format!("/rest/r8r/workflows/{exec_workflow_id}/execute"))
                     .header("authorization", format!("Bearer {exec_token}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -2041,7 +2041,7 @@ async fn websocket_never_forwards_events_for_a_different_workflow() {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri("/rest/workflows")
+                    .uri("/rest/r8r/workflows")
                     .header("content-type", "application/json")
                     .header("authorization", format!("Bearer {token}"))
                     .body(Body::from(
@@ -2065,7 +2065,7 @@ async fn websocket_never_forwards_events_for_a_different_workflow() {
             .oneshot(
                 Request::builder()
                     .method("POST")
-                    .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                    .uri(format!("/rest/r8r/workflows/{workflow_id}/execute"))
                     .header("authorization", format!("Bearer {token}"))
                     .body(Body::empty())
                     .unwrap(),
@@ -2153,7 +2153,7 @@ async fn agent_node_calls_a_tool_then_returns_a_final_response_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/credentials")
+                .uri("/rest/r8r/credentials")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
@@ -2200,7 +2200,7 @@ async fn agent_node_calls_a_tool_then_returns_a_final_response_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(workflow_body.to_string()))
@@ -2215,7 +2215,7 @@ async fn agent_node_calls_a_tool_then_returns_a_final_response_end_to_end() {
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri(format!("/rest/workflows/{workflow_id}/execute"))
+                .uri(format!("/rest/r8r/workflows/{workflow_id}/execute"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -2235,7 +2235,7 @@ async fn agent_node_calls_a_tool_then_returns_a_final_response_end_to_end() {
 async fn credential_types_requires_authentication() {
     let app = test_app().await;
     let response = app
-        .oneshot(Request::builder().method("GET").uri("/rest/credential-types").body(Body::empty()).unwrap())
+        .oneshot(Request::builder().method("GET").uri("/rest/r8r/credential-types").body(Body::empty()).unwrap())
         .await
         .unwrap();
     assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -2250,7 +2250,7 @@ async fn credential_types_lists_all_known_schemas() {
         .oneshot(
             Request::builder()
                 .method("GET")
-                .uri("/rest/credential-types")
+                .uri("/rest/r8r/credential-types")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -2275,7 +2275,7 @@ async fn post_workflow(app: &axum::Router, token: &str, body: serde_json::Value)
         .oneshot(
             Request::builder()
                 .method("POST")
-                .uri("/rest/workflows")
+                .uri("/rest/r8r/workflows")
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(body.to_string()))
@@ -2318,7 +2318,7 @@ async fn node_settings_round_trip_and_invalid_update_leaves_workflow_unchanged()
         .oneshot(
             Request::builder()
                 .method("PUT")
-                .uri(format!("/rest/workflows/{id}"))
+                .uri(format!("/rest/r8r/workflows/{id}"))
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(bad.to_string()))
@@ -2331,7 +2331,7 @@ async fn node_settings_round_trip_and_invalid_update_leaves_workflow_unchanged()
     let response = app.clone()
         .oneshot(
             Request::builder()
-                .uri(format!("/rest/workflows/{id}"))
+                .uri(format!("/rest/r8r/workflows/{id}"))
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::empty())
                 .unwrap(),
@@ -2357,7 +2357,7 @@ async fn create_active_webhook_workflow(app: &axum::Router, token: &str, hook_pa
         "connections": [{"from_node": "hook", "from_output": 0, "to_node": "set1", "to_input": 0}]
     });
     let response = app.clone()
-        .oneshot(Request::builder().method("POST").uri("/rest/workflows")
+        .oneshot(Request::builder().method("POST").uri("/rest/r8r/workflows")
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::from(workflow_body.to_string())).unwrap())
@@ -2365,7 +2365,7 @@ async fn create_active_webhook_workflow(app: &axum::Router, token: &str, hook_pa
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let workflow_id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string();
     let response = app.clone()
-        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/workflows/{workflow_id}/active"))
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/r8r/workflows/{workflow_id}/active"))
             .header("content-type", "application/json")
             .header("authorization", format!("Bearer {token}"))
             .body(Body::from(serde_json::json!({"active": true}).to_string())).unwrap())
@@ -2376,7 +2376,7 @@ async fn create_active_webhook_workflow(app: &axum::Router, token: &str, hook_pa
 
 async fn fire_webhook(app: &axum::Router, workflow_id: &str, hook_path: &str) -> axum::response::Response {
     app.clone()
-        .oneshot(Request::builder().method("POST").uri(format!("/webhook/{workflow_id}/{hook_path}"))
+        .oneshot(Request::builder().method("POST").uri(format!("/webhook-r8r/{workflow_id}/{hook_path}"))
             .header("content-type", "application/json")
             .body(Body::from(serde_json::json!({"name": "Ada"}).to_string())).unwrap())
         .await.unwrap()
@@ -2425,7 +2425,7 @@ async fn send(app: &axum::Router, method: &str, uri: &str, token: &str, body: Op
 }
 
 async fn create_cred(app: &axum::Router, token: &str, name: &str, ty: &str, data: serde_json::Value) -> String {
-    let (status, body) = send(app, "POST", "/rest/credentials", token, Some(serde_json::json!({"name": name, "credential_type": ty, "data": data}))).await;
+    let (status, body) = send(app, "POST", "/rest/r8r/credentials", token, Some(serde_json::json!({"name": name, "credential_type": ty, "data": data}))).await;
     assert_eq!(status, StatusCode::CREATED);
     body["id"].as_str().unwrap().to_string()
 }
@@ -2435,13 +2435,13 @@ async fn get_credential_by_id_returns_text_fields_but_never_secrets() {
     let app = test_app().await;
     let token = register_and_get_token(&app, "cred-get@example.com").await;
     let id = create_cred(&app, &token, "hdr", "apiKeyHeader", serde_json::json!({"header_name": "X-Key", "value": "top-secret"})).await;
-    let (status, body) = send(&app, "GET", &format!("/rest/credentials/{id}"), &token, None).await;
+    let (status, body) = send(&app, "GET", &format!("/rest/r8r/credentials/{id}"), &token, None).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["fields"]["header_name"], "X-Key");
     assert!(body["fields"].get("value").is_none());
     assert!(!body.to_string().contains("top-secret"));
     assert_eq!(body["used_by"], 0);
-    let (status, _) = send(&app, "GET", &format!("/rest/credentials/{}", uuid::Uuid::new_v4()), &token, None).await;
+    let (status, _) = send(&app, "GET", &format!("/rest/r8r/credentials/{}", uuid::Uuid::new_v4()), &token, None).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
 
@@ -2450,7 +2450,7 @@ async fn patch_name_only_keeps_secret() {
     let (app, state) = test_app_with_state().await;
     let token = register_and_get_token(&app, "cred-rename@example.com").await;
     let id = create_cred(&app, &token, "bot", "telegramApi", serde_json::json!({"bot_token": "123:ABC"})).await;
-    let (status, body) = send(&app, "PATCH", &format!("/rest/credentials/{id}"), &token, Some(serde_json::json!({"name": "  renamed bot  "}))).await;
+    let (status, body) = send(&app, "PATCH", &format!("/rest/r8r/credentials/{id}"), &token, Some(serde_json::json!({"name": "  renamed bot  "}))).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(body["name"], "renamed bot");
     let stored = state.storage.get_credential(id.parse().unwrap()).await.unwrap().unwrap();
@@ -2463,17 +2463,17 @@ async fn patch_merges_typed_data_and_replaces_untyped_data() {
     let (app, state) = test_app_with_state().await;
     let token = register_and_get_token(&app, "cred-patch@example.com").await;
     let typed = create_cred(&app, &token, "bot", "telegramApi", serde_json::json!({"bot_token": "old"})).await;
-    let (s, _) = send(&app, "PATCH", &format!("/rest/credentials/{typed}"), &token, Some(serde_json::json!({"data": {"bot_token": ""}}))).await;
+    let (s, _) = send(&app, "PATCH", &format!("/rest/r8r/credentials/{typed}"), &token, Some(serde_json::json!({"data": {"bot_token": ""}}))).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(state.storage.get_credential(typed.parse().unwrap()).await.unwrap().unwrap().data, serde_json::json!({"bot_token": "old"}));
-    let (s, _) = send(&app, "PATCH", &format!("/rest/credentials/{typed}"), &token, Some(serde_json::json!({"data": {"bot_token": "new"}, "credential_type": "bearerToken"}))).await;
+    let (s, _) = send(&app, "PATCH", &format!("/rest/r8r/credentials/{typed}"), &token, Some(serde_json::json!({"data": {"bot_token": "new"}, "credential_type": "bearerToken"}))).await;
     assert_eq!(s, StatusCode::OK);
     let stored = state.storage.get_credential(typed.parse().unwrap()).await.unwrap().unwrap();
     assert_eq!(stored.data, serde_json::json!({"bot_token": "new"}));
     assert_eq!(stored.credential_type, "telegramApi");
 
     let untyped = create_cred(&app, &token, "custom", "myCustomThing", serde_json::json!({"a": 1})).await;
-    let (s, _) = send(&app, "PATCH", &format!("/rest/credentials/{untyped}"), &token, Some(serde_json::json!({"data": {"b": 2}}))).await;
+    let (s, _) = send(&app, "PATCH", &format!("/rest/r8r/credentials/{untyped}"), &token, Some(serde_json::json!({"data": {"b": 2}}))).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(state.storage.get_credential(untyped.parse().unwrap()).await.unwrap().unwrap().data, serde_json::json!({"b": 2}));
 }
@@ -2483,11 +2483,11 @@ async fn patch_rejects_blank_name_bad_data_and_missing_ids() {
     let app = test_app().await;
     let token = register_and_get_token(&app, "cred-bad@example.com").await;
     let id = create_cred(&app, &token, "bot", "telegramApi", serde_json::json!({"bot_token": "x"})).await;
-    let (s, _) = send(&app, "PATCH", &format!("/rest/credentials/{id}"), &token, Some(serde_json::json!({"name": "   "}))).await;
+    let (s, _) = send(&app, "PATCH", &format!("/rest/r8r/credentials/{id}"), &token, Some(serde_json::json!({"name": "   "}))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
-    let (s, _) = send(&app, "PATCH", &format!("/rest/credentials/{id}"), &token, Some(serde_json::json!({"data": "not an object"}))).await;
+    let (s, _) = send(&app, "PATCH", &format!("/rest/r8r/credentials/{id}"), &token, Some(serde_json::json!({"data": "not an object"}))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
-    let (s, _) = send(&app, "PATCH", &format!("/rest/credentials/{}", uuid::Uuid::new_v4()), &token, Some(serde_json::json!({"name": "x"}))).await;
+    let (s, _) = send(&app, "PATCH", &format!("/rest/r8r/credentials/{}", uuid::Uuid::new_v4()), &token, Some(serde_json::json!({"name": "x"}))).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
@@ -2501,24 +2501,24 @@ async fn delete_is_refused_while_a_workflow_uses_the_credential() {
         "nodes": [{"id": "h", "node_type": "core.httpRequest", "position": [0.0, 0.0], "parameters": {"url": "https://example.com", "auth": {"type": "bearer", "credential_id": id}}}],
         "connections": []
     });
-    let (s, wf) = send(&app, "POST", "/rest/workflows", &token, Some(wf_body)).await;
+    let (s, wf) = send(&app, "POST", "/rest/r8r/workflows", &token, Some(wf_body)).await;
     assert_eq!(s, StatusCode::CREATED);
     let wf_id = wf["id"].as_str().unwrap().to_string();
 
-    let (s, list) = send(&app, "GET", "/rest/credentials", &token, None).await;
+    let (s, list) = send(&app, "GET", "/rest/r8r/credentials", &token, None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(list.as_array().unwrap().iter().find(|c| c["id"] == id.as_str()).unwrap()["used_by"], 1);
 
-    let (s, body) = send(&app, "DELETE", &format!("/rest/credentials/{id}"), &token, None).await;
+    let (s, body) = send(&app, "DELETE", &format!("/rest/r8r/credentials/{id}"), &token, None).await;
     assert_eq!(s, StatusCode::CONFLICT);
     assert_eq!(body["error"], "credential is in use");
     assert_eq!(body["workflows"][0]["name"], "uses-cred");
 
-    let (s, _) = send(&app, "DELETE", &format!("/rest/workflows/{wf_id}"), &token, None).await;
+    let (s, _) = send(&app, "DELETE", &format!("/rest/r8r/workflows/{wf_id}"), &token, None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
-    let (s, _) = send(&app, "DELETE", &format!("/rest/credentials/{id}"), &token, None).await;
+    let (s, _) = send(&app, "DELETE", &format!("/rest/r8r/credentials/{id}"), &token, None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
-    let (s, _) = send(&app, "DELETE", &format!("/rest/credentials/{id}"), &token, None).await;
+    let (s, _) = send(&app, "DELETE", &format!("/rest/r8r/credentials/{id}"), &token, None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
@@ -2540,22 +2540,22 @@ fn tool_body(name: &str, cred: Option<&str>) -> serde_json::Value {
 async fn tool_crud_and_validation() {
     let app = test_app().await;
     let token = register_and_get_token(&app, "tools@example.com").await;
-    let (s, created) = send(&app, "POST", "/rest/tools", &token, Some(tool_body("search", None))).await;
+    let (s, created) = send(&app, "POST", "/rest/r8r/tools", &token, Some(tool_body("search", None))).await;
     assert_eq!(s, StatusCode::CREATED);
     let id = created["id"].as_str().unwrap().to_string();
-    let (s, _) = send(&app, "POST", "/rest/tools", &token, Some(tool_body("search", None))).await;
+    let (s, _) = send(&app, "POST", "/rest/r8r/tools", &token, Some(tool_body("search", None))).await;
     assert_eq!(s, StatusCode::CONFLICT);
-    let (s, _) = send(&app, "POST", "/rest/tools", &token, Some(tool_body("bad name", None))).await;
+    let (s, _) = send(&app, "POST", "/rest/r8r/tools", &token, Some(tool_body("bad name", None))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
-    let (s, list) = send(&app, "GET", "/rest/tools", &token, None).await;
+    let (s, list) = send(&app, "GET", "/rest/r8r/tools", &token, None).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(list[0]["used_by"], 0);
-    let (s, patched) = send(&app, "PATCH", &format!("/rest/tools/{id}"), &token, Some(serde_json::json!({"description": "web search"}))).await;
+    let (s, patched) = send(&app, "PATCH", &format!("/rest/r8r/tools/{id}"), &token, Some(serde_json::json!({"description": "web search"}))).await;
     assert_eq!(s, StatusCode::OK);
     assert_eq!(patched["description"], "web search");
-    let (s, _) = send(&app, "PATCH", &format!("/rest/tools/{id}"), &token, Some(serde_json::json!({"node_type": "ai.agent"}))).await;
+    let (s, _) = send(&app, "PATCH", &format!("/rest/r8r/tools/{id}"), &token, Some(serde_json::json!({"node_type": "ai.agent"}))).await;
     assert_eq!(s, StatusCode::BAD_REQUEST);
-    let (s, _) = send(&app, "GET", &format!("/rest/tools/{}", uuid::Uuid::new_v4()), &token, None).await;
+    let (s, _) = send(&app, "GET", &format!("/rest/r8r/tools/{}", uuid::Uuid::new_v4()), &token, None).await;
     assert_eq!(s, StatusCode::NOT_FOUND);
 }
 
@@ -2563,21 +2563,21 @@ async fn tool_crud_and_validation() {
 async fn tool_delete_is_refused_while_an_agent_uses_it() {
     let app = test_app().await;
     let token = register_and_get_token(&app, "tools-del@example.com").await;
-    let (_, tool) = send(&app, "POST", "/rest/tools", &token, Some(tool_body("lookup", None))).await;
+    let (_, tool) = send(&app, "POST", "/rest/r8r/tools", &token, Some(tool_body("lookup", None))).await;
     let tool_id = tool["id"].as_str().unwrap().to_string();
     let wf = serde_json::json!({
         "name": "agent-wf",
         "nodes": [{"id": "a", "node_type": "ai.agent", "position": [0.0, 0.0], "parameters": {"tool_ids": [tool_id]}}],
         "connections": []
     });
-    let (s, wf) = send(&app, "POST", "/rest/workflows", &token, Some(wf)).await;
+    let (s, wf) = send(&app, "POST", "/rest/r8r/workflows", &token, Some(wf)).await;
     assert_eq!(s, StatusCode::CREATED);
-    let (s, body) = send(&app, "DELETE", &format!("/rest/tools/{tool_id}"), &token, None).await;
+    let (s, body) = send(&app, "DELETE", &format!("/rest/r8r/tools/{tool_id}"), &token, None).await;
     assert_eq!(s, StatusCode::CONFLICT);
     assert_eq!(body["workflows"][0]["name"], "agent-wf");
     let wf_id = wf["id"].as_str().unwrap();
-    send(&app, "DELETE", &format!("/rest/workflows/{wf_id}"), &token, None).await;
-    let (s, _) = send(&app, "DELETE", &format!("/rest/tools/{tool_id}"), &token, None).await;
+    send(&app, "DELETE", &format!("/rest/r8r/workflows/{wf_id}"), &token, None).await;
+    let (s, _) = send(&app, "DELETE", &format!("/rest/r8r/tools/{tool_id}"), &token, None).await;
     assert_eq!(s, StatusCode::NO_CONTENT);
 }
 
@@ -2586,11 +2586,11 @@ async fn a_credential_used_only_by_a_tool_cannot_be_deleted() {
     let app = test_app().await;
     let token = register_and_get_token(&app, "tools-cred@example.com").await;
     let cred = create_cred(&app, &token, "api", "bearerToken", serde_json::json!({"token": "t"})).await;
-    let (s, _) = send(&app, "POST", "/rest/tools", &token, Some(tool_body("secured", Some(&cred)))).await;
+    let (s, _) = send(&app, "POST", "/rest/r8r/tools", &token, Some(tool_body("secured", Some(&cred)))).await;
     assert_eq!(s, StatusCode::CREATED);
-    let (_, list) = send(&app, "GET", "/rest/credentials", &token, None).await;
+    let (_, list) = send(&app, "GET", "/rest/r8r/credentials", &token, None).await;
     assert_eq!(list.as_array().unwrap().iter().find(|c| c["id"] == cred.as_str()).unwrap()["used_by"], 1);
-    let (s, body) = send(&app, "DELETE", &format!("/rest/credentials/{cred}"), &token, None).await;
+    let (s, body) = send(&app, "DELETE", &format!("/rest/r8r/credentials/{cred}"), &token, None).await;
     assert_eq!(s, StatusCode::CONFLICT);
     assert_eq!(body["tools"][0]["name"], "secured");
 }
@@ -2607,9 +2607,9 @@ async fn webhook_runs_resolve_credentials_first() {
         ],
         "connections": [{"from_node": "hook", "from_output": 0, "to_node": "h", "to_input": 0}]
     });
-    let (_, wf) = send(&app, "POST", "/rest/workflows", &token, Some(wf)).await;
+    let (_, wf) = send(&app, "POST", "/rest/r8r/workflows", &token, Some(wf)).await;
     let wf_id = wf["id"].as_str().unwrap().to_string();
-    send(&app, "PATCH", &format!("/rest/workflows/{wf_id}/active"), &token, Some(serde_json::json!({"active": true}))).await;
+    send(&app, "PATCH", &format!("/rest/r8r/workflows/{wf_id}/active"), &token, Some(serde_json::json!({"active": true}))).await;
     let response = fire_webhook(&app, &wf_id, "hc").await;
     assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
     let bytes = response.into_body().collect().await.unwrap().to_bytes();

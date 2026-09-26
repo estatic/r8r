@@ -40,7 +40,7 @@ describe('useNodeTypesStore', () => {
     )
     const store = useNodeTypesStore()
     await store.portsFor('a/b c', {})
-    expect(requestedUrl).toBe(`/rest/node-types/${encodeURIComponent('a/b c')}/output-ports`)
+    expect(requestedUrl).toBe(`/rest/r8r/node-types/${encodeURIComponent('a/b c')}/output-ports`)
     vi.unstubAllGlobals()
   })
 })

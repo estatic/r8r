@@ -28,7 +28,7 @@ export function useWorkflowRun(workflowId: string, execution: Ref<Execution | nu
   function finishFromSocket(id: string) {
     stop()
     api
-      .get<Execution>(`/rest/executions/${id}`)
+      .get<Execution>(`/rest/r8r/executions/${id}`)
       .then((latest) => {
         if (!disposed && latest.status !== 'Running' && execution.value?.id === id) execution.value = latest
       })
@@ -50,7 +50,7 @@ export function useWorkflowRun(workflowId: string, execution: Ref<Execution | nu
     executing.value = true
     let started: Execution
     try {
-      started = await api.post<Execution>(`/rest/workflows/${workflowId}/execute`)
+      started = await api.post<Execution>(`/rest/r8r/workflows/${workflowId}/execute`)
     } catch (e) {
       stop()
       throw e
@@ -70,7 +70,7 @@ export function useWorkflowRun(workflowId: string, execution: Ref<Execution | nu
     const id = started.id
     timer = setInterval(async () => {
       try {
-        const latest = await api.get<Execution>(`/rest/executions/${id}`)
+        const latest = await api.get<Execution>(`/rest/r8r/executions/${id}`)
         if (startedId === id && latest.status !== 'Running') {
           stop()
           execution.value = latest

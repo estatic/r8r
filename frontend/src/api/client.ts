@@ -23,7 +23,7 @@ export class ApiError extends Error {
 }
 
 /** Endpoints whose own 401 means "bad credentials", not "session expired". */
-const AUTH_PATHS = ['/rest/auth/login', '/rest/auth/register']
+const AUTH_PATHS = ['/rest/r8r/auth/login', '/rest/r8r/auth/register']
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getToken()
