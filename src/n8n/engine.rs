@@ -540,16 +540,22 @@ fn expression_data(
             None => serde_json::to_value(inputs.get(i).cloned().unwrap_or_default()).unwrap(),
         })
         .collect();
-    let input0 = lineage_inputs.first().cloned().unwrap_or_else(|| serde_json::to_value(inputs.first().cloned().unwrap_or_default()).unwrap());
+    let mut lineage_inputs = lineage_inputs;
+    let input0 = match lineage_inputs.first_mut() {
+        Some(first) => std::mem::take(first),
+        None => serde_json::to_value(inputs.first().cloned().unwrap_or_default()).unwrap(),
+    };
     let config = &services.config;
     let env = if config.block_env_access_in_node {
         Value::Null
     } else {
         Value::Object(std::env::vars().map(|(k, v)| (k, Value::String(v))).collect())
     };
+    // Input 0 is `input` (sent once); the others are for `$input.all(n)`.
+    let other_inputs = if lineage_inputs.is_empty() { json!([[]]) } else { Value::Array(lineage_inputs) };
     json!({
         "input": input0,
-        "inputs": if lineage_inputs.is_empty() { json!([input0]) } else { Value::Array(lineage_inputs) },
+        "inputs": other_inputs,
         "source": source,
         "runData": run_data,
         "runIndex": run_index,

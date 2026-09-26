@@ -110,8 +110,11 @@ impl NodeType for Code {
 
     async fn execute(&self, ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
         let language = ctx.raw_param("language").and_then(Value::as_str).unwrap_or("javaScript");
+        if language == "python" || language == "pythonNative" {
+            return run_python(ctx).await;
+        }
         if language != "javaScript" {
-            return Err(NodeError::new(format!("{language} is not supported yet: Python needs the external task runner (Phase 3)")));
+            return Err(NodeError::new(format!("The language \"{language}\" is not supported")));
         }
         let code = ctx.raw_param("jsCode").and_then(Value::as_str).unwrap_or("return [];").to_string();
         let each = ctx.raw_param("mode").and_then(Value::as_str) == Some("runOnceForEachItem");
@@ -123,7 +126,7 @@ impl NodeType for Code {
         vm.run_script(&format!("globalThis.__r8r_allow_builtin = {allowed};"), Duration::from_secs(1)).map_err(|e| NodeError::new(e.message()))?;
         vm.run_script(CODE_PRELUDE, Duration::from_secs(5)).map_err(|e| NodeError::new(e.message()))?;
         let data = (ctx.expr_data)();
-        vm.call_json("__r8r_set_data", &data).map_err(|e| NodeError::new(e.message()))?;
+        vm.set_data(data).map_err(|e| NodeError::new(e.message()))?;
         vm.run_script("globalThis.items = $input.all();", Duration::from_secs(5)).map_err(|e| NodeError::new(e.message()))?;
 
         let mut out = Vec::new();
@@ -174,4 +177,27 @@ impl NodeType for Code {
         }
         Ok(vec![out])
     }
+}
+
+async fn run_python(ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
+    let code = ctx.raw_param("pythonCode").and_then(Value::as_str).unwrap_or("return []").to_string();
+    let each = ctx.raw_param("mode").and_then(Value::as_str) == Some("runOnceForEachItem");
+    let (results, console) = super::python::run(ctx, &code, each).await?;
+    ctx.run.lock().unwrap().console.extend(console);
+    let mut out = Vec::new();
+    if each {
+        for (i, v) in results.into_iter().enumerate() {
+            if v.is_null() {
+                continue;
+            }
+            match normalize(v, true) {
+                Ok(items) => out.extend(items.into_iter().map(|it| it.paired(i))),
+                Err(e) if ctx.continue_on_fail() => ctx.push_error_item(&e, i),
+                Err(e) => return Err(e.at(i)),
+            }
+        }
+    } else {
+        out = normalize(results.into_iter().next().unwrap_or(Value::Null), false)?;
+    }
+    Ok(vec![out])
 }

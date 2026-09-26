@@ -15,6 +15,7 @@ pub mod node_types;
 pub mod nodes;
 pub mod server;
 pub mod store;
+mod store_batch;
 pub mod store_ext;
 pub mod types;
 pub mod vm;

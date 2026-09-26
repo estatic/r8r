@@ -180,6 +180,9 @@ pub async fn register(n8n: &Arc<N8n>, workflow_json: &Value) -> Result<(), ApiEr
     }
     unregister(n8n, &id);
     n8n.webhooks.write().unwrap().extend(registrations);
+    let mut cached = workflow_json.clone();
+    cached["active"] = json!(true);
+    n8n.active.write().unwrap().insert(id.clone(), Arc::new(cached));
     let handles: Vec<_> = schedules.into_iter().map(|(node, rule)| spawn_rule(n8n, id.clone(), node, tz, rule)).collect();
     n8n.schedules.lock().unwrap().insert(id.clone(), handles);
     tracing::info!(workflowId = %id, "Activated workflow \"{}\"", workflow.name);
@@ -188,6 +191,7 @@ pub async fn register(n8n: &Arc<N8n>, workflow_json: &Value) -> Result<(), ApiEr
 
 pub fn unregister(n8n: &N8n, workflow_id: &str) {
     n8n.webhooks.write().unwrap().retain(|r| r.workflow_id != workflow_id);
+    n8n.active.write().unwrap().remove(workflow_id);
     if let Some(handles) = n8n.schedules.lock().unwrap().remove(workflow_id) {
         for h in handles {
             h.abort();

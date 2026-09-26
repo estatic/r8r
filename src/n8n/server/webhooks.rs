@@ -627,9 +627,8 @@ async fn production(State(n8n): State<Arc<N8n>>, Path(path): Path<String>, req: 
     let Some((reg, params)) = find_production(&n8n, incoming.method.as_str(), &path, Kind::Webhook) else {
         return not_registered(&incoming.method, &path, false);
     };
-    let workflow = match n8n.store.workflow_row(&reg.workflow_id).await {
-        Ok(Some(row)) if row.active => row.data,
-        _ => return not_registered(&incoming.method, &path, false),
+    let Some(workflow) = n8n.active.read().unwrap().get(&reg.workflow_id).map(|w| Value::clone(w)) else {
+        return not_registered(&incoming.method, &path, false);
     };
     run_webhook(&n8n, workflow, &reg, params, incoming, &path, false, None).await
 }
@@ -754,8 +753,8 @@ fn render_form(parameters: &Value) -> String {
 
 async fn form_workflow(n8n: &N8n, path: &str) -> Option<(Registration, Value)> {
     let (reg, _) = find_production(n8n, "*", path, Kind::Form)?;
-    let row = n8n.store.workflow_row(&reg.workflow_id).await.ok()??;
-    row.active.then_some((reg, row.data))
+    let workflow = n8n.active.read().unwrap().get(&reg.workflow_id).map(|w| Value::clone(w))?;
+    Some((reg, workflow))
 }
 
 fn node_params(workflow: &Value, node: &str) -> Value {

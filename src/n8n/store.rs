@@ -9,6 +9,11 @@ use std::str::FromStr;
 #[derive(Clone)]
 pub struct Store {
     pub(super) pool: SqlitePool,
+    /// All writes go through one connection: SQLite has a single writer, and
+    /// queueing here is much faster than connections retrying on SQLITE_BUSY.
+    pub(super) writer: SqlitePool,
+    /// Group-committed execution writes (see `store_batch`).
+    pub(super) batch: tokio::sync::mpsc::UnboundedSender<super::store_batch::Op>,
     encryption_key: String,
 }
 
@@ -47,14 +52,19 @@ impl Store {
         }
         let options = SqliteConnectOptions::from_str(database_url)?
             .create_if_missing(true)
+            // WAL lets readers run alongside the writer; NORMAL sync is safe with WAL.
+            .journal_mode(sqlx::sqlite::SqliteJournalMode::Wal)
+            .synchronous(sqlx::sqlite::SqliteSynchronous::Normal)
             .busy_timeout(std::time::Duration::from_secs(10));
         let mut pool_options = SqlitePoolOptions::new();
         if database_url.contains(":memory:") {
             pool_options = pool_options.max_connections(1);
         }
-        let pool = pool_options.connect_with(options).await?;
-        sqlx::migrate!("./migrations").run(&pool).await?;
-        Ok(Self { pool, encryption_key: encryption_key.to_string() })
+        let writer = SqlitePoolOptions::new().max_connections(1).connect_with(options.clone()).await?;
+        sqlx::migrate!("./migrations").run(&writer).await?;
+        let pool = if database_url.contains(":memory:") { writer.clone() } else { pool_options.connect_with(options).await? };
+        let batch = super::store_batch::spawn(writer.clone());
+        Ok(Self { pool, writer, batch, encryption_key: encryption_key.to_string() })
     }
 
     pub fn encryption_key(&self) -> &str {
@@ -100,7 +110,7 @@ impl Store {
         .bind(serde_json::to_string(&workflow)?)
         .bind(&created_at)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&self.writer)
         .await?;
         Ok(workflow)
     }
@@ -139,7 +149,7 @@ impl Store {
         .bind(&blob)
         .bind(&now)
         .bind(&now)
-        .execute(&self.pool)
+        .execute(&self.writer)
         .await?;
         Ok(id)
     }
@@ -170,7 +180,7 @@ impl Store {
             .bind(blob)
             .bind(now())
             .bind(id)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(())
     }
@@ -185,7 +195,7 @@ impl Store {
         .bind(mode)
         .bind(now())
         .bind(serde_json::to_string(workflow)?)
-        .execute(&self.pool)
+        .execute(&self.writer)
         .await?;
         Ok(result.last_insert_rowid().to_string())
     }
@@ -198,7 +208,7 @@ impl Store {
             .bind(wait_till)
             .bind(serde_json::to_string(data)?)
             .bind(id)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(())
     }

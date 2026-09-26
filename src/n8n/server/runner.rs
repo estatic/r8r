@@ -227,11 +227,6 @@ async fn start_inner(n8n: &Arc<N8n>, req: RunRequest) -> anyhow::Result<RunHandl
         execution_id: exec_str.clone(),
         workflow_id: workflow_id.clone(),
     }));
-    for v in n8n.store.list_variables().await.unwrap_or_default() {
-        if let (Some(k), Some(val)) = (v["key"].as_str(), v.get("value")) {
-            options.vars.insert(k.to_string(), val.clone());
-        }
-    }
     n8n.running.lock().unwrap().insert(execution_id, options.clone());
     n8n.inflight.fetch_add(1, Ordering::SeqCst);
 
@@ -240,7 +235,16 @@ async fn start_inner(n8n: &Arc<N8n>, req: RunRequest) -> anyhow::Result<RunHandl
     let workflow_json = req.workflow;
     let mode = req.mode;
     let push_ref = req.push_ref;
-    tokio::spawn(async move {
+    let mut options = options;
+    n8n.exec.spawn(async move {
+        // Variables are read here, off the caller's path (webhook latency).
+        if let Ok(vars) = me.store.list_variables().await {
+            for v in vars {
+                if let (Some(k), Some(val)) = (v["key"].as_str(), v.get("value")) {
+                    options.vars.insert(k.to_string(), val.clone());
+                }
+            }
+        }
         me.send_push(
             push_ref.as_deref(),
             "executionStarted",

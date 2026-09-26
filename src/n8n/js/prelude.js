@@ -112,7 +112,7 @@
   }
   g.ExpressionError = ExpressionError;
 
-  let D = { input: [], inputs: [[]], source: [], runData: {}, runIndex: 0, workflow: {}, execution: {}, vars: {}, env: null, node: {} };
+  let D = { input: [], inputs: [[]], source: [], runIndex: 0, workflow: {}, execution: {}, vars: {}, env: null, node: {} };
   const custom = {};
   g.__r8r_custom = custom;
   g.__r8r_static = { global: {}, node: {} };
@@ -135,10 +135,18 @@
     g.$binary = (item && item.binary) || {};
   };
 
+  // Run data is fetched from the host per task, on first use.
+  const tasks = new Map();
+  function runCount(name) { return __r8r_task_count(String(name)); }
   function taskOf(name, run) {
-    const runs = D.runData[name];
-    if (!runs || runs.length === 0) return null;
-    return run === undefined || run === null ? runs[runs.length - 1] : runs[run];
+    const r = run === undefined || run === null ? -1 : run;
+    const key = name + '\u0000' + r;
+    if (!tasks.has(key)) {
+      const text = __r8r_task(String(name), r);
+      const task = text === undefined || text === null ? null : JSON.parse(text);
+      tasks.set(key, task && __r8r_freeze ? deepFreeze(task) : task);
+    }
+    return tasks.get(key);
   }
   function outputOf(name, output, run) {
     const task = taskOf(name, run);
@@ -146,7 +154,7 @@
     return task.data.main[output || 0] || [];
   }
   function requireExecuted(name) {
-    if (!D.runData[name]) {
+    if (runCount(name) < 0) {
       if (!D.nodeNames || D.nodeNames.indexOf(name) === -1) {
         throw new ExpressionError(`Referenced node doesn't exist: '${name}'`);
       }
@@ -203,7 +211,7 @@
       get isExecuted() { return true; },
       get params() { return {}; },
       get context() { return {}; },
-      get runIndex() { return (D.runData[name] || []).length - 1; },
+      get runIndex() { return Math.max(runCount(name), 0) - 1; },
     };
   };
   g.$node = new Proxy({}, {
@@ -212,7 +220,7 @@
       requireExecuted(name);
       const items = outputOf(name, 0);
       const item = items[g.$itemIndex] || items[0] || { json: {} };
-      return { json: item.json, binary: item.binary || {}, parameter: {}, runIndex: (D.runData[name] || []).length - 1, context: {} };
+      return { json: item.json, binary: item.binary || {}, parameter: {}, runIndex: Math.max(runCount(name), 0) - 1, context: {} };
     },
   });
   g.$items = function (name, output, run) {
@@ -474,4 +482,62 @@
   }
   g.Function = blocked;
   g.eval = blocked;
+
+  // ---- pooling: expression VMs are reused between node runs -----------------
+  // `__r8r_harden` freezes the built-ins and the prelude's globals so an
+  // expression can't leave anything behind for the next run; `__r8r_reset`
+  // then clears the per-run state before reuse.
+  const MUTABLE = new Set(['$json', '$binary', '$itemIndex', '__r8r_timezone', '__r8r_async_done', '__r8r_async_result']);
+  let baseline = null;
+  const restorable = [];
+  g.__r8r_harden = function () {
+    // Built-ins and Luxon are snapshotted here and restored on reset.
+    // (Freezing them instead breaks code that assigns properties shadowing
+    // a frozen prototype's, e.g. Luxon setting `values` on its objects.)
+    const shared = [Object, Array, String, Number, Boolean, Date, RegExp, Map, Set, WeakMap, WeakSet, Promise, Symbol, Function, Error,
+      TypeError, RangeError, SyntaxError, luxon.DateTime, luxon.Duration, luxon.Interval, luxon.Info, luxon.Zone, luxon.FixedOffsetZone,
+      luxon.IANAZone, luxon.Settings];
+    for (const C of shared) {
+      if (!C) continue;
+      for (const o of [C, C.prototype]) {
+        if (o) restorable.push([o, Object.getOwnPropertyDescriptors(o)]);
+      }
+    }
+    for (const o of [Math, JSON, Reflect, jmespath, luxon]) restorable.push([o, Object.getOwnPropertyDescriptors(o)]);
+    const names = Object.getOwnPropertyNames(g);
+    for (const k of names) {
+      if (MUTABLE.has(k)) continue;
+      const d = Object.getOwnPropertyDescriptor(g, k);
+      if (!d.configurable) continue;
+      if ('value' in d) d.writable = false;
+      d.configurable = false;
+      Object.defineProperty(g, k, d);
+    }
+    baseline = new Set(names);
+  };
+  g.__r8r_reset = function (tz) {
+    if (baseline) {
+      for (const k of Object.getOwnPropertyNames(g)) if (!baseline.has(k)) delete g[k];
+    }
+    // A VM whose shared objects can't be put back (frozen, or given
+    // non-configurable properties) throws here and is discarded.
+    for (const [o, descs] of restorable) {
+      if (!Object.isExtensible(o)) throw new Error('tainted VM');
+      for (const k of Reflect.ownKeys(o)) {
+        if (!(k in descs) && !delete o[k]) throw new Error('tainted VM');
+      }
+      for (const k of Reflect.ownKeys(descs)) Object.defineProperty(o, k, descs[k]);
+    }
+    g.__r8r_timezone = tz;
+    luxon.Settings.defaultZone = tz;
+    D = { input: [], inputs: [[]], source: [], runIndex: 0, workflow: {}, execution: {}, vars: {}, env: null, node: {} };
+    tasks.clear();
+    for (const k of Object.keys(custom)) delete custom[k];
+    g.__r8r_static.global = {};
+    g.__r8r_static.node = {};
+    extra = {};
+    g.$json = {};
+    g.$binary = {};
+    g.$itemIndex = 0;
+  };
 })();

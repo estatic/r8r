@@ -113,27 +113,83 @@ impl From<VmError> for ExprError {
 
 /// An expression evaluator bound to one node run's data (see
 /// `js/prelude.js` for the variables it exposes).
+///
+/// VMs are pooled: starting one (loading Luxon and the prelude) costs far
+/// more than a typical node run. Pooled VMs are hardened (built-ins and the
+/// prelude's globals frozen) and reset before reuse; a VM whose evaluation
+/// hit a limit (time, memory) is dropped instead of returned.
 pub struct Evaluator {
-    vm: Vm,
+    vm: Option<Vm>,
     timeout: Duration,
+    poisoned: std::sync::atomic::AtomicBool,
+}
+
+const POOL_MAX: usize = 16;
+/// Pooled VMs holding more than this after a run are dropped.
+const POOL_MAX_HEAP: i64 = 32 * 1024 * 1024;
+
+fn pool() -> &'static std::sync::Mutex<Vec<Vm>> {
+    static POOL: std::sync::OnceLock<std::sync::Mutex<Vec<Vm>>> = std::sync::OnceLock::new();
+    POOL.get_or_init(|| std::sync::Mutex::new(Vec::new()))
+}
+
+fn pooled_vm(timezone: &str) -> Result<Vm, VmError> {
+    let reused = pool().lock().unwrap().pop();
+    if let Some(vm) = reused {
+        let tz = serde_json::to_string(timezone).unwrap();
+        if vm.run_script(&format!("__r8r_reset({tz})"), Duration::from_secs(5)).is_ok() {
+            return Ok(vm);
+        }
+    }
+    let vm = Vm::new(VmOptions { timezone: timezone.to_string(), ..Default::default() })?;
+    vm.run_script("__r8r_harden()", Duration::from_secs(5))?;
+    Ok(vm)
+}
+
+impl Drop for Evaluator {
+    fn drop(&mut self) {
+        let Some(vm) = self.vm.take() else { return };
+        if self.poisoned.load(std::sync::atomic::Ordering::Relaxed) {
+            return;
+        }
+        vm.gc();
+        if vm.memory_used() > POOL_MAX_HEAP {
+            return;
+        }
+        let mut pool = pool().lock().unwrap();
+        if pool.len() < POOL_MAX {
+            pool.push(vm);
+        }
+    }
 }
 
 impl Evaluator {
     pub fn new(data: &Value, timezone: &str, timeout: Duration) -> Result<Self, ExprError> {
-        let vm = Vm::new(VmOptions { timezone: timezone.to_string(), ..Default::default() })?;
-        vm.call_json("__r8r_set_data", data)?;
-        Ok(Self { vm, timeout })
+        let vm = pooled_vm(timezone)?;
+        let ev = Self { vm: Some(vm), timeout, poisoned: std::sync::atomic::AtomicBool::new(false) };
+        ev.check(ev.vm().set_data(data.clone()))?;
+        Ok(ev)
+    }
+
+    fn vm(&self) -> &Vm {
+        self.vm.as_ref().expect("the VM lives as long as the evaluator")
+    }
+
+    /// Marks the VM unusable for others after a limit was hit.
+    fn check<T>(&self, r: Result<T, VmError>) -> Result<T, ExprError> {
+        if let Err(VmError::Timeout(_) | VmError::Internal(_)) = &r {
+            self.poisoned.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        Ok(r?)
     }
 
     pub fn set_item(&self, index: usize) -> Result<(), ExprError> {
-        self.vm.run_script(&format!("__r8r_set_item({index})"), Duration::from_secs(5))?;
-        Ok(())
+        self.check(self.vm().run_script(&format!("__r8r_set_item({index})"), Duration::from_secs(5)))
     }
 
     /// Extra globals for this evaluation (e.g. `$response`, `$pageCount`).
     pub fn set_extra(&self, values: &Value) -> Result<(), ExprError> {
-        self.vm.call_json("__r8r_set_extra", values)?;
-        Ok(())
+        self.check(self.vm().call_json("__r8r_set_extra", values))
     }
 
     /// Resolves every expression string in `value` (recursively).
@@ -172,7 +228,7 @@ impl Evaluator {
         if code.trim().is_empty() {
             return Ok(Some(Value::String(String::new())));
         }
-        Ok(self.vm.eval_expression(code, self.timeout)?)
+        self.check(self.vm().eval_expression(code, self.timeout))
     }
 }
 
@@ -230,5 +286,25 @@ mod tests {
     fn the_function_constructor_is_blocked() {
         let e = Evaluator::new(&data(serde_json::json!({})), "UTC", Duration::from_secs(1)).unwrap();
         assert!(e.template("{{ (function(){}).constructor('return 1')() }}").is_err());
+    }
+
+    #[test]
+    fn pooled_vms_do_not_leak_state_between_runs() {
+        let d = || data(serde_json::json!({"a": 1}));
+        for _ in 0..3 {
+            let e = Evaluator::new(&d(), "UTC", Duration::from_secs(1)).unwrap();
+            // Nothing written here may survive into the next evaluator.
+            let _ = e.template("{{ globalThis.leaked = 1 }}");
+            let _ = e.template("{{ Array.prototype.polluted = 1 }}");
+            let _ = e.template("{{ Object.prototype.polluted = 1 }}");
+            let _ = e.template("{{ $input = null }}");
+            let _ = e.template("{{ DateTime.prototype.toISO = () => 'x' }}");
+            let _ = e.template("{{ Object.freeze(Array.prototype) && 1 }}");
+        }
+        let e = Evaluator::new(&d(), "UTC", Duration::from_secs(1)).unwrap();
+        assert_eq!(e.template("{{ typeof leaked }}").unwrap(), Some(serde_json::json!("undefined")));
+        assert_eq!(e.template("{{ [].polluted === undefined && ({}).polluted === undefined }}").unwrap(), Some(serde_json::json!(true)));
+        assert_eq!(e.template("{{ $input.first().json.a }}").unwrap(), Some(serde_json::json!(1)));
+        assert_eq!(e.template("{{ DateTime.fromMillis(0).toISO() }}").unwrap(), Some(serde_json::json!("1970-01-01T00:00:00.000Z")));
     }
 }

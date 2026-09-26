@@ -2,6 +2,7 @@
 //! workflow ownership and execution queries (spec §6.9, §6.10, §7.1).
 
 use super::store::{new_id, now, Store};
+use super::store_batch::{Bind, Op};
 use serde_json::{json, Value};
 use sqlx::Row;
 
@@ -139,7 +140,7 @@ impl Store {
             .bind(role)
             .bind(&now)
             .bind(&now)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(self.get_user(&id).await?.expect("just inserted"))
     }
@@ -166,14 +167,14 @@ impl Store {
             .bind(password_hash)
             .bind(now())
             .bind(id)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(())
     }
 
     pub async fn delete_user(&self, id: &str) -> anyhow::Result<bool> {
-        let r = sqlx::query("DELETE FROM user WHERE id = ?").bind(id).execute(&self.pool).await?;
-        sqlx::query("DELETE FROM user_api_keys WHERE user_id = ?").bind(id).execute(&self.pool).await?;
+        let r = sqlx::query("DELETE FROM user WHERE id = ?").bind(id).execute(&self.writer).await?;
+        sqlx::query("DELETE FROM user_api_keys WHERE user_id = ?").bind(id).execute(&self.writer).await?;
         Ok(r.rows_affected() > 0)
     }
 
@@ -189,7 +190,7 @@ impl Store {
             .bind(serde_json::to_string(scopes)?)
             .bind(now())
             .bind(expires_at)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(ApiKey { id, user_id: user_id.into(), label: label.into(), scopes: scopes.to_vec(), created_at: now(), expires_at })
     }
@@ -216,7 +217,7 @@ impl Store {
     }
 
     pub async fn delete_api_key(&self, user_id: &str, id: &str) -> anyhow::Result<bool> {
-        let r = sqlx::query("DELETE FROM user_api_keys WHERE id = ? AND user_id = ?").bind(id).bind(user_id).execute(&self.pool).await?;
+        let r = sqlx::query("DELETE FROM user_api_keys WHERE id = ? AND user_id = ?").bind(id).bind(user_id).execute(&self.writer).await?;
         Ok(r.rows_affected() > 0)
     }
 
@@ -253,14 +254,14 @@ impl Store {
             .bind(owner_id)
             .bind(project_id)
             .bind(id)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(())
     }
 
     pub async fn delete_workflow(&self, id: &str) -> anyhow::Result<bool> {
-        let r = sqlx::query("DELETE FROM workflow_entity WHERE id = ?").bind(id).execute(&self.pool).await?;
-        sqlx::query("DELETE FROM workflows_tags WHERE workflow_id = ?").bind(id).execute(&self.pool).await?;
+        let r = sqlx::query("DELETE FROM workflow_entity WHERE id = ?").bind(id).execute(&self.writer).await?;
+        sqlx::query("DELETE FROM workflows_tags WHERE workflow_id = ?").bind(id).execute(&self.writer).await?;
         Ok(r.rows_affected() > 0)
     }
 
@@ -274,7 +275,7 @@ impl Store {
             .bind(name)
             .bind(&now)
             .bind(&now)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         if r.rows_affected() == 0 {
             return Ok(None);
@@ -297,20 +298,20 @@ impl Store {
     }
 
     pub async fn rename_tag(&self, id: &str, name: &str) -> anyhow::Result<bool> {
-        let r = sqlx::query("UPDATE tag_entity SET name = ?, updated_at = ? WHERE id = ?").bind(name).bind(now()).bind(id).execute(&self.pool).await?;
+        let r = sqlx::query("UPDATE tag_entity SET name = ?, updated_at = ? WHERE id = ?").bind(name).bind(now()).bind(id).execute(&self.writer).await?;
         Ok(r.rows_affected() > 0)
     }
 
     pub async fn delete_tag(&self, id: &str) -> anyhow::Result<bool> {
-        let r = sqlx::query("DELETE FROM tag_entity WHERE id = ?").bind(id).execute(&self.pool).await?;
-        sqlx::query("DELETE FROM workflows_tags WHERE tag_id = ?").bind(id).execute(&self.pool).await?;
+        let r = sqlx::query("DELETE FROM tag_entity WHERE id = ?").bind(id).execute(&self.writer).await?;
+        sqlx::query("DELETE FROM workflows_tags WHERE tag_id = ?").bind(id).execute(&self.writer).await?;
         Ok(r.rows_affected() > 0)
     }
 
     pub async fn set_workflow_tags(&self, workflow_id: &str, tag_ids: &[String]) -> anyhow::Result<()> {
-        sqlx::query("DELETE FROM workflows_tags WHERE workflow_id = ?").bind(workflow_id).execute(&self.pool).await?;
+        sqlx::query("DELETE FROM workflows_tags WHERE workflow_id = ?").bind(workflow_id).execute(&self.writer).await?;
         for t in tag_ids {
-            sqlx::query("INSERT OR IGNORE INTO workflows_tags (workflow_id, tag_id) VALUES (?, ?)").bind(workflow_id).bind(t).execute(&self.pool).await?;
+            sqlx::query("INSERT OR IGNORE INTO workflows_tags (workflow_id, tag_id) VALUES (?, ?)").bind(workflow_id).bind(t).execute(&self.writer).await?;
         }
         Ok(())
     }
@@ -331,7 +332,7 @@ impl Store {
             .bind(&id)
             .bind(key)
             .bind(value)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok((r.rows_affected() > 0).then(|| json!({"id": id, "key": key, "value": value, "type": "string"})))
     }
@@ -345,12 +346,12 @@ impl Store {
     }
 
     pub async fn update_variable(&self, id: &str, key: &str, value: &str) -> anyhow::Result<bool> {
-        let r = sqlx::query("UPDATE variables SET key = ?, value = ? WHERE id = ?").bind(key).bind(value).bind(id).execute(&self.pool).await?;
+        let r = sqlx::query("UPDATE variables SET key = ?, value = ? WHERE id = ?").bind(key).bind(value).bind(id).execute(&self.writer).await?;
         Ok(r.rows_affected() > 0)
     }
 
     pub async fn delete_variable(&self, id: &str) -> anyhow::Result<bool> {
-        let r = sqlx::query("DELETE FROM variables WHERE id = ?").bind(id).execute(&self.pool).await?;
+        let r = sqlx::query("DELETE FROM variables WHERE id = ?").bind(id).execute(&self.writer).await?;
         Ok(r.rows_affected() > 0)
     }
 
@@ -365,7 +366,7 @@ impl Store {
             .bind(kind)
             .bind(&now)
             .bind(&now)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(json!({"id": id, "name": name, "type": kind}))
     }
@@ -380,13 +381,13 @@ impl Store {
     }
 
     pub async fn update_project(&self, id: &str, name: &str) -> anyhow::Result<bool> {
-        let r = sqlx::query("UPDATE project SET name = ?, updated_at = ? WHERE id = ?").bind(name).bind(now()).bind(id).execute(&self.pool).await?;
+        let r = sqlx::query("UPDATE project SET name = ?, updated_at = ? WHERE id = ?").bind(name).bind(now()).bind(id).execute(&self.writer).await?;
         Ok(r.rows_affected() > 0)
     }
 
     pub async fn delete_project(&self, id: &str) -> anyhow::Result<bool> {
-        let r = sqlx::query("DELETE FROM project WHERE id = ?").bind(id).execute(&self.pool).await?;
-        sqlx::query("DELETE FROM project_relation WHERE project_id = ?").bind(id).execute(&self.pool).await?;
+        let r = sqlx::query("DELETE FROM project WHERE id = ?").bind(id).execute(&self.writer).await?;
+        sqlx::query("DELETE FROM project_relation WHERE project_id = ?").bind(id).execute(&self.writer).await?;
         Ok(r.rows_affected() > 0)
     }
 
@@ -395,7 +396,7 @@ impl Store {
             .bind(project_id)
             .bind(user_id)
             .bind(role)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(())
     }
@@ -413,7 +414,7 @@ impl Store {
     // ---- credentials -------------------------------------------------------
 
     pub async fn set_credential_owner(&self, id: &str, owner_id: &str) -> anyhow::Result<()> {
-        sqlx::query("UPDATE credentials_entity SET owner_id = ? WHERE id = ?").bind(owner_id).bind(id).execute(&self.pool).await?;
+        sqlx::query("UPDATE credentials_entity SET owner_id = ? WHERE id = ?").bind(owner_id).bind(id).execute(&self.writer).await?;
         Ok(())
     }
 
@@ -423,29 +424,38 @@ impl Store {
     }
 
     pub async fn delete_credential(&self, id: &str) -> anyhow::Result<bool> {
-        let r = sqlx::query("DELETE FROM credentials_entity WHERE id = ?").bind(id).execute(&self.pool).await?;
+        let r = sqlx::query("DELETE FROM credentials_entity WHERE id = ?").bind(id).execute(&self.writer).await?;
         Ok(r.rows_affected() > 0)
     }
 
     // ---- executions --------------------------------------------------------
 
+    async fn batched(&self, sql: &'static str, binds: Vec<Bind>) -> anyhow::Result<(u64, i64)> {
+        let (reply, rx) = tokio::sync::oneshot::channel();
+        self.batch.send(Op { sql, binds, reply }).map_err(|_| anyhow::anyhow!("the database writer has stopped"))?;
+        rx.await.map_err(|_| anyhow::anyhow!("the database writer has stopped"))?.map_err(|e| anyhow::anyhow!(e))
+    }
+
     pub async fn insert_execution(&self, workflow: &Value, mode: &str, retry_of: Option<&str>, parent: Option<&str>) -> anyhow::Result<i64> {
-        let r = sqlx::query(
-            "INSERT INTO execution_entity (workflow_id, mode, status, finished, retry_of, started_at, workflow_data, parent_execution_id)
-             VALUES (?, ?, 'running', 0, ?, ?, ?, ?)",
-        )
-        .bind(workflow.get("id").and_then(Value::as_str))
-        .bind(mode)
-        .bind(retry_of)
-        .bind(now())
-        .bind(serde_json::to_string(workflow)?)
-        .bind(parent)
-        .execute(&self.pool)
-        .await?;
-        Ok(r.last_insert_rowid())
+        let (_, id) = self
+            .batched(
+                "INSERT INTO execution_entity (workflow_id, mode, status, finished, retry_of, started_at, workflow_data, parent_execution_id)
+                 VALUES (?, ?, 'running', 0, ?, ?, ?, ?)",
+                vec![
+                    Bind::Text(workflow.get("id").and_then(Value::as_str).map(String::from)),
+                    Bind::Text(Some(mode.to_string())),
+                    Bind::Text(retry_of.map(String::from)),
+                    Bind::Text(Some(now())),
+                    Bind::Text(Some(serde_json::to_string(workflow)?)),
+                    Bind::Text(parent.map(String::from)),
+                ],
+            )
+            .await?;
+        Ok(id)
     }
 
     /// Records the end (or pause) of an execution.
+    #[allow(clippy::too_many_arguments)]
     pub async fn save_execution_result(
         &self,
         id: i64,
@@ -456,25 +466,33 @@ impl Store {
         wait_till: Option<&str>,
         wait_state: Option<&Value>,
     ) -> anyhow::Result<()> {
-        sqlx::query("UPDATE execution_entity SET status = ?, finished = ?, started_at = ?, stopped_at = ?, wait_till = ?, data = ?, wait_state = ? WHERE id = ?")
-            .bind(status)
-            .bind((status == super::types::status::SUCCESS) as i64)
-            .bind(started_at)
-            .bind(stopped_at)
-            .bind(wait_till)
-            .bind(serde_json::to_string(data)?)
-            .bind(wait_state.map(|w| w.to_string()))
-            .bind(id)
-            .execute(&self.pool)
-            .await?;
+        self.batched(
+            "UPDATE execution_entity SET status = ?, finished = ?, started_at = ?, stopped_at = ?, wait_till = ?, data = ?, wait_state = ? WHERE id = ?",
+            vec![
+                Bind::Text(Some(status.to_string())),
+                Bind::Int(Some((status == super::types::status::SUCCESS) as i64)),
+                Bind::Text(Some(started_at.to_string())),
+                Bind::Text(stopped_at.map(String::from)),
+                Bind::Text(wait_till.map(String::from)),
+                Bind::Text(Some(serde_json::to_string(data)?)),
+                Bind::Text(wait_state.map(|w| w.to_string())),
+                Bind::Int(Some(id)),
+            ],
+        )
+        .await?;
         Ok(())
     }
 
     /// Moves an execution from `from` to `to` atomically; false when it was
     /// not in `from` (e.g. already resumed).
     pub async fn transition_execution(&self, id: i64, from: &str, to: &str) -> anyhow::Result<bool> {
-        let r = sqlx::query("UPDATE execution_entity SET status = ? WHERE id = ? AND status = ?").bind(to).bind(id).bind(from).execute(&self.pool).await?;
-        Ok(r.rows_affected() > 0)
+        let (n, _) = self
+            .batched(
+                "UPDATE execution_entity SET status = ? WHERE id = ? AND status = ?",
+                vec![Bind::Text(Some(to.to_string())), Bind::Int(Some(id)), Bind::Text(Some(from.to_string()))],
+            )
+            .await?;
+        Ok(n > 0)
     }
 
     pub async fn get_execution(&self, id: i64) -> anyhow::Result<Option<ExecutionRow>> {
@@ -507,15 +525,15 @@ impl Store {
     }
 
     pub async fn delete_execution(&self, id: i64) -> anyhow::Result<bool> {
-        let r = sqlx::query("DELETE FROM execution_entity WHERE id = ?").bind(id).execute(&self.pool).await?;
-        Ok(r.rows_affected() > 0)
+        let (n, _) = self.batched("DELETE FROM execution_entity WHERE id = ?", vec![Bind::Int(Some(id))]).await?;
+        Ok(n > 0)
     }
 
     /// Marks executions left running by a previous process as crashed.
     pub async fn mark_crashed(&self) -> anyhow::Result<u64> {
         let r = sqlx::query("UPDATE execution_entity SET status = 'crashed', stopped_at = ? WHERE status IN ('running', 'new')")
             .bind(now())
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(r.rows_affected())
     }
@@ -532,7 +550,7 @@ impl Store {
     pub async fn prune_executions(&self, older_than_iso: &str) -> anyhow::Result<u64> {
         let r = sqlx::query("DELETE FROM execution_entity WHERE stopped_at IS NOT NULL AND stopped_at < ? AND status NOT IN ('running', 'waiting', 'new')")
             .bind(older_than_iso)
-            .execute(&self.pool)
+            .execute(&self.writer)
             .await?;
         Ok(r.rows_affected())
     }

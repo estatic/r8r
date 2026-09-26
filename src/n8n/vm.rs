@@ -43,7 +43,7 @@ pub struct VmOptions {
 
 impl Default for VmOptions {
     fn default() -> Self {
-        Self { memory_limit: 64 * 1024 * 1024, timezone: "UTC".into(), freeze_data: true }
+        Self { memory_limit: expression_memory_limit(), timezone: "UTC".into(), freeze_data: true }
     }
 }
 
@@ -213,6 +213,44 @@ impl Vm {
         }
     }
 
+    /// Sets the data proxy's input (`__r8r_set_data`). Run data of other
+    /// nodes is not copied into the VM: the prelude fetches a node's task
+    /// only when an expression asks for it (`__r8r_task`), so large
+    /// executions don't have to fit in the VM's memory twice.
+    pub fn set_data(&self, mut data: serde_json::Value) -> Result<(), VmError> {
+        let run_data = match data.as_object_mut().and_then(|o| o.remove("runData")) {
+            Some(serde_json::Value::Object(m)) => m,
+            _ => serde_json::Map::new(),
+        };
+        let run_data = Arc::new(run_data);
+        self.context.with(|ctx| -> Result<(), VmError> {
+            let g = ctx.globals();
+            let rd = run_data.clone();
+            install(
+                &g,
+                "__r8r_task",
+                rquickjs::Function::new(ctx.clone(), move |name: String, run: i32| -> Option<String> {
+                    let runs = rd.get(&name)?.as_array()?;
+                    let task = if run < 0 { runs.last()? } else { runs.get(run as usize)? };
+                    serde_json::to_string(task).ok()
+                }),
+            )?;
+            let rd = run_data.clone();
+            install(
+                &g,
+                "__r8r_task_count",
+                rquickjs::Function::new(ctx.clone(), move |name: String| -> i32 {
+                    rd.get(&name).and_then(|r| r.as_array()).map(|a| a.len() as i32).unwrap_or(-1)
+                }),
+            )
+        })?;
+        self.call_json("__r8r_set_data", &data)
+    }
+
+    pub fn gc(&self) {
+        self.runtime.run_gc();
+    }
+
     pub fn memory_used(&self) -> i64 {
         self.runtime.memory_usage().memory_used_size
     }
@@ -261,4 +299,24 @@ fn decode_result(text: &str) -> Result<Option<Value>, VmError> {
         name: e["name"].as_str().unwrap_or("Error").to_string(),
         stack: e["stack"].as_str().unwrap_or("").to_string(),
     })
+}
+
+#[cfg(test)]
+mod bench_startup {
+    #[test]
+    #[ignore]
+    fn vm_startup_cost() {
+        let t = std::time::Instant::now();
+        for _ in 0..20 {
+            let _vm = super::Vm::new(super::VmOptions::default()).unwrap();
+        }
+        eprintln!("VM startup: {:?} each", t.elapsed() / 20);
+    }
+}
+
+/// Memory ceiling of an expression VM: `R8R_EXPRESSION_MEMORY_MB`, 512 MB by
+/// default (a node's input lives in its VM while its parameters resolve).
+fn expression_memory_limit() -> usize {
+    static LIMIT: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *LIMIT.get_or_init(|| std::env::var("R8R_EXPRESSION_MEMORY_MB").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or(512) * 1024 * 1024)
 }

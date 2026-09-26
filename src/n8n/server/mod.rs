@@ -35,6 +35,9 @@ pub struct N8n {
     pub jwt_secret: Vec<u8>,
     /// Production webhooks and forms of active workflows.
     pub webhooks: RwLock<Vec<webhooks::Registration>>,
+    /// The registered version of each active workflow (the webhook hot path
+    /// reads it instead of the database).
+    pub active: RwLock<HashMap<String, Arc<Value>>>,
     /// One-shot test webhooks registered by editor runs.
     pub test_webhooks: Mutex<Vec<webhooks::TestRegistration>>,
     /// Schedule tasks per active workflow.
@@ -47,6 +50,9 @@ pub struct N8n {
     pub metrics: Metrics,
     pub login_failures: Mutex<HashMap<String, Vec<Instant>>>,
     pub payload_limit: usize,
+    /// Executions run here, apart from the runtime serving HTTP, so CPU-heavy
+    /// node work can't hold up requests.
+    pub exec: tokio::runtime::Handle,
 }
 
 #[derive(Default)]
@@ -129,6 +135,14 @@ impl N8n {
             .map(|mib| (mib * 1024.0 * 1024.0) as usize)
             .unwrap_or(16 * 1024 * 1024);
         let (push, _) = tokio::sync::broadcast::channel(1024);
+        let threads = std::env::var("R8R_EXECUTION_THREADS").ok().and_then(|v| v.parse::<usize>().ok()).unwrap_or_else(|| {
+            std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2)
+        });
+        // Lives as long as the process (a runtime can't be dropped from async code).
+        let exec_runtime: &'static tokio::runtime::Runtime = Box::leak(Box::new(
+            tokio::runtime::Builder::new_multi_thread().worker_threads(threads.max(1)).thread_name("r8r-exec").enable_all().build()?,
+        ));
+        let exec = exec_runtime.handle().clone();
         let state = Arc::new_cyclic(|weak: &std::sync::Weak<N8n>| {
             let mut services = Services::new(config.clone(), Some(store.clone()));
             services.sub_workflows = Some(Arc::new(runner::SubRunner(weak.clone())));
@@ -139,6 +153,7 @@ impl N8n {
                 services: Arc::new(services),
                 jwt_secret,
                 webhooks: RwLock::new(Vec::new()),
+                active: RwLock::new(HashMap::new()),
                 test_webhooks: Mutex::new(Vec::new()),
                 schedules: Mutex::new(HashMap::new()),
                 running: Mutex::new(HashMap::new()),
@@ -148,6 +163,7 @@ impl N8n {
                 metrics: Metrics::default(),
                 login_failures: Mutex::new(HashMap::new()),
                 payload_limit,
+                exec,
             }
         });
         Ok(state)
