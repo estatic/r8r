@@ -4,6 +4,7 @@ mod ai;
 mod code;
 mod conditions;
 mod core;
+mod html;
 mod http;
 mod jwt;
 mod merge;
@@ -61,6 +62,9 @@ impl Default for Registry {
             r.add(n);
         }
         for n in utility::all() {
+            r.add(n);
+        }
+        for n in html::all() {
             r.add(n);
         }
         for n in ai::all() {
