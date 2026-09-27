@@ -278,68 +278,20 @@ fn extract_csv(ctx: &ExecCtx<'_>, i: usize, bytes: &[u8]) -> NodeResult<Vec<Item
     }
 }
 
-fn strip_tags(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut in_tag = false;
-    for c in s.chars() {
-        match c {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => out.push(c),
-            _ => {}
-        }
-    }
-    decode_entities(out.trim())
-}
-
-fn decode_entities(s: &str) -> String {
-    s.replace("&nbsp;", " ")
-        .replace("&quot;", "\"")
-        .replace("&#39;", "'")
-        .replace("&apos;", "'")
-        .replace("&lt;", "<")
-        .replace("&gt;", ">")
-        .replace("&amp;", "&")
-}
-
-fn find_ci(haystack: &str, needle: &str, from: usize) -> Option<usize> {
-    let hay_lower = haystack[from..].to_ascii_lowercase();
-    hay_lower.find(&needle.to_ascii_lowercase()).map(|p| p + from)
-}
-
-/// Extracts `<tr>`/`<td>`/`<th>` cell text from the first `<table>` found.
-/// A hand-rolled scanner rather than a full HTML parser: good enough for
-/// the well-formed single-table markup `Convert to File` itself produces,
-/// and for simple hand-authored fixtures.
+/// Extracts `<tr>`/`<td>`/`<th>` cell text from the first `<table>` found,
+/// via `scraper` (already a dependency for the HTML node).
 fn parse_html_table_rows(html: &str) -> Option<Vec<Vec<String>>> {
-    let table_start = find_ci(html, "<table", 0)?;
-    let body_start = html[table_start..].find('>')? + table_start + 1;
-    let table_end = find_ci(html, "</table", body_start)?;
-    let table = &html[body_start..table_end];
-
-    let mut rows = Vec::new();
-    let mut pos = 0;
-    while let Some(tr_start) = find_ci(table, "<tr", pos) {
-        let tr_body_start = table[tr_start..].find('>')? + tr_start + 1;
-        let Some(tr_end) = find_ci(table, "</tr", tr_body_start) else { break };
-        let row_html = &table[tr_body_start..tr_end];
-
-        let mut cells = Vec::new();
-        let mut cpos = 0;
-        while let Some(td_start) = find_ci(row_html, "<t", cpos)
-            .filter(|&p| row_html.as_bytes()[p..].get(2).is_some_and(|b| *b == b'd' || *b == b'D' || *b == b'h' || *b == b'H'))
-        {
-            let tag = &row_html[td_start + 1..td_start + 2];
-            let close_tag = format!("</{tag}");
-            let cell_body_start = row_html[td_start..].find('>')? + td_start + 1;
-            let Some(cell_end) = find_ci(row_html, &close_tag, cell_body_start) else { break };
-            cells.push(strip_tags(&row_html[cell_body_start..cell_end]));
-            cpos = cell_end + close_tag.len();
-        }
-        rows.push(cells);
-        pos = tr_end + 4;
-    }
-    Some(rows)
+    let document = scraper::Html::parse_fragment(html);
+    let table_sel = scraper::Selector::parse("table").ok()?;
+    let table = document.select(&table_sel).next()?;
+    let row_sel = scraper::Selector::parse("tr").ok()?;
+    let cell_sel = scraper::Selector::parse("td, th").ok()?;
+    Some(
+        table
+            .select(&row_sel)
+            .map(|tr| tr.select(&cell_sel).map(|c| c.text().collect::<String>().trim().to_string()).collect())
+            .collect(),
+    )
 }
 
 fn extract_html_table(ctx: &ExecCtx<'_>, i: usize, bytes: &[u8]) -> NodeResult<Vec<Item>> {
