@@ -28,9 +28,10 @@ R8R_BIN=/path/to/r8r cargo test --test bdd             # test another build
 | --- | --- | --- |
 | `R8R_BIN` | the `r8r` binary Cargo builds | Binary under test |
 | `R8R_BDD_CONCURRENCY` | 8 | Scenarios run in parallel |
-| `R8R_BDD_INCLUDE` | – | Opt-in tags to add: `perf`, `slow`, `requires-redis`, `requires-postgres`, `requires-python-runner` |
+| `R8R_BDD_INCLUDE` | – | Opt-in tags to add: `perf`, `slow`, `requires-redis`, `requires-postgres`, `requires-python-runner`, `requires-mailpit` |
 | `R8R_BDD_REDIS_HOST` / `_PORT` | 127.0.0.1 / 6379 | Redis for `@requires-redis` |
 | `R8R_BDD_POSTGRES_URL` | `postgres://postgres:postgres@127.0.0.1:5432/postgres` | PostgreSQL for `@requires-postgres` and `R8R_BDD_STORAGE=postgres` |
+| — | 127.0.0.1:1025 (SMTP) / :8025 (HTTP) | Mailpit (Docker `r8r-bdd-mailpit`) for `@requires-mailpit` |
 | `R8R_BDD_STORAGE` | sqlite | `postgres` runs every scenario with `DB_TYPE=postgresdb`, one schema per scenario |
 | `R8R_BDD_START_TIMEOUT` | 30 | Seconds a server may take to become ready |
 
@@ -121,7 +122,7 @@ npm install n8n@2.35.7            # newest release that runs on Node 22
 R8R_BIN=$PWD/node_modules/.bin/n8n R8R_BDD_START_TIMEOUT=120 \
   cargo test --test bdd -- --tags 'not @beyond-n8n and not @n8n-licensed and not @r8r-only
     and not @perf and not @slow and not @requires-redis and not @requires-postgres
-    and not @requires-python-runner'
+    and not @requires-python-runner and not @requires-mailpit'
 ```
 
 On 2026-09-25 n8n 2.35.7 passed all 358 of these scenarios. When n8n
