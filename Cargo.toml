@@ -33,7 +33,7 @@ dotenvy = "0.15"
 aes-gcm = "0.10"
 base64 = "0.22"
 rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json"] }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "multipart"] }
 rust-embed = { version = "8", features = ["mime-guess"] }
 clap = { version = "4", features = ["derive"] }
 md-5 = "0.10"
@@ -50,10 +50,14 @@ regex = "1"
 bcrypt = "0.15"
 croner = "2"
 redis = { version = "0.27", features = ["tokio-comp"] }
+csv = "1"
+calamine = "0.26"
+rust_xlsxwriter = "0.79"
 scraper = "0.27.0"
 ego-tree = "0.11"
 zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 flate2 = "1.1.10"
+lettre = { version = "0.11.23", default-features = false, features = ["tokio1", "tokio1-rustls-tls", "smtp-transport", "builder", "hostname"] }
 
 [dev-dependencies]
 cucumber = "0.23"
