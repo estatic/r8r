@@ -5,6 +5,7 @@ mod code;
 mod compression;
 mod conditions;
 mod core;
+mod email;
 mod files;
 mod html;
 mod http;
@@ -77,6 +78,9 @@ impl Default for Registry {
             r.add(n);
         }
         for n in files::all() {
+            r.add(n);
+        }
+        for n in email::all() {
             r.add(n);
         }
         r

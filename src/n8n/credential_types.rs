@@ -58,6 +58,19 @@ pub fn all() -> Vec<CredentialType> {
             ],
         },
         CredentialType {
+            name: "smtp",
+            display_name: "SMTP",
+            fields: vec![
+                f("user", "User", false, false, json!("")),
+                f("password", "Password", true, false, json!("")),
+                f("host", "Host", false, false, json!("")),
+                f("port", "Port", false, false, json!(465)),
+                f("secure", "SSL/TLS", false, false, json!(true)),
+                f("disableStartTls", "Disable STARTTLS", false, false, json!(false)),
+                f("hostName", "Client Host Name", false, false, json!("")),
+            ],
+        },
+        CredentialType {
             name: "openAiApi",
             display_name: "OpenAi",
             fields: vec![f("apiKey", "API Key", true, true, json!("")), f("organizationId", "Organization ID", false, false, json!("")), f("url", "Base URL", false, false, json!("https://api.openai.com/v1"))],
