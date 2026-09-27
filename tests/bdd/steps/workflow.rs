@@ -182,29 +182,57 @@ async fn trigger_items(w: &mut R8rWorld, step: &Step) {
     w.wf().pin(&first, &items);
 }
 
-/// Adds a binary property (its content base64-encoded) to an already-pinned
-/// trigger item, for nodes (like Compression) that read binary input. Run
-/// `the trigger outputs the items:` first to create the item.
-#[given(expr = "the trigger item {int} has the binary property {string} with content {string} and mime type {string}")]
-async fn trigger_item_binary(w: &mut R8rWorld, index: usize, property: String, content: String, mime: String) {
+fn binary_entry_json(property: &str, content: &str, mime: &str) -> Value {
     use base64::Engine as _;
-    let ext = match mime.as_str() {
+    let ext = match mime {
         "text/plain" => "txt",
         "application/json" => "json",
         "text/csv" => "csv",
+        "text/html" => "html",
         "application/zip" => "zip",
         "application/gzip" => "gz",
         "application/octet-stream" => "bin",
+        "application/pdf" => "pdf",
         other => other.split('/').nth(1).unwrap_or("bin"),
     }
     .to_string();
-    let entry = json!({
+    json!({
         "data": base64::engine::general_purpose::STANDARD.encode(content.as_bytes()),
         "mimeType": mime,
         "fileExtension": ext,
         "fileName": format!("{property}.{ext}"),
         "fileSize": format!("{} B", content.len()),
-    });
+    })
+}
+
+/// Adds a binary property (its content base64-encoded) to an already-pinned
+/// trigger item, for nodes (like Compression) that read binary input. Run
+/// `the trigger outputs the items:` first to create the item.
+#[given(expr = "the trigger item {int} has the binary property {string} with content {string} and mime type {string}")]
+async fn trigger_item_binary(w: &mut R8rWorld, index: usize, property: String, content: String, mime: String) {
+    let entry = binary_entry_json(&property, &content, &mime);
+    let first = w.wf().first_node_name();
+    w.wf().set_item_binary(&first, index, &property, entry);
+}
+
+/// Same as above, but the content comes from a doc string so it can contain
+/// real newlines (an inline `{string}` cannot: Cucumber Expressions only
+/// unescape `\"` and `\\`, so a literal `\n` in a quoted step argument stays
+/// as backslash-n rather than becoming a line break).
+#[given(expr = "the trigger item {int} has the binary property {string} with mime type {string} and content:")]
+async fn trigger_item_binary_multiline(w: &mut R8rWorld, index: usize, property: String, mime: String, step: &Step) {
+    // This crate's docstring includes the newline right after the opening
+    // `"""` and right before the closing `"""` verbatim (harmless for JSON
+    // or JS docstrings elsewhere, which tolerate the extra whitespace, but
+    // not for raw content whose exact bytes -- and line count -- matter).
+    let mut content = docstring(step);
+    if let Some(rest) = content.strip_prefix('\n') {
+        content = rest;
+    }
+    if let Some(rest) = content.strip_suffix('\n') {
+        content = rest;
+    }
+    let entry = binary_entry_json(&property, content, &mime);
     let first = w.wf().first_node_name();
     w.wf().set_item_binary(&first, index, &property, entry);
 }

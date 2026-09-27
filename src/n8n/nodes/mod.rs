@@ -5,6 +5,7 @@ mod code;
 mod compression;
 mod conditions;
 mod core;
+mod files;
 mod html;
 mod http;
 mod jwt;
@@ -77,6 +78,9 @@ impl Default for Registry {
             r.add(n);
         }
         r.add(Box::new(slack::Slack));
+        for n in files::all() {
+            r.add(n);
+        }
         r
     }
 }
@@ -113,6 +117,29 @@ pub fn set_path(target: &mut Map<String, Value>, path: &str, value: Value) {
 
 fn split_path(path: &str) -> Vec<String> {
     path.replace('[', ".").replace(']', "").split('.').filter(|p| !p.is_empty()).map(String::from).collect()
+}
+
+/// Flattens a JSON object into `(dotted.path, leaf value)` pairs: nested
+/// objects are recursed into and joined with `.`; arrays and scalars are
+/// kept as single leaf values. Used by spreadsheet-writing nodes to turn
+/// item json into flat columns, the way n8n's `flattenObject` does.
+pub fn flatten_json(json: &Map<String, Value>) -> Vec<(String, Value)> {
+    fn walk(prefix: &str, value: &Value, out: &mut Vec<(String, Value)>) {
+        match value {
+            Value::Object(map) if !map.is_empty() => {
+                for (k, v) in map {
+                    let key = if prefix.is_empty() { k.clone() } else { format!("{prefix}.{k}") };
+                    walk(&key, v, out);
+                }
+            }
+            other => out.push((prefix.to_string(), other.clone())),
+        }
+    }
+    let mut out = Vec::new();
+    for (k, v) in json {
+        walk(k, v, &mut out);
+    }
+    out
 }
 
 /// A comma-separated field list parameter (`"a, b"`), or an array.
