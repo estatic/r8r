@@ -53,6 +53,10 @@ redis = { version = "0.27", features = ["tokio-comp"] }
 csv = "1"
 calamine = "0.26"
 rust_xlsxwriter = "0.79"
+scraper = "0.27.0"
+ego-tree = "0.11"
+zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
+flate2 = "1.1.10"
 
 [dev-dependencies]
 cucumber = "0.23"

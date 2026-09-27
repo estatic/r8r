@@ -2,10 +2,13 @@
 
 mod ai;
 mod code;
+mod compression;
 mod conditions;
 mod core;
 mod files;
+mod html;
 mod http;
+mod jwt;
 mod merge;
 mod python;
 mod routing;
@@ -54,10 +57,17 @@ impl Default for Registry {
         r.add(Box::new(merge::Merge));
         r.add(Box::new(code::Code));
         r.add(Box::new(http::HttpRequest));
+        for n in jwt::all() {
+            r.add(n);
+        }
+        r.add(Box::new(compression::Compression));
         for n in transform::all() {
             r.add(n);
         }
         for n in utility::all() {
+            r.add(n);
+        }
+        for n in html::all() {
             r.add(n);
         }
         for n in ai::all() {

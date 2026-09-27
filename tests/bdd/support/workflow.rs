@@ -192,6 +192,17 @@ impl WorkflowSpec {
         self.pin_data.insert(node.to_string(), Value::Array(wrapped));
     }
 
+    /// Sets (or replaces) a binary property on an already-pinned item, for
+    /// nodes (like Compression) that read binary input. `pin`/`pin_data`
+    /// must already have an entry for `node` with at least `index + 1`
+    /// items.
+    pub fn set_item_binary(&mut self, node: &str, index: usize, property: &str, entry: Value) {
+        let items = self.pin_data.get_mut(node).unwrap_or_else(|| panic!("node \"{node}\" has no pinned items yet"));
+        let item = items.as_array_mut().and_then(|a| a.get_mut(index)).unwrap_or_else(|| panic!("node \"{node}\" has no pinned item {index}"));
+        let obj = item.as_object_mut().expect("pinned item must be an object");
+        obj.entry("binary").or_insert_with(|| json!({})).as_object_mut().expect("binary must be an object").insert(property.to_string(), entry);
+    }
+
     /// The first node in table order: the trigger by convention.
     pub fn first_node_name(&self) -> String {
         self.nodes.first().and_then(|n| n["name"].as_str()).expect("workflow has no nodes").to_string()
@@ -246,14 +257,17 @@ pub fn prepare_for_cli(workflow: &mut Value) -> String {
     let (true, Some(Value::Array(items))) = (is_manual, pinned) else { return id };
 
     let trigger_name = format!("{name} (trigger)");
+    // Carries `binary` through too (not just `json`), so nodes that read
+    // binary input (e.g. Compression) can be exercised via pinned items in
+    // headless CLI runs.
     let jsons: Vec<Value> = items
         .iter()
         .map(|i| {
-            let mut obj = json!({ "json": i.get("json").cloned().unwrap_or(json!({})) });
+            let mut wrapped = json!({ "json": i.get("json").cloned().unwrap_or(json!({})) });
             if let Some(binary) = i.get("binary") {
-                obj["binary"] = binary.clone();
+                wrapped["binary"] = binary.clone();
             }
-            obj
+            wrapped
         })
         .collect();
     let position = first["position"].clone();

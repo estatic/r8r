@@ -182,6 +182,33 @@ async fn trigger_items(w: &mut R8rWorld, step: &Step) {
     w.wf().pin(&first, &items);
 }
 
+/// Adds a binary property (its content base64-encoded) to an already-pinned
+/// trigger item, for nodes (like Compression) that read binary input. Run
+/// `the trigger outputs the items:` first to create the item.
+#[given(expr = "the trigger item {int} has the binary property {string} with content {string} and mime type {string}")]
+async fn trigger_item_binary(w: &mut R8rWorld, index: usize, property: String, content: String, mime: String) {
+    use base64::Engine as _;
+    let ext = match mime.as_str() {
+        "text/plain" => "txt",
+        "application/json" => "json",
+        "text/csv" => "csv",
+        "application/zip" => "zip",
+        "application/gzip" => "gz",
+        "application/octet-stream" => "bin",
+        other => other.split('/').nth(1).unwrap_or("bin"),
+    }
+    .to_string();
+    let entry = json!({
+        "data": base64::engine::general_purpose::STANDARD.encode(content.as_bytes()),
+        "mimeType": mime,
+        "fileExtension": ext,
+        "fileName": format!("{property}.{ext}"),
+        "fileSize": format!("{} B", content.len()),
+    });
+    let first = w.wf().first_node_name();
+    w.wf().set_item_binary(&first, index, &property, entry);
+}
+
 #[given(expr = "the workflow has no {string} setting")]
 async fn remove_setting(w: &mut R8rWorld, key: String) {
     w.wf().settings.remove(&key);

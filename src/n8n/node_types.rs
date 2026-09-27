@@ -63,12 +63,12 @@ const DESCRIPTIONS: &[Desc] = &[
     d("n8n-nodes-base.crypto", "Crypto", "transform", &[1.0], "Provide cryptographic utilities", 1, 1, &["action", "type", "value", "secret", "dataPropertyName", "encoding"], &[]),
     d("n8n-nodes-base.markdown", "Markdown", "output", &[1.0], "Convert data between Markdown and HTML", 1, 1, &["mode", "markdown", "html", "destinationKey", "options"], &[]),
     d("n8n-nodes-base.xml", "XML", "transform", &[1.0], "Convert data from and to XML", 1, 1, &["mode", "dataPropertyName", "options"], &[]),
+    d("n8n-nodes-base.html", "HTML", "transform", &[1.0, 1.1, 1.2], "Work with HTML", 1, 1, &["operation", "html", "sourceData", "dataPropertyName", "extractionValues", "options"], &[]),
     d("n8n-nodes-base.executeCommand", "Execute Command", "transform", &[1.0], "Executes a command on the host", 1, 1, &["executeOnce", "command"], &[]),
+    d("n8n-nodes-base.compression", "Compression", "transform", &[1.0, 1.1], "Compress and decompress files", 1, 1, &["operation", "binaryPropertyName", "outputFormat", "fileName", "binaryPropertyOutput", "outputPrefix"], &[]),
     // GA catalog entries that r8r does not run natively yet: described so
     // imported workflows render in the editor.
-    d("n8n-nodes-base.html", "HTML", "transform", &[1.0, 1.2], "Work with HTML", 1, 1, &["operation", "html", "options"], &[]),
     d("n8n-nodes-base.jwt", "JWT", "transform", &[1.0], "JWT", 1, 1, &["operation", "claims", "options"], &["jwtAuth"]),
-    d("n8n-nodes-base.compression", "Compression", "transform", &[1.0, 1.1], "Compress and decompress files", 1, 1, &["operation", "binaryPropertyName"], &[]),
     d("n8n-nodes-base.extractFromFile", "Extract from File", "input", &[1.0], "Convert binary data to JSON", 1, 1, &["operation", "binaryPropertyName", "options"], &[]),
     d("n8n-nodes-base.convertToFile", "Convert to File", "input", &[1.0, 1.1], "Convert JSON data to binary data", 1, 1, &["operation", "binaryPropertyName", "options"], &[]),
     d("n8n-nodes-base.readWriteFile", "Read/Write Files from Disk", "input", &[1.0], "Read or write files from the computer that runs n8n", 1, 1, &["operation", "fileSelector", "options"], &[]),
