@@ -5,6 +5,7 @@ mod code;
 mod conditions;
 mod core;
 mod http;
+mod jwt;
 mod merge;
 mod python;
 mod routing;
@@ -53,6 +54,9 @@ impl Default for Registry {
         r.add(Box::new(merge::Merge));
         r.add(Box::new(code::Code));
         r.add(Box::new(http::HttpRequest));
+        for n in jwt::all() {
+            r.add(n);
+        }
         for n in transform::all() {
             r.add(n);
         }
