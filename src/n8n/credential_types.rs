@@ -58,6 +58,19 @@ pub fn all() -> Vec<CredentialType> {
             ],
         },
         CredentialType {
+            name: "smtp",
+            display_name: "SMTP",
+            fields: vec![
+                f("user", "User", false, false, json!("")),
+                f("password", "Password", true, false, json!("")),
+                f("host", "Host", false, false, json!("")),
+                f("port", "Port", false, false, json!(465)),
+                f("secure", "SSL/TLS", false, false, json!(true)),
+                f("disableStartTls", "Disable STARTTLS", false, false, json!(false)),
+                f("hostName", "Client Host Name", false, false, json!("")),
+            ],
+        },
+        CredentialType {
             name: "redis",
             display_name: "Redis",
             fields: vec![
