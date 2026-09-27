@@ -74,7 +74,7 @@ and on n8n; `codex.r8r.native = false` removed.
 | --- | --- | --- |
 | 1.1 | Postgres | operations: executeQuery, insert, update, upsert, delete, select; query params; chunks: read ops · write ops |
 | 1.2 | MySQL | reuse 1.1's SQL layer |
-| 1.3 | Redis | get/set/delete/incr/keys/publish/push/pop |
+| 1.3 ✅ | Redis | get/set/delete/incr/keys/publish/push/pop |
 | 1.4 | Send Email (SMTP) | lettre; attachments from binary |
 | 1.5 | Slack | message post/update, channel ops; wiremock |
 | 1.6 | Google Sheets | OAuth2 credential; read/append/update/lookup; wiremock |
