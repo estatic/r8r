@@ -2,6 +2,7 @@
 
 mod ai;
 mod code;
+mod compression;
 mod conditions;
 mod core;
 mod http;
@@ -53,6 +54,7 @@ impl Default for Registry {
         r.add(Box::new(merge::Merge));
         r.add(Box::new(code::Code));
         r.add(Box::new(http::HttpRequest));
+        r.add(Box::new(compression::Compression));
         for n in transform::all() {
             r.add(n);
         }
