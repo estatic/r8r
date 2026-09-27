@@ -93,6 +93,8 @@ tests/bdd/
     12-cli-config      subcommands, typed config, default port
     13-scaling         queue mode (Redis / PostgreSQL)
     14-nfr             performance targets, structured logs, metrics
+    15-r8r-legacy      r8r's own editor API (/rest/r8r, JWT) — @r8r-only @legacy-api;
+                       retire with it (plan 2026-09-27, Phase 3.9)
 ```
 
 ## Tags

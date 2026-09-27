@@ -16,6 +16,8 @@ pub enum Auth {
     Session(String),
     /// Public API key of the named user.
     ApiKey(String),
+    /// Bearer JWT for the legacy r8r editor API (`/rest/r8r`).
+    Bearer(String),
 }
 
 #[derive(Debug, Clone)]
@@ -273,6 +275,9 @@ impl R8rWorld {
             Auth::ApiKey(user) => {
                 let key = self.api_keys.get(user).unwrap_or_else(|| panic!("no API key for {user}"));
                 req = req.header("X-N8N-API-KEY", key);
+            }
+            Auth::Bearer(token) => {
+                req = req.header("authorization", format!("Bearer {token}"));
             }
         }
         let mut has_content_type = false;

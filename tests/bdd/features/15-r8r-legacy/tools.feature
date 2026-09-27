@@ -1,33 +1,34 @@
-@r8r
+@r8r-only @legacy-api
 Feature: Tool library for AI agents
   Tools are defined once and referenced by id from agents. Names must suit
   LLM function calling; only safe node types are allowed; a tool in use
   cannot be deleted.
 
   Background:
-    Given I am logged in as "tools@example.com"
+    Given a running r8r server
+    And I am logged in to the legacy r8r API as "tools@example.com"
 
   Scenario: Create, list and edit a tool
-    When I send a POST request to "/rest/tools" with JSON:
+    When I send a POST request to "/rest/r8r/tools" with body:
       """
       {"name": "web_search", "description": "Search the web", "node_type": "core.httpRequest",
        "argument_schema": {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]},
        "parameters": {"method": "GET", "url": "https://s.example/?q={{ encodeURIComponent($args.q) }}"}}
       """
     Then the response status is 201
-    And I remember the JSON at "/id" as "tool"
-    When I send a GET request to "/rest/tools"
-    Then the JSON at "/0/name" is "web_search"
-    And the JSON at "/0/used_by" is 0
-    When I send a PATCH request to "/rest/tools/{tool}" with JSON:
+    And I remember the response JSON at "id" as "tool"
+    When I send a GET request to "/rest/r8r/tools"
+    Then the response JSON at "[0].name" is "web_search"
+    And the response JSON at "[0].used_by" is 0
+    When I send a PATCH request to "/rest/r8r/tools/%{tool}" with body:
       """
       {"description": "Search the whole web"}
       """
     Then the response status is 200
-    And the JSON at "/description" is "Search the whole web"
+    And the response JSON at "description" is "Search the whole web"
 
   Scenario Outline: Invalid tools are rejected
-    When I send a POST request to "/rest/tools" with JSON:
+    When I send a POST request to "/rest/r8r/tools" with body:
       """
       {"name": "<name>", "description": "d", "node_type": "<node_type>", "argument_schema": <schema>, "parameters": <parameters>}
       """
@@ -44,53 +45,53 @@ Feature: Tool library for AI agents
       | ok_name    | core.code        | {"type": "object", "properties": {}}                                   | "text"     |
 
   Scenario: Tool names are unique
-    Given I sent a POST request to "/rest/tools" with JSON:
+    Given I send a POST request to "/rest/r8r/tools" with body:
       """
       {"name": "dup", "description": "d", "node_type": "core.code", "argument_schema": {"type": "object"}, "parameters": {"script": "return []"}}
       """
-    When I send a POST request to "/rest/tools" with JSON:
+    When I send a POST request to "/rest/r8r/tools" with body:
       """
       {"name": "dup", "description": "d", "node_type": "core.code", "argument_schema": {"type": "object"}, "parameters": {"script": "return []"}}
       """
     Then the response status is 409
 
   Scenario: A tool used by an agent cannot be deleted
-    Given I sent a POST request to "/rest/tools" with JSON:
+    Given I send a POST request to "/rest/r8r/tools" with body:
       """
       {"name": "lookup", "description": "d", "node_type": "core.code", "argument_schema": {"type": "object"}, "parameters": {"script": "return []"}}
       """
-    And I remember the JSON at "/id" as "tool"
-    And I sent a POST request to "/rest/workflows" with JSON:
+    And I remember the response JSON at "id" as "tool"
+    And I send a POST request to "/rest/r8r/workflows" with body:
       """
-      {"name": "agent-wf", "nodes": [{"id": "a", "node_type": "ai.agent", "position": [0, 0], "parameters": {"tool_ids": ["{tool}"]}}], "connections": []}
+      {"name": "agent-wf", "nodes": [{"id": "a", "node_type": "ai.agent", "position": [0, 0], "parameters": {"tool_ids": ["%{tool}"]}}], "connections": []}
       """
-    When I send a DELETE request to "/rest/tools/{tool}"
+    When I send a DELETE request to "/rest/r8r/tools/%{tool}"
     Then the response status is 409
-    And the JSON at "/error" is "tool is in use"
-    And the JSON at "/workflows/0/name" is "agent-wf"
+    And the response JSON at "error" is "tool is in use"
+    And the response JSON at "workflows[0].name" is "agent-wf"
 
   Scenario: A credential used only by a tool cannot be deleted
-    Given I sent a POST request to "/rest/credentials" with JSON:
+    Given I send a POST request to "/rest/r8r/credentials" with body:
       """
       {"name": "api", "credential_type": "bearerToken", "data": {"token": "t"}}
       """
-    And I remember the JSON at "/id" as "cred"
-    And I sent a POST request to "/rest/tools" with JSON:
+    And I remember the response JSON at "id" as "cred"
+    And I send a POST request to "/rest/r8r/tools" with body:
       """
       {"name": "secured", "description": "d", "node_type": "core.httpRequest", "argument_schema": {"type": "object"},
-       "parameters": {"url": "https://x", "auth": {"type": "bearer", "credential_id": "{cred}"}}}
+       "parameters": {"url": "https://x", "auth": {"type": "bearer", "credential_id": "%{cred}"}}}
       """
-    When I send a DELETE request to "/rest/credentials/{cred}"
+    When I send a DELETE request to "/rest/r8r/credentials/%{cred}"
     Then the response status is 409
-    And the JSON at "/tools/0/name" is "secured"
+    And the response JSON at "tools[0].name" is "secured"
 
   Scenario: Deleting an unused tool
-    Given I sent a POST request to "/rest/tools" with JSON:
+    Given I send a POST request to "/rest/r8r/tools" with body:
       """
       {"name": "temp", "description": "d", "node_type": "core.code", "argument_schema": {"type": "object"}, "parameters": {"script": "return []"}}
       """
-    And I remember the JSON at "/id" as "tool"
-    When I send a DELETE request to "/rest/tools/{tool}"
+    And I remember the response JSON at "id" as "tool"
+    When I send a DELETE request to "/rest/r8r/tools/%{tool}"
     Then the response status is 204
-    When I send a GET request to "/rest/tools/{tool}"
+    When I send a GET request to "/rest/r8r/tools/%{tool}"
     Then the response status is 404
