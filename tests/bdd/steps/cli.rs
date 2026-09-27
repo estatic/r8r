@@ -171,6 +171,19 @@ async fn file_not_contains(w: &mut R8rWorld, name: String, needle: String) {
     assert!(!text.contains(&needle), "{name} contains {needle:?}");
 }
 
+#[then(expr = "the file {string} contains {string}")]
+async fn file_contains(w: &mut R8rWorld, name: String, needle: String) {
+    let path = w.dir.path().join(&name);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let needle = w.expand(&needle);
+    assert!(text.contains(&needle), "{name} does not contain {needle:?}; actual: {text:?}");
+}
+
+#[then(expr = "the file {string} does not exist")]
+async fn file_absent(w: &mut R8rWorld, name: String) {
+    assert!(!w.dir.path().join(&name).exists(), "{name} exists but should not");
+}
+
 #[then(expr = "the object at {string} in the file {string} has the keys in the order {string}")]
 async fn file_key_order(w: &mut R8rWorld, path: String, name: String, keys: String) {
     let (text, _) = read_json_file(w, &name);
