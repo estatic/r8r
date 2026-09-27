@@ -246,7 +246,16 @@ pub fn prepare_for_cli(workflow: &mut Value) -> String {
     let (true, Some(Value::Array(items))) = (is_manual, pinned) else { return id };
 
     let trigger_name = format!("{name} (trigger)");
-    let jsons: Vec<Value> = items.iter().map(|i| json!({ "json": i.get("json").cloned().unwrap_or(json!({})) })).collect();
+    let jsons: Vec<Value> = items
+        .iter()
+        .map(|i| {
+            let mut obj = json!({ "json": i.get("json").cloned().unwrap_or(json!({})) });
+            if let Some(binary) = i.get("binary") {
+                obj["binary"] = binary.clone();
+            }
+            obj
+        })
+        .collect();
     let position = first["position"].clone();
     let mut new_nodes = nodes.clone();
     new_nodes[0]["name"] = json!(trigger_name);
