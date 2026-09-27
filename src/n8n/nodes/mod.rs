@@ -2,6 +2,7 @@
 
 mod ai;
 mod code;
+mod compression;
 mod conditions;
 mod core;
 mod html;
@@ -58,6 +59,7 @@ impl Default for Registry {
         for n in jwt::all() {
             r.add(n);
         }
+        r.add(Box::new(compression::Compression));
         for n in transform::all() {
             r.add(n);
         }
