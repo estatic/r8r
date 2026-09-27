@@ -12,9 +12,11 @@ mod http;
 mod jwt;
 mod merge;
 mod python;
+mod redis;
 mod routing;
 mod server_nodes;
 mod set;
+mod slack;
 mod transform;
 mod utility;
 
@@ -62,6 +64,7 @@ impl Default for Registry {
             r.add(n);
         }
         r.add(Box::new(compression::Compression));
+        r.add(Box::new(redis::Redis));
         for n in transform::all() {
             r.add(n);
         }
@@ -77,6 +80,7 @@ impl Default for Registry {
         for n in server_nodes::all() {
             r.add(n);
         }
+        r.add(Box::new(slack::Slack));
         for n in files::all() {
             r.add(n);
         }

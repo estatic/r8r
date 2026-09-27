@@ -71,6 +71,19 @@ pub fn all() -> Vec<CredentialType> {
             ],
         },
         CredentialType {
+            name: "redis",
+            display_name: "Redis",
+            fields: vec![
+                f("password", "Password", true, false, json!("")),
+                f("user", "User", false, false, json!("")),
+                f("host", "Host", false, false, json!("localhost")),
+                f("port", "Port", false, false, json!(6379)),
+                f("database", "Database Number", false, false, json!(0)),
+                f("ssl", "SSL", false, false, json!(false)),
+                f("disableTlsVerification", "Disable TLS Verification (insecure)", false, false, json!(false)),
+            ],
+        },
+        CredentialType {
             name: "openAiApi",
             display_name: "OpenAi",
             fields: vec![f("apiKey", "API Key", true, true, json!("")), f("organizationId", "Organization ID", false, false, json!("")), f("url", "Base URL", false, false, json!("https://api.openai.com/v1"))],
@@ -84,6 +97,30 @@ pub fn all() -> Vec<CredentialType> {
             name: "telegramApi",
             display_name: "Telegram API",
             fields: vec![f("accessToken", "Access Token", true, true, json!("")), f("baseUrl", "Base URL", false, false, json!("https://api.telegram.org"))],
+        },
+        CredentialType {
+            name: "slackApi",
+            display_name: "Slack API",
+            fields: vec![
+                f("accessToken", "Access Token", true, true, json!("")),
+                f("signatureSecret", "Signature Secret", true, false, json!("")),
+                f("url", "Base URL", false, false, json!("https://slack.com/api")),
+            ],
+        },
+        CredentialType {
+            name: "slackOAuth2Api",
+            display_name: "Slack OAuth2 API",
+            fields: vec![
+                f("grantType", "Grant Type", false, false, json!("authorizationCode")),
+                f("authUrl", "Authorization URL", false, false, json!("https://slack.com/oauth/v2/authorize")),
+                f("accessTokenUrl", "Access Token URL", false, false, json!("https://slack.com/api/oauth.v2.access")),
+                f("clientId", "Client ID", false, false, json!("")),
+                f("clientSecret", "Client Secret", true, false, json!("")),
+                f("scope", "Scope", false, false, json!("")),
+                f("authentication", "Authentication", false, false, json!("body")),
+                f("signatureSecret", "Signature Secret", true, false, json!("")),
+                f("url", "Base URL", false, false, json!("https://slack.com/api")),
+            ],
         },
     ]
 }

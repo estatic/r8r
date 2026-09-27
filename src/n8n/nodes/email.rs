@@ -71,7 +71,7 @@ fn parse_one_mailbox(field: &str, value: &str) -> NodeResult<Option<Mailbox>> {
 /// Decodes the base64 `data` of a binary property, returning its bytes,
 /// mime type and file name, the same two-stage "no binary at all" / "no such
 /// property" error compression.rs and files.rs raise.
-fn binary_attachment<'a>(item: &'a Item, prop: &str, i: usize) -> NodeResult<(Vec<u8>, String, String)> {
+fn binary_attachment(item: &Item, prop: &str, i: usize) -> NodeResult<(Vec<u8>, String, String)> {
     let binary = item.binary.as_ref().ok_or_else(|| {
         NodeError::new(format!("This operation expects the node's input data to contain a binary file '{prop}', but none was found [item {i}]")).at(i)
     })?;

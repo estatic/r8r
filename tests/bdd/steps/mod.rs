@@ -14,6 +14,7 @@ pub mod migrate;
 pub mod mocks;
 pub mod perf;
 pub mod push;
+pub mod redis;
 pub mod server;
 pub mod workflow;
 

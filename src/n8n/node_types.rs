@@ -66,6 +66,17 @@ const DESCRIPTIONS: &[Desc] = &[
     d("n8n-nodes-base.html", "HTML", "transform", &[1.0, 1.1, 1.2], "Work with HTML", 1, 1, &["operation", "html", "sourceData", "dataPropertyName", "extractionValues", "options"], &[]),
     d("n8n-nodes-base.executeCommand", "Execute Command", "transform", &[1.0], "Executes a command on the host", 1, 1, &["executeOnce", "command"], &[]),
     d("n8n-nodes-base.compression", "Compression", "transform", &[1.0, 1.1], "Compress and decompress files", 1, 1, &["operation", "binaryPropertyName", "outputFormat", "fileName", "binaryPropertyOutput", "outputPrefix"], &[]),
+    d(
+        "n8n-nodes-base.redis",
+        "Redis",
+        "input",
+        &[1.0],
+        "Get, send and update data in Redis",
+        1,
+        1,
+        &["operation", "key", "value", "keyType", "propertyName", "keyPattern", "getValues", "list", "messageData", "tail", "channel", "valueIsJSON", "expire", "ttl", "options"],
+        &["redis"],
+    ),
     // GA catalog entries that r8r does not run natively yet: described so
     // imported workflows render in the editor.
     d("n8n-nodes-base.jwt", "JWT", "transform", &[1.0], "JWT", 1, 1, &["operation", "claims", "options"], &["jwtAuth"]),
@@ -81,7 +92,6 @@ const DESCRIPTIONS: &[Desc] = &[
     d("n8n-nodes-base.mySql", "MySQL", "input", &[2.0, 2.4], "Get, add and update data in MySQL", 1, 1, &["operation", "table", "query", "options"], &["mySql"]),
     d("n8n-nodes-base.microsoftSql", "Microsoft SQL", "input", &[1.0, 1.1], "Get, add and update data in Microsoft SQL", 1, 1, &["operation", "query"], &["microsoftSql"]),
     d("n8n-nodes-base.mongoDb", "MongoDB", "input", &[1.0, 1.1], "Find, insert and update documents in MongoDB", 1, 1, &["operation", "collection", "query"], &["mongoDb"]),
-    d("n8n-nodes-base.redis", "Redis", "input", &[1.0], "Get, send and update data in Redis", 1, 1, &["operation", "key", "value"], &["redis"]),
     d("n8n-nodes-base.rabbitmq", "RabbitMQ", "transform", &[1.0, 1.1], "Sends messages to a RabbitMQ topic", 1, 1, &["operation", "queue", "options"], &["rabbitmq"]),
     d("n8n-nodes-base.kafka", "Kafka", "transform", &[1.0], "Sends messages to a Kafka topic", 1, 1, &["topic", "options"], &["kafka"]),
     d("n8n-nodes-base.mqtt", "MQTT", "input", &[1.0], "Push messages to MQTT", 1, 1, &["topic", "options"], &["mqtt"]),
