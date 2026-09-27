@@ -85,6 +85,30 @@ pub fn all() -> Vec<CredentialType> {
             display_name: "Telegram API",
             fields: vec![f("accessToken", "Access Token", true, true, json!("")), f("baseUrl", "Base URL", false, false, json!("https://api.telegram.org"))],
         },
+        CredentialType {
+            name: "slackApi",
+            display_name: "Slack API",
+            fields: vec![
+                f("accessToken", "Access Token", true, true, json!("")),
+                f("signatureSecret", "Signature Secret", true, false, json!("")),
+                f("url", "Base URL", false, false, json!("https://slack.com/api")),
+            ],
+        },
+        CredentialType {
+            name: "slackOAuth2Api",
+            display_name: "Slack OAuth2 API",
+            fields: vec![
+                f("grantType", "Grant Type", false, false, json!("authorizationCode")),
+                f("authUrl", "Authorization URL", false, false, json!("https://slack.com/oauth/v2/authorize")),
+                f("accessTokenUrl", "Access Token URL", false, false, json!("https://slack.com/api/oauth.v2.access")),
+                f("clientId", "Client ID", false, false, json!("")),
+                f("clientSecret", "Client Secret", true, false, json!("")),
+                f("scope", "Scope", false, false, json!("")),
+                f("authentication", "Authentication", false, false, json!("body")),
+                f("signatureSecret", "Signature Secret", true, false, json!("")),
+                f("url", "Base URL", false, false, json!("https://slack.com/api")),
+            ],
+        },
     ]
 }
 

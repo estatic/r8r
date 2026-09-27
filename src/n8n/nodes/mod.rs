@@ -15,6 +15,7 @@ mod redis;
 mod routing;
 mod server_nodes;
 mod set;
+mod slack;
 mod transform;
 mod utility;
 
@@ -78,6 +79,7 @@ impl Default for Registry {
         for n in server_nodes::all() {
             r.add(n);
         }
+        r.add(Box::new(slack::Slack));
         for n in files::all() {
             r.add(n);
         }
