@@ -8,16 +8,39 @@
 //!
 //! Query text is built the way pg-promise (which n8n's node uses) itself
 //! works: parameter values are escaped and spliced into the SQL text as
-//! literals, and the resulting string is sent as a single statement (see
-//! `value_literal`, `substitute_placeholders`). This sidesteps sqlx's
-//! extended-protocol parameter type checking (which requires every bind's
-//! Rust type to match the type Postgres infers for that placeholder --
-//! unworkable when column types are only known at runtime) and is
-//! executed via `sqlx::raw_sql`, matching pg-promise's own text-protocol
-//! formatting model. Identifiers are always quoted (`quote_ident`) and
-//! string values always escaped (`sql_string_literal`), so this is not an
-//! injection risk: user-supplied text always ends up as a properly
-//! quoted/escaped literal, never spliced in raw.
+//! literals (see `value_literal`, `substitute_placeholders`), and the
+//! resulting string is sent with `sqlx::query(sql)` and no bind
+//! parameters. This sidesteps sqlx's extended-protocol parameter *type*
+//! checking (which would otherwise require every bind's Rust type to
+//! match the type Postgres infers for that placeholder -- unworkable
+//! when column types are only known at runtime) and matches pg-promise's
+//! own text-substitution formatting model. Identifiers are always quoted
+//! (`quote_ident`) and string values always escaped (`sql_string_literal`),
+//! so this is not an injection risk: user-supplied text always ends up as
+//! a properly quoted/escaped literal, never spliced in raw. One
+//! consequence: each query is a single SQL statement (sqlx's extended
+//! protocol, unlike `sqlx::raw_sql`'s simple-protocol path, rejects
+//! multiple `;`-separated commands in one string) -- an `executeQuery`
+//! item that packs several statements into one query text will fail with
+//! Postgres' own "cannot insert multiple commands into a prepared
+//! statement"; use one item/query per statement instead. `raw_sql` was
+//! tried first specifically to support that case, but its `Executor`
+//! implementation is the reason `execute` needed the `tokio::spawn` split
+//! below -- see that comment.
+//!
+//! `execute` splits into two phases: everything that needs `ctx`
+//! (resolving expressions, resource locators, the `columns` resourceMapper)
+//! runs synchronously first, producing an owned `Vec<ItemPlan>`; the
+//! Postgres work (connecting, table-schema lookups, running the batch)
+//! then runs in a `tokio::spawn`ed task fed only that owned data. This is
+//! no longer strictly required for compilation (switching from
+//! `sqlx::raw_sql` to `sqlx::query` turned out to be what actually fixed
+//! the "implementation of `Send`/`Executor` is not general enough" errors
+//! this ran into -- a reproducible rustc/sqlx-0.7 HRTB limitation specific
+//! to `raw_sql`'s `Execute` impl, not to mixing sqlx with `ExecCtx`'s
+//! borrows in general), but the split is kept: it's a clean boundary
+//! (ctx-dependent parameter resolution vs. owned-data-only DB work) and
+//! confirmed robust once found, so there was no reason to unwind it.
 //!
 //! Generic pieces (identifier quoting, literal escaping, `where`/`sort`
 //! parameter parsing) live in `sql_common.rs` for the MySQL node to reuse
@@ -49,32 +72,31 @@ impl NodeType for Postgres {
     async fn execute(&self, ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
         let input_len = if ctx.input().is_empty() { 1 } else { ctx.input().len() };
         let (_, cred) = ctx.credentials("postgres").await?;
-        let node_version = ctx.node.type_version;
 
         let connection_timeout = ctx.param_f64("options.connectionTimeout", 0, 30.0)? as u64;
         let query_batching = ctx.param_str("options.queryBatching", 0, "single")?;
         let large_numbers = ctx.param_str("options.largeNumbersOutput", 0, "text")?;
         let operation = ctx.param_str("operation", 0, "insert")?;
+        let continue_on_fail = ctx.continue_on_fail();
 
-        let pool = connect(&cred, connection_timeout).await?;
-
-        let mut schema_cache: Option<(String, String, Vec<ColumnInfo>)> = None;
-        let mut built: Vec<(usize, String)> = Vec::with_capacity(input_len);
+        // Phase 1 (synchronous, ctx-only): resolve every item's parameters
+        // into an owned plan. No `.await` here at all, so nothing from
+        // `ExecCtx<'_>` needs to cross into the spawned task below.
+        let mut plans: Vec<(usize, ItemPlan)> = Vec::with_capacity(input_len);
         for i in 0..input_len {
-            let sql = build_item_sql(ctx, &pool, &operation, node_version, &mut schema_cache, i).await;
-            match sql {
-                Ok(sql) => built.push((i, sql)),
-                Err(e) if ctx.continue_on_fail() => ctx.push_error_item(&e, i),
-                Err(e) => {
-                    pool.close().await;
-                    return Err(e);
-                }
+            let plan = resolve_item_plan(ctx, &operation, i);
+            match plan {
+                Ok(plan) => plans.push((i, plan)),
+                Err(e) if continue_on_fail => ctx.push_error_item(&e, i),
+                Err(e) => return Err(e),
             }
         }
 
-        let batch = run_batch(&pool, &built, &query_batching, &large_numbers, ctx.continue_on_fail()).await;
-        pool.close().await;
-        let batch = batch?;
+        // Phase 2 (Postgres work only, fully owned/'static): connect and
+        // run the batch in its own task.
+        let handle = tokio::spawn(run_all(cred, connection_timeout, plans, query_batching, large_numbers, continue_on_fail));
+        let batch = handle.await.map_err(|e| NodeError::new(format!("The Postgres task panicked: {e}")))??;
+
         for (idx, e) in batch.errors {
             ctx.push_error_item(&e, idx);
         }
@@ -82,31 +104,144 @@ impl NodeType for Postgres {
     }
 }
 
-/// Result of running a built batch of queries: successful items, plus any
-/// per-item errors collected under `continueOnFail` (the caller turns
-/// these into error items via `ExecCtx::push_error_item`).
-///
-/// Kept as a plain (non-trait) `async fn`: sqlx's `Executor` bound needs a
-/// concrete lifetime that `#[async_trait]`'s boxed-future transform can't
-/// always satisfy ("implementation of `Executor` is not general enough")
-/// when the query calls sit directly inside a `NodeType::execute` body, so
-/// the transaction/pool work lives here instead and `execute` just awaits
-/// this function's future.
+// ---- item plans (built from ctx, no pool access) -------------------------------
+
+enum WriteOp {
+    Insert,
+    Update,
+    Upsert,
+}
+
+struct WriteItem {
+    schema: String,
+    table: String,
+    item: Map<String, Value>,
+    matching_columns: Vec<String>,
+    skip_on_conflict: bool,
+    output_columns: Vec<String>,
+}
+
+enum ItemPlan {
+    /// executeQuery/select/deleteTable: the final SQL text, built entirely
+    /// from `ctx` (these operations never need the table schema).
+    Sql(String),
+    /// insert/update/upsert: raw, schema-independent parameters. The final
+    /// SQL (which needs a table-schema lookup for array/JSON columns and
+    /// nullability checks) is built later, inside the spawned task.
+    Write(WriteOp, WriteItem),
+}
+
+fn resolve_item_plan(ctx: &ExecCtx<'_>, operation: &str, i: usize) -> NodeResult<ItemPlan> {
+    match operation {
+        "executeQuery" => Ok(ItemPlan::Sql(build_execute_query(ctx, i)?)),
+        "select" => Ok(ItemPlan::Sql(build_select(ctx, i)?)),
+        "deleteTable" => Ok(ItemPlan::Sql(build_delete_table(ctx, i)?)),
+        "insert" => Ok(ItemPlan::Write(WriteOp::Insert, resolve_write_item(ctx, i)?)),
+        "update" => {
+            let w = resolve_write_item(ctx, i)?;
+            if w.matching_columns.is_empty() {
+                return Err(NodeError::new("At least one column to match on must be selected").at(i));
+            }
+            Ok(ItemPlan::Write(WriteOp::Update, w))
+        }
+        "upsert" => {
+            let w = resolve_write_item(ctx, i)?;
+            if w.matching_columns.is_empty() || w.matching_columns.iter().any(|c| w.item.get(c).map(Value::is_null).unwrap_or(true)) {
+                return Err(NodeError::new(
+                    "Column to match on not found in input item. Add a column to match on or set the 'Data Mode' to 'Define Below' to define the value to match on.",
+                )
+                .at(i));
+            }
+            Ok(ItemPlan::Write(WriteOp::Upsert, w))
+        }
+        other => Err(NodeError::new(format!("The operation \"{other}\" is not supported!")).at(i)),
+    }
+}
+
+fn resolve_write_item(ctx: &ExecCtx<'_>, i: usize) -> NodeResult<WriteItem> {
+    let schema = rl_value(ctx, "schema", i)?;
+    let table = rl_value(ctx, "table", i)?;
+    let columns = ctx.param("columns", i)?;
+    let mapping_mode = columns.get("mappingMode").and_then(Value::as_str).unwrap_or("autoMapInputData");
+    let mut item = resolved_item(ctx, mapping_mode, &columns, i);
+    apply_replace_empty_strings(&mut item, ctx.param_bool("options.replaceEmptyStrings", i, false)?);
+    let matching_columns = matching_columns_of(&columns);
+    let output_columns = string_list(&ctx.param("options.outputColumns", i)?);
+    let skip_on_conflict = ctx.param_bool("options.skipOnConflict", i, false)?;
+    Ok(WriteItem { schema, table, item, matching_columns, skip_on_conflict, output_columns })
+}
+
+fn resolved_item(ctx: &ExecCtx<'_>, mapping_mode: &str, columns: &Value, i: usize) -> Map<String, Value> {
+    if mapping_mode == "defineBelow" {
+        if let Some(Value::Object(m)) = columns.get("value") {
+            return m.clone();
+        }
+        Map::new()
+    } else {
+        ctx.input().get(i).map(|it| it.json.clone()).unwrap_or_default()
+    }
+}
+
+fn apply_replace_empty_strings(item: &mut Map<String, Value>, replace: bool) {
+    if !replace {
+        return;
+    }
+    for v in item.values_mut() {
+        if matches!(v, Value::String(s) if s.is_empty()) {
+            *v = Value::Null;
+        }
+    }
+}
+
+fn matching_columns_of(columns: &Value) -> Vec<String> {
+    columns.get("matchingColumns").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default()
+}
+
+// ---- Postgres work (owned/'static; runs inside tokio::spawn) -------------------
+
 struct BatchResult {
     items: Vec<Item>,
     errors: Vec<(usize, NodeError)>,
 }
 
-async fn run_batch(pool: &PgPool, built: &[(usize, String)], batching: &str, large_numbers: &str, continue_on_fail: bool) -> NodeResult<BatchResult> {
+async fn run_all(cred: Value, connect_timeout_secs: u64, plans: Vec<(usize, ItemPlan)>, batching: String, large_numbers: String, continue_on_fail: bool) -> NodeResult<BatchResult> {
+    let pool = connect(&cred, connect_timeout_secs).await?;
+    let result = run_batch(pool.clone(), plans, batching, large_numbers, continue_on_fail).await;
+    pool.close().await;
+    result
+}
+
+/// Runs one statement against a fresh connection acquired from the pool
+/// (not `&PgPool` directly): sqlx's `impl<'p, DB> Executor<'p> for &'_
+/// Pool<DB>` has an outer lifetime independent of `'p`, which historically
+/// trips "implementation of `Executor` is not general enough" in nested
+/// generic/async contexts. `&mut PgConnection`'s impl ties its lifetime to
+/// the reference itself and doesn't have that problem.
+async fn exec_sql_pool(pool: &PgPool, sql: &str) -> Result<Vec<PgRow>, sqlx::Error> {
+    let mut conn = pool.acquire().await?;
+    sqlx::query(sql).fetch_all(&mut *conn).await
+}
+
+async fn exec_sql_tx(tx: &mut sqlx::PgConnection, sql: &str) -> Result<Vec<PgRow>, sqlx::Error> {
+    sqlx::query(sql).fetch_all(tx).await
+}
+
+async fn exec_stmt_tx(tx: &mut sqlx::PgConnection, sql: &str) {
+    let _ = sqlx::query(sql).execute(tx).await;
+}
+
+async fn run_batch(pool: PgPool, plans: Vec<(usize, ItemPlan)>, batching: String, large_numbers: String, continue_on_fail: bool) -> NodeResult<BatchResult> {
     let mut result = BatchResult { items: Vec::new(), errors: Vec::new() };
+    let mut schema_cache: Option<(String, String, Vec<ColumnInfo>)> = None;
+
     if batching == "independently" {
-        for (idx, sql) in built {
-            match sqlx::raw_sql(sql).fetch_all(pool).await {
-                Ok(rows) => push_rows(&mut result.items, rows, sql, *idx, large_numbers),
+        for (idx, plan) in plans {
+            match run_one_independently(&pool, &mut schema_cache, plan, idx).await {
+                Ok(Some((sql, rows))) => push_rows(&mut result.items, rows, &sql, idx, &large_numbers),
+                Ok(None) => {}
                 Err(e) => {
-                    let e = friendly_query_error(e, sql).at(*idx);
                     if continue_on_fail {
-                        result.errors.push((*idx, e));
+                        result.errors.push((idx, e));
                     } else {
                         return Err(e);
                     }
@@ -122,18 +257,35 @@ async fn run_batch(pool: &PgPool, built: &[(usize, String)], batching: &str, lar
     // per-item SAVEPOINT lets continueOnFail skip just the failing item
     // without poisoning the rest of the transaction.
     let mut tx = pool.begin().await.map_err(|e| NodeError::new(e.to_string()))?;
-    for (idx, sql) in built {
-        let _ = sqlx::query("SAVEPOINT pg_node_sp").execute(&mut *tx).await;
-        match sqlx::raw_sql(sql).fetch_all(&mut *tx).await {
+    for (idx, plan) in plans {
+        exec_stmt_tx(&mut tx, "SAVEPOINT pg_node_sp").await;
+        let sql = match plan {
+            ItemPlan::Sql(sql) => Ok(sql),
+            ItemPlan::Write(op, w) => build_write_sql_tx(&mut tx, &mut schema_cache, &op, &w, idx).await,
+        };
+        let sql = match sql {
+            Ok(sql) => sql,
+            Err(e) => {
+                exec_stmt_tx(&mut tx, "ROLLBACK TO SAVEPOINT pg_node_sp").await;
+                if continue_on_fail {
+                    result.errors.push((idx, e));
+                    continue;
+                } else {
+                    let _ = tx.rollback().await;
+                    return Err(e);
+                }
+            }
+        };
+        match exec_sql_tx(&mut tx, &sql).await {
             Ok(rows) => {
-                let _ = sqlx::query("RELEASE SAVEPOINT pg_node_sp").execute(&mut *tx).await;
-                push_rows(&mut result.items, rows, sql, *idx, large_numbers);
+                exec_stmt_tx(&mut tx, "RELEASE SAVEPOINT pg_node_sp").await;
+                push_rows(&mut result.items, rows, &sql, idx, &large_numbers);
             }
             Err(e) => {
-                let _ = sqlx::query("ROLLBACK TO SAVEPOINT pg_node_sp").execute(&mut *tx).await;
-                let e = friendly_query_error(e, sql).at(*idx);
+                exec_stmt_tx(&mut tx, "ROLLBACK TO SAVEPOINT pg_node_sp").await;
+                let e = friendly_query_error(e, &sql).at(idx);
                 if continue_on_fail {
-                    result.errors.push((*idx, e));
+                    result.errors.push((idx, e));
                 } else {
                     let _ = tx.rollback().await;
                     return Err(e);
@@ -143,6 +295,20 @@ async fn run_batch(pool: &PgPool, built: &[(usize, String)], batching: &str, lar
     }
     tx.commit().await.map_err(|e| NodeError::new(e.to_string()))?;
     Ok(result)
+}
+
+async fn run_one_independently(
+    pool: &PgPool,
+    schema_cache: &mut Option<(String, String, Vec<ColumnInfo>)>,
+    plan: ItemPlan,
+    idx: usize,
+) -> NodeResult<Option<(String, Vec<PgRow>)>> {
+    let sql = match plan {
+        ItemPlan::Sql(sql) => sql,
+        ItemPlan::Write(op, w) => build_write_sql_pool(pool, schema_cache, &op, &w, idx).await?,
+    };
+    let rows = exec_sql_pool(pool, &sql).await.map_err(|e| friendly_query_error(e, &sql).at(idx))?;
+    Ok(Some((sql, rows)))
 }
 
 // ---- connection -------------------------------------------------------------
@@ -240,27 +406,42 @@ fn text_col(row: &PgRow, i: usize) -> NodeResult<String> {
     Ok(vref.as_str().unwrap_or("").to_string())
 }
 
-async fn get_table_schema(pool: &PgPool, schema: &str, table: &str) -> NodeResult<Vec<ColumnInfo>> {
-    let sql = format!(
+fn schema_query(schema: &str, table: &str) -> String {
+    format!(
         "SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = {} AND table_name = {}",
         super::sql_common::sql_string_literal(schema),
         super::sql_common::sql_string_literal(table)
-    );
-    let rows = sqlx::raw_sql(&sql).fetch_all(pool).await.map_err(|e| NodeError::new(e.to_string()))?;
+    )
+}
+
+fn rows_to_schema(rows: &[PgRow]) -> NodeResult<Vec<ColumnInfo>> {
     let mut out = Vec::with_capacity(rows.len());
-    for row in &rows {
+    for row in rows {
         out.push(ColumnInfo { column_name: text_col(row, 0)?, data_type: text_col(row, 1)?, is_nullable: text_col(row, 2)? });
     }
     Ok(out)
 }
 
-async fn get_or_refresh_schema(pool: &PgPool, cache: &mut Option<(String, String, Vec<ColumnInfo>)>, schema: &str, table: &str) -> NodeResult<Vec<ColumnInfo>> {
+async fn get_or_refresh_schema_pool(pool: &PgPool, cache: &mut Option<(String, String, Vec<ColumnInfo>)>, schema: &str, table: &str) -> NodeResult<Vec<ColumnInfo>> {
     if let Some((s, t, info)) = cache.as_ref() {
         if s == schema && t == table {
             return Ok(info.clone());
         }
     }
-    let info = get_table_schema(pool, schema, table).await?;
+    let rows = exec_sql_pool(pool, &schema_query(schema, table)).await.map_err(|e| NodeError::new(e.to_string()))?;
+    let info = rows_to_schema(&rows)?;
+    *cache = Some((schema.to_string(), table.to_string(), info.clone()));
+    Ok(info)
+}
+
+async fn get_or_refresh_schema_tx(tx: &mut sqlx::PgConnection, cache: &mut Option<(String, String, Vec<ColumnInfo>)>, schema: &str, table: &str) -> NodeResult<Vec<ColumnInfo>> {
+    if let Some((s, t, info)) = cache.as_ref() {
+        if s == schema && t == table {
+            return Ok(info.clone());
+        }
+    }
+    let rows = exec_sql_tx(tx, &schema_query(schema, table)).await.map_err(|e| NodeError::new(e.to_string()))?;
+    let info = rows_to_schema(&rows)?;
     *cache = Some((schema.to_string(), table.to_string(), info.clone()));
     Ok(info)
 }
@@ -323,12 +504,14 @@ fn pg_array_literal(arr: &[Value]) -> String {
     format!("{{{}}}", items.join(","))
 }
 
-async fn row_exists(pool: &PgPool, schema: &str, table: &str, match_values: &[(String, Value)]) -> NodeResult<bool> {
+fn exists_query(schema: &str, table: &str, match_values: &[(String, Value)]) -> String {
     let qs = quote_ident(schema, Q);
     let qt = quote_ident(table, Q);
     let conds: Vec<String> = match_values.iter().map(|(c, v)| format!("{} = {}", quote_ident(c, Q), value_literal(v))).collect();
-    let sql = format!("SELECT EXISTS(SELECT 1 FROM {qs}.{qt} WHERE {})", conds.join(" AND "));
-    let rows = sqlx::raw_sql(&sql).fetch_all(pool).await.map_err(|e| NodeError::new(e.to_string()))?;
+    format!("SELECT EXISTS(SELECT 1 FROM {qs}.{qt} WHERE {})", conds.join(" AND "))
+}
+
+fn row_exists_from(rows: Vec<PgRow>) -> NodeResult<bool> {
     let Some(row) = rows.into_iter().next() else { return Ok(false) };
     Ok(text_col(&row, 0)? == "t")
 }
@@ -391,54 +574,99 @@ fn append_returning(sql: &mut String, output_columns: &[String]) {
     }
 }
 
-// ---- per-operation query builders ----------------------------------------------
+// ---- write (insert/update/upsert) SQL, built from a resolved WriteItem ---------
 
-async fn build_item_sql(
-    ctx: &ExecCtx<'_>,
-    pool: &PgPool,
-    operation: &str,
-    node_version: f64,
-    schema_cache: &mut Option<(String, String, Vec<ColumnInfo>)>,
-    i: usize,
-) -> NodeResult<String> {
-    match operation {
-        "executeQuery" => build_execute_query(ctx, i),
-        "select" => build_select(ctx, i),
-        "deleteTable" => build_delete_table(ctx, i),
-        "insert" => build_insert(ctx, pool, schema_cache, i).await,
-        "update" => build_update(ctx, pool, schema_cache, i).await,
-        "upsert" => build_upsert(ctx, pool, schema_cache, i).await,
-        other => Err(NodeError::new(format!("The operation \"{other}\" is not supported!")).at(i)),
+/// Builds the final INSERT/UPDATE/UPSERT SQL for `w`, given its table's
+/// schema (already fetched by the caller: `build_write_sql_pool`/`_tx`
+/// below, which differ only in how they fetch that schema and check
+/// row-existence for `update`).
+fn finish_write_sql(op: &WriteOp, w: &WriteItem, table_schema: &[ColumnInfo], row_exists_for_update: Option<bool>, i: usize) -> NodeResult<String> {
+    let qs = quote_ident(&w.schema, Q);
+    let qt = quote_ident(&w.table, Q);
+    let mut item = w.item.clone();
+    convert_arrays(&mut item, table_schema, i)?;
+    check_item_against_schema(&item, table_schema, i)?;
+
+    match op {
+        WriteOp::Insert => {
+            let mut sql = if item.is_empty() {
+                format!("INSERT INTO {qs}.{qt} DEFAULT VALUES")
+            } else {
+                let cols: Vec<&String> = item.keys().collect();
+                let col_list = cols.iter().map(|c| quote_ident(c, Q)).collect::<Vec<_>>().join(", ");
+                let val_list = cols.iter().map(|c| value_literal(&item[*c])).collect::<Vec<_>>().join(", ");
+                format!("INSERT INTO {qs}.{qt}({col_list}) VALUES({val_list})")
+            };
+            if w.skip_on_conflict {
+                sql.push_str(" ON CONFLICT DO NOTHING");
+            }
+            append_returning(&mut sql, &w.output_columns);
+            Ok(sql)
+        }
+        WriteOp::Update => {
+            if !row_exists_for_update.unwrap_or(true) {
+                let desc = w.matching_columns.iter().map(|c| format!("{c}={}", value_to_text(item.get(c).unwrap_or(&Value::Null)))).collect::<Vec<_>>().join(", ");
+                return Err(NodeError::new("The row you are trying to update doesn't exist")
+                    .describe(format!("No rows matching the provided values ({desc}) were found in the table \"{}\".", w.table))
+                    .at(i));
+            }
+            let update_columns: Vec<&String> = item.keys().filter(|k| !w.matching_columns.contains(k)).collect();
+            if update_columns.is_empty() {
+                return Err(NodeError::new("Add values to update to the input item or set the 'Data Mode' to 'Define Below' to define the values to update.").at(i));
+            }
+            let set_clause = update_columns.iter().map(|c| format!("{} = {}", quote_ident(c, Q), value_literal(&item[*c]))).collect::<Vec<_>>().join(", ");
+            let where_clause = w.matching_columns.iter().map(|c| format!("{} = {}", quote_ident(c, Q), value_literal(item.get(c).unwrap_or(&Value::Null)))).collect::<Vec<_>>().join(" AND ");
+            let mut sql = format!("UPDATE {qs}.{qt} SET {set_clause} WHERE {where_clause}");
+            append_returning(&mut sql, &w.output_columns);
+            Ok(sql)
+        }
+        WriteOp::Upsert => {
+            let update_columns: Vec<&String> = item.keys().filter(|k| !w.matching_columns.contains(k)).collect();
+            if update_columns.is_empty() && item.len() <= w.matching_columns.len() {
+                return Err(NodeError::new("Add values to update or insert to the input item or set the 'Data Mode' to 'Define Below' to define the values to insert or update.").at(i));
+            }
+            let cols: Vec<&String> = item.keys().collect();
+            let col_list = cols.iter().map(|c| quote_ident(c, Q)).collect::<Vec<_>>().join(", ");
+            let val_list = cols.iter().map(|c| value_literal(&item[*c])).collect::<Vec<_>>().join(", ");
+            let conflict_cols = w.matching_columns.iter().map(|c| quote_ident(c, Q)).collect::<Vec<_>>().join(", ");
+            let mut sql = format!("INSERT INTO {qs}.{qt}({col_list}) VALUES({val_list}) ON CONFLICT ({conflict_cols})");
+            if update_columns.is_empty() {
+                sql.push_str(" DO NOTHING");
+            } else {
+                let set_clause = update_columns.iter().map(|c| format!("{} = {}", quote_ident(c, Q), value_literal(&item[*c]))).collect::<Vec<_>>().join(", ");
+                sql.push_str(&format!(" DO UPDATE SET {set_clause}"));
+            }
+            append_returning(&mut sql, &w.output_columns);
+            Ok(sql)
+        }
     }
 }
 
-fn resolved_item(ctx: &ExecCtx<'_>, mapping_mode: &str, columns: &Value, i: usize) -> Map<String, Value> {
-    if mapping_mode == "defineBelow" {
-        if let Some(Value::Object(m)) = columns.get("value") {
-            return m.clone();
-        }
-        Map::new()
+async fn build_write_sql_pool(pool: &PgPool, schema_cache: &mut Option<(String, String, Vec<ColumnInfo>)>, op: &WriteOp, w: &WriteItem, i: usize) -> NodeResult<String> {
+    let table_schema = get_or_refresh_schema_pool(pool, schema_cache, &w.schema, &w.table).await?;
+    let row_exists_for_update = if matches!(op, WriteOp::Update) {
+        let match_values: Vec<(String, Value)> = w.matching_columns.iter().map(|c| (c.clone(), w.item.get(c).cloned().unwrap_or(Value::Null))).collect();
+        let rows = exec_sql_pool(pool, &exists_query(&w.schema, &w.table, &match_values)).await.map_err(|e| NodeError::new(e.to_string()))?;
+        Some(row_exists_from(rows)?)
     } else {
-        ctx.input().get(i).map(|it| it.json.clone()).unwrap_or_default()
-    }
+        None
+    };
+    finish_write_sql(op, w, &table_schema, row_exists_for_update, i)
 }
 
-fn apply_replace_empty_strings(item: &mut Map<String, Value>, replace: bool) {
-    if !replace {
-        return;
-    }
-    for v in item.values_mut() {
-        if matches!(v, Value::String(s) if s.is_empty()) {
-            *v = Value::Null;
-        }
-    }
+async fn build_write_sql_tx(tx: &mut sqlx::PgConnection, schema_cache: &mut Option<(String, String, Vec<ColumnInfo>)>, op: &WriteOp, w: &WriteItem, i: usize) -> NodeResult<String> {
+    let table_schema = get_or_refresh_schema_tx(tx, schema_cache, &w.schema, &w.table).await?;
+    let row_exists_for_update = if matches!(op, WriteOp::Update) {
+        let match_values: Vec<(String, Value)> = w.matching_columns.iter().map(|c| (c.clone(), w.item.get(c).cloned().unwrap_or(Value::Null))).collect();
+        let rows = exec_sql_tx(tx, &exists_query(&w.schema, &w.table, &match_values)).await.map_err(|e| NodeError::new(e.to_string()))?;
+        Some(row_exists_from(rows)?)
+    } else {
+        None
+    };
+    finish_write_sql(op, w, &table_schema, row_exists_for_update, i)
 }
 
-fn matching_columns_of(columns: &Value) -> Vec<String> {
-    columns.get("matchingColumns").and_then(Value::as_array).map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect()).unwrap_or_default()
-}
-
-// executeQuery -------------------------------------------------------------------
+// ---- executeQuery ---------------------------------------------------------------
 
 fn mustache_spans(s: &str) -> Vec<String> {
     let re = Regex::new(r"(?s)\{\{.*?\}\}").expect("static regex");
@@ -554,7 +782,7 @@ fn substitute_placeholders(query: &str, values: &[Value], i: usize) -> NodeResul
     Ok(out)
 }
 
-// select ---------------------------------------------------------------------
+// ---- select -----------------------------------------------------------------
 
 fn build_select(ctx: &ExecCtx<'_>, i: usize) -> NodeResult<String> {
     let schema = rl_value(ctx, "schema", i)?;
@@ -587,7 +815,7 @@ fn build_select(ctx: &ExecCtx<'_>, i: usize) -> NodeResult<String> {
     Ok(sql)
 }
 
-// deleteTable ------------------------------------------------------------------
+// ---- deleteTable --------------------------------------------------------------
 
 fn build_delete_table(ctx: &ExecCtx<'_>, i: usize) -> NodeResult<String> {
     let schema = rl_value(ctx, "schema", i)?;
@@ -612,134 +840,6 @@ fn build_delete_table(ctx: &ExecCtx<'_>, i: usize) -> NodeResult<String> {
         }
         other => Err(NodeError::new(format!("Invalid delete command \"{other}\", only drop, delete and truncate are supported")).at(i)),
     }
-}
-
-// insert -----------------------------------------------------------------------
-
-async fn build_insert(ctx: &ExecCtx<'_>, pool: &PgPool, schema_cache: &mut Option<(String, String, Vec<ColumnInfo>)>, i: usize) -> NodeResult<String> {
-    let schema = rl_value(ctx, "schema", i)?;
-    let table = rl_value(ctx, "table", i)?;
-    let qs = quote_ident(&schema, Q);
-    let qt = quote_ident(&table, Q);
-    let table_schema = get_or_refresh_schema(pool, schema_cache, &schema, &table).await?;
-
-    let columns = ctx.param("columns", i)?;
-    let mapping_mode = columns.get("mappingMode").and_then(Value::as_str).unwrap_or("autoMapInputData");
-    let mut item = resolved_item(ctx, mapping_mode, &columns, i);
-
-    apply_replace_empty_strings(&mut item, ctx.param_bool("options.replaceEmptyStrings", i, false)?);
-    convert_arrays(&mut item, &table_schema, i)?;
-    check_item_against_schema(&item, &table_schema, i)?;
-
-    let output_columns = string_list(&ctx.param("options.outputColumns", i)?);
-    let skip_on_conflict = ctx.param_bool("options.skipOnConflict", i, false)?;
-
-    let mut sql = if item.is_empty() {
-        format!("INSERT INTO {qs}.{qt} DEFAULT VALUES")
-    } else {
-        let cols: Vec<&String> = item.keys().collect();
-        let col_list = cols.iter().map(|c| quote_ident(c, Q)).collect::<Vec<_>>().join(", ");
-        let val_list = cols.iter().map(|c| value_literal(&item[*c])).collect::<Vec<_>>().join(", ");
-        format!("INSERT INTO {qs}.{qt}({col_list}) VALUES({val_list})")
-    };
-    if skip_on_conflict {
-        sql.push_str(" ON CONFLICT DO NOTHING");
-    }
-    append_returning(&mut sql, &output_columns);
-    Ok(sql)
-}
-
-// update -----------------------------------------------------------------------
-
-async fn build_update(ctx: &ExecCtx<'_>, pool: &PgPool, schema_cache: &mut Option<(String, String, Vec<ColumnInfo>)>, i: usize) -> NodeResult<String> {
-    let schema = rl_value(ctx, "schema", i)?;
-    let table = rl_value(ctx, "table", i)?;
-    let qs = quote_ident(&schema, Q);
-    let qt = quote_ident(&table, Q);
-    let table_schema = get_or_refresh_schema(pool, schema_cache, &schema, &table).await?;
-
-    let columns = ctx.param("columns", i)?;
-    let mapping_mode = columns.get("mappingMode").and_then(Value::as_str).unwrap_or("autoMapInputData");
-    let matching_columns = matching_columns_of(&columns);
-    if matching_columns.is_empty() {
-        return Err(NodeError::new("At least one column to match on must be selected").at(i));
-    }
-    let mut item = resolved_item(ctx, mapping_mode, &columns, i);
-
-    apply_replace_empty_strings(&mut item, ctx.param_bool("options.replaceEmptyStrings", i, false)?);
-    convert_arrays(&mut item, &table_schema, i)?;
-    let item = check_item_against_schema(&item, &table_schema, i).map(|_| item)?;
-
-    let match_values: Vec<(String, Value)> = matching_columns.iter().map(|c| (c.clone(), item.get(c).cloned().unwrap_or(Value::Null))).collect();
-    if !row_exists(pool, &schema, &table, &match_values).await? {
-        let desc = match_values.iter().map(|(c, v)| format!("{c}={}", value_to_text(v))).collect::<Vec<_>>().join(", ");
-        return Err(NodeError::new("The row you are trying to update doesn't exist")
-            .describe(format!("No rows matching the provided values ({desc}) were found in the table \"{table}\"."))
-            .at(i));
-    }
-
-    let update_columns: Vec<&String> = item.keys().filter(|k| !matching_columns.contains(k)).collect();
-    if update_columns.is_empty() {
-        return Err(NodeError::new("Add values to update to the input item or set the 'Data Mode' to 'Define Below' to define the values to update.").at(i));
-    }
-    let set_clause = update_columns.iter().map(|c| format!("{} = {}", quote_ident(c, Q), value_literal(&item[*c]))).collect::<Vec<_>>().join(", ");
-    let where_clause = match_values.iter().map(|(c, v)| format!("{} = {}", quote_ident(c, Q), value_literal(v))).collect::<Vec<_>>().join(" AND ");
-
-    let output_columns = string_list(&ctx.param("options.outputColumns", i)?);
-    let mut sql = format!("UPDATE {qs}.{qt} SET {set_clause} WHERE {where_clause}");
-    append_returning(&mut sql, &output_columns);
-    Ok(sql)
-}
-
-// upsert -------------------------------------------------------------------------
-
-async fn build_upsert(ctx: &ExecCtx<'_>, pool: &PgPool, schema_cache: &mut Option<(String, String, Vec<ColumnInfo>)>, i: usize) -> NodeResult<String> {
-    let schema = rl_value(ctx, "schema", i)?;
-    let table = rl_value(ctx, "table", i)?;
-    let qs = quote_ident(&schema, Q);
-    let qt = quote_ident(&table, Q);
-    let table_schema = get_or_refresh_schema(pool, schema_cache, &schema, &table).await?;
-
-    let columns = ctx.param("columns", i)?;
-    let mapping_mode = columns.get("mappingMode").and_then(Value::as_str).unwrap_or("autoMapInputData");
-    let matching_columns = matching_columns_of(&columns);
-    if matching_columns.is_empty() {
-        return Err(NodeError::new(
-            "Column to match on not found in input item. Add a column to match on or set the 'Data Mode' to 'Define Below' to define the value to match on.",
-        )
-        .at(i));
-    }
-    let mut item = resolved_item(ctx, mapping_mode, &columns, i);
-    apply_replace_empty_strings(&mut item, ctx.param_bool("options.replaceEmptyStrings", i, false)?);
-    convert_arrays(&mut item, &table_schema, i)?;
-    let item = check_item_against_schema(&item, &table_schema, i).map(|_| item)?;
-
-    if matching_columns.iter().any(|c| item.get(c).map(Value::is_null).unwrap_or(true)) {
-        return Err(NodeError::new(
-            "Column to match on not found in input item. Add a column to match on or set the 'Data Mode' to 'Define Below' to define the value to match on.",
-        )
-        .at(i));
-    }
-
-    let update_columns: Vec<&String> = item.keys().filter(|k| !matching_columns.contains(k)).collect();
-    if update_columns.is_empty() && item.len() <= matching_columns.len() {
-        return Err(NodeError::new("Add values to update or insert to the input item or set the 'Data Mode' to 'Define Below' to define the values to insert or update.").at(i));
-    }
-
-    let cols: Vec<&String> = item.keys().collect();
-    let col_list = cols.iter().map(|c| quote_ident(c, Q)).collect::<Vec<_>>().join(", ");
-    let val_list = cols.iter().map(|c| value_literal(&item[*c])).collect::<Vec<_>>().join(", ");
-    let conflict_cols = matching_columns.iter().map(|c| quote_ident(c, Q)).collect::<Vec<_>>().join(", ");
-    let mut sql = format!("INSERT INTO {qs}.{qt}({col_list}) VALUES({val_list}) ON CONFLICT ({conflict_cols})");
-    if update_columns.is_empty() {
-        sql.push_str(" DO NOTHING");
-    } else {
-        let set_clause = update_columns.iter().map(|c| format!("{} = {}", quote_ident(c, Q), value_literal(&item[*c]))).collect::<Vec<_>>().join(", ");
-        sql.push_str(&format!(" DO UPDATE SET {set_clause}"));
-    }
-    let output_columns = string_list(&ctx.param("options.outputColumns", i)?);
-    append_returning(&mut sql, &output_columns);
-    Ok(sql)
 }
 
 // ---- result rows -> items -------------------------------------------------------

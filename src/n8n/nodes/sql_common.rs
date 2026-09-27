@@ -17,7 +17,9 @@ use serde_json::Value;
 pub enum IdentQuote {
     /// Postgres, standard SQL: `"name"`, embedded `"` doubled.
     Double,
-    /// MySQL: `` `name` ``, embedded backtick doubled.
+    /// MySQL: `` `name` ``, embedded backtick doubled. Unused until the
+    /// MySQL node (not yet implemented) starts sharing this module.
+    #[allow(dead_code)]
     Backtick,
 }
 
