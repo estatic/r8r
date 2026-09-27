@@ -76,6 +76,7 @@ impl Store {
             })
         };
         let writer = options().max_connections(1).connect(&url).await?;
+        refuse_n8n_database(&writer, "SELECT COUNT(*) AS n FROM pragma_table_info('workflow_entity') WHERE name = 'nodes'", file).await?;
         sqlx::migrate!("./migrations").run(&writer).await?;
         let pool = if memory { writer.clone() } else { options().connect(&url).await? };
         Ok((pool, writer))
@@ -116,6 +117,12 @@ impl Store {
         bootstrap.execute(format!("CREATE SCHEMA IF NOT EXISTS \"{schema}\"").as_str()).await?;
         bootstrap.close().await;
         let writer = connect(4).await?;
+        refuse_n8n_database(
+            &writer,
+            "SELECT COUNT(*) AS n FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'workflow_entity' AND column_name = 'nodes'",
+            &format!("schema \"{schema}\""),
+        )
+        .await?;
         sqlx::migrate!("./migrations_postgres").run(&writer).await?;
         let pool = connect(10).await?;
         Ok((pool, writer))
@@ -281,6 +288,21 @@ impl Store {
             .await?;
         Ok(())
     }
+}
+
+/// n8n and r8r both default to `~/.n8n/database.sqlite` and share table
+/// names, but not columns. r8r must never migrate an n8n database in place:
+/// its data is imported with `r8r migrate-from-n8n` into a separate one.
+async fn refuse_n8n_database(pool: &AnyPool, probe: &str, location: &str) -> anyhow::Result<()> {
+    let rows = sqlx::query(probe).fetch_all(pool).await?;
+    let n: i64 = rows.first().map(|r| r.get("n")).unwrap_or(0);
+    if n > 0 {
+        anyhow::bail!(
+            "{location} holds an n8n database. r8r keeps its data separately: point r8r at another database \
+             (DB_SQLITE_DATABASE, or another DB_POSTGRESDB_SCHEMA) and import this one with `r8r migrate-from-n8n --db=...`"
+        );
+    }
+    Ok(())
 }
 
 fn row_to_credential(r: &AnyRow) -> CredentialRecord {

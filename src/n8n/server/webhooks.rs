@@ -675,9 +675,18 @@ async fn waiting(State(n8n): State<Arc<N8n>>, Path(id): Path<String>, req: Reque
         Ok(None) => return ApiError::not_found(format!("The execution \"{id}\" does not exist")).into_response(),
         Err(e) => return ApiError::from(e).into_response(),
     };
+    // `?signature=` is the execution's resume token (n8n's scheme, so resume
+    // URLs issued by n8n keep working after migration); a `/path` suffix on
+    // it names the Wait node's sub-path.
     let signature = incoming.query.get("signature").and_then(Value::as_str).unwrap_or("");
-    if signature != n8n.resume_signature(&id) {
-        return json_response(401, json!({"code": 401, "message": "Invalid signature: this resume URL is not signed for the execution"}));
+    let token = signature.split('/').next().unwrap_or("");
+    let valid = match row.data.as_ref().and_then(|d| d["resumeToken"].as_str()) {
+        Some(stored) => !token.is_empty() && constant_time_eq(token.as_bytes(), stored.as_bytes()),
+        // Executions paused before resume tokens were stored.
+        None => token == n8n.resume_signature(&id),
+    };
+    if !valid {
+        return json_response(401, json!({"code": 401, "error": "Invalid token", "message": "Invalid token"}));
     }
     if row.status != status::WAITING {
         return ApiError::new(409, format!("The execution \"{id}\" is not waiting; it is {}", row.status)).into_response();
@@ -699,6 +708,10 @@ async fn waiting(State(n8n): State<Arc<N8n>>, Path(id): Path<String>, req: Reque
         Ok(handle) => respond(&parameters, handle, None).await,
         Err(e) => e.into_response(),
     }
+}
+
+fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
+    a.len() == b.len() && a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
 }
 
 // ---- forms --------------------------------------------------------------------
