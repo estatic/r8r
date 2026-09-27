@@ -190,7 +190,7 @@ impl EmailSend {
         let bcc_mailboxes = parse_mailboxes("options.bccEmail", &bcc_email)?;
         let reply_to_mailbox = parse_one_mailbox("options.replyTo", &reply_to)?;
 
-        let mut builder = Message::builder().from(from_mailbox).subject(subject.clone());
+        let mut builder = Message::builder().from(from_mailbox).subject(subject.clone()).message_id(None);
         for mbox in to_mailboxes {
             builder = builder.to(mbox);
         }
