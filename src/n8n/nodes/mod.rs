@@ -11,6 +11,7 @@ mod http;
 mod jwt;
 mod merge;
 mod python;
+mod redis;
 mod routing;
 mod server_nodes;
 mod set;
@@ -61,6 +62,7 @@ impl Default for Registry {
             r.add(n);
         }
         r.add(Box::new(compression::Compression));
+        r.add(Box::new(redis::Redis));
         for n in transform::all() {
             r.add(n);
         }

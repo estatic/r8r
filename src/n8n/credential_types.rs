@@ -58,6 +58,19 @@ pub fn all() -> Vec<CredentialType> {
             ],
         },
         CredentialType {
+            name: "redis",
+            display_name: "Redis",
+            fields: vec![
+                f("password", "Password", true, false, json!("")),
+                f("user", "User", false, false, json!("")),
+                f("host", "Host", false, false, json!("localhost")),
+                f("port", "Port", false, false, json!(6379)),
+                f("database", "Database Number", false, false, json!(0)),
+                f("ssl", "SSL", false, false, json!(false)),
+                f("disableTlsVerification", "Disable TLS Verification (insecure)", false, false, json!(false)),
+            ],
+        },
+        CredentialType {
             name: "openAiApi",
             display_name: "OpenAi",
             fields: vec![f("apiKey", "API Key", true, true, json!("")), f("organizationId", "Organization ID", false, false, json!("")), f("url", "Base URL", false, false, json!("https://api.openai.com/v1"))],
