@@ -16,9 +16,10 @@ use base64::Engine;
 use calamine::Reader;
 use serde_json::{json, Map, Value};
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 pub fn all() -> Vec<Box<dyn NodeType>> {
-    vec![Box::new(ExtractFromFile), Box::new(ConvertToFile)]
+    vec![Box::new(ExtractFromFile), Box::new(ConvertToFile), Box::new(ReadWriteFile)]
 }
 
 // ---- binary helpers --------------------------------------------------
@@ -672,4 +673,314 @@ fn write_to_binary(ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
         }
     }
     Ok(vec![out])
+}
+
+// ---- Read/Write Files from Disk (spec §6.6, task 1.11) --------------------
+//
+// Faithful to n8n's `ReadWriteFile.node.js`: `read` globs `fileSelector`
+// (via `fast-glob` there, the `glob` crate here) and emits one item per
+// matched file with a `data`/`mimeType`/`fileExtension`/`fileSize`/`fileName`
+// binary entry and matching json fields; `write` writes (or, with
+// `options.append`, appends) a binary property to `fileName`. Both go
+// through the same file-access restriction n8n-core applies
+// (`N8N_RESTRICT_FILE_ACCESS_TO`, `N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES`; see
+// `check_file_access` below), with the same "Access to the file is not
+// allowed." message.
+//
+// Deviations from n8n: no Windows path normalisation (r8r targets
+// Unix-like hosts); no glob metacharacter escaping of `(`/`[`/`]` in the
+// selector; access-restriction containment is lexical (`..`/`.` cleanup, no
+// `realpath`/symlink resolution, no inode/dev re-checks, no
+// `N8N_BLOCK_FILE_PATTERNS`); only the n8n user folder itself is treated as
+// an n8n-internal path (n8n also restricts its static cache dir,
+// `N8N_CONFIG_FILES`, `EXTENSIONS_DIR` etc., none of which r8r has).
+
+pub struct ReadWriteFile;
+
+#[async_trait::async_trait]
+impl NodeType for ReadWriteFile {
+    fn type_name(&self) -> &'static str {
+        "n8n-nodes-base.readWriteFile"
+    }
+
+    async fn execute(&self, ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
+        let operation = ctx.param_str("operation", 0, "read")?;
+        match operation.as_str() {
+            "read" => read_files(ctx),
+            "write" => write_files(ctx),
+            other => Err(NodeError::new(format!("Unknown operation \"{other}\" for Read/Write Files from Disk"))),
+        }
+    }
+}
+
+fn cwd() -> PathBuf {
+    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+}
+
+/// Resolves a (possibly relative) user-supplied path against the process's
+/// working directory, the way Node's `fs` functions treat relative paths.
+fn resolve_path(raw: &str) -> PathBuf {
+    let p = PathBuf::from(raw);
+    if p.is_absolute() {
+        p
+    } else {
+        cwd().join(p)
+    }
+}
+
+fn absolutize(p: PathBuf) -> PathBuf {
+    if p.is_absolute() {
+        p
+    } else {
+        cwd().join(p)
+    }
+}
+
+/// Resolves `.`/`..` components without touching the filesystem (the target
+/// file may not exist yet, e.g. a write destination).
+fn normalize_lexically(p: &Path) -> PathBuf {
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            std::path::Component::ParentDir => {
+                out.pop();
+            }
+            std::path::Component::CurDir => {}
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+/// n8n-core's `resolvePath`: follows symlinks so a link inside an allowed
+/// directory can't reach a file outside it. A missing file (a write
+/// destination) resolves through its parent directory; if that is missing
+/// too, the write fails anyway and the lexical form is used.
+fn resolve_real(p: &Path) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(p) {
+        return real;
+    }
+    let lexical = normalize_lexically(p);
+    match (lexical.parent().map(std::fs::canonicalize), lexical.file_name()) {
+        (Some(Ok(dir)), Some(name)) => dir.join(name),
+        _ => lexical,
+    }
+}
+
+/// Whether `target` lies inside (or is exactly) `base`, path-component-wise,
+/// after resolving symlinks on both sides.
+fn is_contained_within(base: &Path, target: &Path) -> bool {
+    resolve_real(target).starts_with(resolve_real(base))
+}
+
+/// n8n-core's `isFilePathBlocked`: the n8n user folder is always off-limits
+/// (unless `N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES=false`); when
+/// `N8N_RESTRICT_FILE_ACCESS_TO` is set, only paths under one of its
+/// directories are allowed.
+fn file_access_blocked(ctx: &ExecCtx<'_>, path: &Path) -> bool {
+    let cfg = ctx.config();
+    if cfg.block_file_access_to_n8n_files && is_contained_within(&cfg.n8n_dir(), path) {
+        return true;
+    }
+    if !cfg.restrict_file_access_to.is_empty() {
+        return !cfg.restrict_file_access_to.iter().any(|base| is_contained_within(base, path));
+    }
+    false
+}
+
+/// Checks `path` against the access rules and returns the resolved path the
+/// caller must use for the I/O, so the file checked is the file touched.
+fn check_file_access(ctx: &ExecCtx<'_>, path: &Path, i: usize) -> NodeResult<PathBuf> {
+    let real = resolve_real(path);
+    if file_access_blocked(ctx, &real) {
+        Err(NodeError::new("Access to the file is not allowed.").at(i))
+    } else {
+        Ok(real)
+    }
+}
+
+fn guess_mime_from_extension(ext: &str) -> &'static str {
+    match ext.to_ascii_lowercase().as_str() {
+        "txt" => "text/plain",
+        "csv" => "text/csv",
+        "html" | "htm" => "text/html",
+        "json" => "application/json",
+        "xml" => "application/xml",
+        "pdf" => "application/pdf",
+        "zip" => "application/zip",
+        "gz" => "application/gzip",
+        "png" => "image/png",
+        "jpg" | "jpeg" => "image/jpeg",
+        "gif" => "image/gif",
+        "svg" => "image/svg+xml",
+        "xlsx" => "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "xls" => "application/vnd.ms-excel",
+        "md" => "text/markdown",
+        "js" => "application/javascript",
+        "css" => "text/css",
+        "yaml" | "yml" => "application/x-yaml",
+        _ => "application/octet-stream",
+    }
+}
+
+/// n8n-workflow's `fileTypeFromMimeType`: a coarse category for the `json`
+/// output (omitted, as there, when nothing matches).
+fn file_type_for_mime(mime: &str) -> Option<&'static str> {
+    if mime.starts_with("application/json") {
+        Some("json")
+    } else if mime.starts_with("text/html") {
+        Some("html")
+    } else if mime.starts_with("image/") {
+        Some("image")
+    } else if mime.starts_with("audio/") {
+        Some("audio")
+    } else if mime.starts_with("video/") {
+        Some("video")
+    } else if mime.starts_with("text/") || mime.starts_with("application/javascript") {
+        Some("text")
+    } else if mime.starts_with("application/pdf") {
+        Some("pdf")
+    } else {
+        None
+    }
+}
+
+/// An `options.*` value only if the caller explicitly set it (n8n's
+/// `collection`-type `options` only carries keys the user added in the
+/// editor; `undefined` means "use the file's own value", not "use the
+/// empty-string default").
+fn opt_override(ctx: &ExecCtx<'_>, i: usize, key: &str) -> NodeResult<Option<String>> {
+    if ctx.raw_param(key).is_none() {
+        return Ok(None);
+    }
+    Ok(Some(ctx.param_str(key, i, "")?))
+}
+
+fn read_files(ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
+    let type_version = ctx.node.type_version;
+    let mut out = Vec::new();
+    for i in 0..ctx.input().len() {
+        match read_item(ctx, i, type_version) {
+            Ok(items) => out.extend(items),
+            Err(e) if ctx.continue_on_fail() => ctx.push_error_item(&e, i),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(vec![out])
+}
+
+fn read_item(ctx: &ExecCtx<'_>, i: usize, type_version: f64) -> NodeResult<Vec<Item>> {
+    let selector = ctx.param_str("fileSelector", i, "")?;
+    if selector.trim().is_empty() {
+        return Err(NodeError::new("File(s) Selector parameter is empty").at(i));
+    }
+    let data_property_name = opt_override(ctx, i, "options.dataPropertyName")?.filter(|s| !s.is_empty()).unwrap_or_else(|| "data".to_string());
+    let file_name_override = opt_override(ctx, i, "options.fileName")?;
+    let file_ext_override = opt_override(ctx, i, "options.fileExtension")?;
+    let mime_override = opt_override(ctx, i, "options.mimeType")?;
+
+    let mut matches: Vec<PathBuf> = match glob::glob(&selector) {
+        Ok(paths) => paths.filter_map(Result::ok).map(absolutize).collect(),
+        Err(e) => return Err(NodeError::new(format!("Invalid file pattern \"{selector}\"")).describe(e.to_string()).at(i)),
+    };
+    matches.sort();
+
+    // n8n 1.x silently returns nothing; 1.1+ raises a clear error.
+    if matches.is_empty() && type_version > 1.0 {
+        return Err(NodeError::new("No file(s) found").describe(format!("No file matching the selector \"{selector}\" found")).at(i));
+    }
+
+    let mut items = Vec::with_capacity(matches.len());
+    for path in matches {
+        let real = check_file_access(ctx, &path, i)?;
+        let bytes = std::fs::read(&real).map_err(|e| read_error(&e, &path, i))?;
+
+        let ext = file_ext_override.clone().unwrap_or_else(|| path.extension().and_then(|e| e.to_str()).unwrap_or("").to_string());
+        let mime = mime_override.clone().unwrap_or_else(|| guess_mime_from_extension(&ext).to_string());
+        let file_name = file_name_override.clone().unwrap_or_else(|| path.file_name().and_then(|n| n.to_str()).unwrap_or("file").to_string());
+        let size = pretty_bytes(bytes.len());
+
+        let mut json = Map::new();
+        json.insert("mimeType".into(), json!(mime));
+        if let Some(ft) = file_type_for_mime(&mime) {
+            json.insert("fileType".into(), json!(ft));
+        }
+        json.insert("fileName".into(), json!(file_name));
+        json.insert("fileExtension".into(), json!(ext));
+        json.insert("fileSize".into(), json!(size));
+
+        let mut binary = Map::new();
+        binary.insert(
+            data_property_name.clone(),
+            json!({
+                "data": base64::engine::general_purpose::STANDARD.encode(&bytes),
+                "mimeType": mime,
+                "fileExtension": ext,
+                "fileSize": size,
+                "fileName": file_name,
+            }),
+        );
+        items.push(Item { json, binary: Some(binary), paired_item: None }.paired(i));
+    }
+    Ok(items)
+}
+
+fn read_error(e: &std::io::Error, path: &Path, i: usize) -> NodeError {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        NodeError::new(format!("You don't have the permissions to access {}", path.display()))
+            .describe("Verify that the path specified in 'File(s) Selector' is correct, or change the file(s) permissions if needed")
+            .at(i)
+    } else {
+        NodeError::new(format!("The file \"{}\" could not be accessed.", path.display())).at(i)
+    }
+}
+
+fn write_files(ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
+    let mut out = Vec::new();
+    for i in 0..ctx.input().len() {
+        match write_item(ctx, i) {
+            Ok(item) => out.push(item),
+            Err(e) if ctx.continue_on_fail() => ctx.push_error_item(&e, i),
+            Err(e) => return Err(e),
+        }
+    }
+    Ok(vec![out])
+}
+
+fn write_item(ctx: &ExecCtx<'_>, i: usize) -> NodeResult<Item> {
+    let data_property_name = ctx.param_str("dataPropertyName", i, "data")?;
+    let file_name = ctx.param_str("fileName", i, "")?;
+    if file_name.trim().is_empty() {
+        return Err(NodeError::new("File Path and Name parameter is empty").at(i));
+    }
+    let append = ctx.param_bool("options.append", i, false)?;
+
+    let item = &ctx.input()[i];
+    let entry = binary_entry(item, &data_property_name, i)?;
+    let bytes = binary_bytes(entry, i)?;
+
+    let path = check_file_access(ctx, &resolve_path(&file_name), i)?;
+
+    let write_result = if append {
+        use std::io::Write;
+        std::fs::OpenOptions::new().create(true).append(true).open(&path).and_then(|mut f| f.write_all(&bytes))
+    } else {
+        std::fs::write(&path, &bytes)
+    };
+    write_result.map_err(|e| write_error(&e, &path, i))?;
+
+    let mut json = item.json.clone();
+    json.insert("fileName".into(), json!(file_name));
+    let binary = item.binary.clone();
+    Ok(Item { json, binary, paired_item: None }.paired(i))
+}
+
+fn write_error(e: &std::io::Error, path: &Path, i: usize) -> NodeError {
+    if e.kind() == std::io::ErrorKind::PermissionDenied {
+        NodeError::new(format!("You don't have the permissions to write the file {}", path.display()))
+            .describe("Specify another destination folder in 'File Path and Name', or change the permissions of the parent folder")
+            .at(i)
+    } else {
+        NodeError::new(format!("Could not write file \"{}\": {e}", path.display())).at(i)
+    }
 }

@@ -82,7 +82,7 @@ and on n8n; `codex.r8r.native = false` removed.
 | 1.8 ✅ | JWT | sign/decode/verify (c2e660e) |
 | 1.9 ✅ | Extract from File / Convert to File | CSV, XLSX, JSON, text, HTML, PDF text |
 | 1.10 ✅ | Compression | zip/gzip in/out |
-| 1.11 | Read/Write Files | behind the same allow-list as Execute Command |
+| 1.11 ✅ | Read/Write Files | behind the same allow-list as Execute Command |
 | 1.12 | Microsoft SQL, MongoDB, Data Tables | |
 | 1.13 | RabbitMQ, Kafka, MQTT | incl. their trigger variants (leader-only, Phase 4.1) |
 | 1.14 | Gmail, Google Drive, Notion, Airtable, GitHub, Telegram, Discord | one task each |
