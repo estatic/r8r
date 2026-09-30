@@ -33,6 +33,7 @@ pub fn default_type_version(node_type: &str) -> Value {
         "memoryBufferWindow" => json!(1.3),
         "emailSend" => json!(2.1),
         "slack" => json!(2.2),
+        "googleSheets" => json!(4.5),
         _ => json!(1),
     };
     v
