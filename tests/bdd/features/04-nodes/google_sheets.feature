@@ -41,7 +41,7 @@ Feature: Google Sheets node
       """
       {"spreadsheetId": "SS1", "replies": [{}]}
       """
-    And the mock service responds to PUT "/v4/spreadsheets/SS1/values/Sheet1!3%3A3" with status 200 and body:
+    And the mock service responds to PUT "/v4/spreadsheets/SS1/values/Sheet1!3:3" with status 200 and body:
       """
       {"updatedRows": 1}
       """
@@ -60,7 +60,7 @@ Feature: Google Sheets node
     When I execute the workflow
     Then the execution succeeds
     And the last request to "/v4/spreadsheets/SS1" had the header "authorization" equal to "Bearer svc-token"
-    And the last request to "/v4/spreadsheets/SS1/values/Sheet1!3%3A3" had a JSON body matching:
+    And the last request to "/v4/spreadsheets/SS1/values/Sheet1!3:3" had a JSON body matching:
       """
       {"range": "Sheet1!3:3", "values": [["Ada", "30"]]}
       """
@@ -78,11 +78,11 @@ Feature: Google Sheets node
       """
       {}
       """
-    And the mock service responds to PUT "/v4/spreadsheets/SS1/values/Sheet1!1%3A1" with status 200 and body:
+    And the mock service responds to PUT "/v4/spreadsheets/SS1/values/Sheet1!1:1" with status 200 and body:
       """
       {}
       """
-    And the mock service responds to PUT "/v4/spreadsheets/SS1/values/Sheet1!2%3A2" with status 200 and body:
+    And the mock service responds to PUT "/v4/spreadsheets/SS1/values/Sheet1!2:2" with status 200 and body:
       """
       {}
       """
@@ -104,12 +104,12 @@ Feature: Google Sheets node
     And the node "Node" uses the "googleApi" credential "Service Account"
     When I execute the workflow
     Then the execution succeeds
-    And the mock service received 1 request to "/v4/spreadsheets/SS1/values/Sheet1!1%3A1"
-    And the last request to "/v4/spreadsheets/SS1/values/Sheet1!1%3A1" had a JSON body matching:
+    And the mock service received 1 request to "/v4/spreadsheets/SS1/values/Sheet1!1:1"
+    And the last request to "/v4/spreadsheets/SS1/values/Sheet1!1:1" had a JSON body matching:
       """
       {"range": "Sheet1!1:1", "values": [["name", "age"]]}
       """
-    And the last request to "/v4/spreadsheets/SS1/values/Sheet1!2%3A2" had a JSON body matching:
+    And the last request to "/v4/spreadsheets/SS1/values/Sheet1!2:2" had a JSON body matching:
       """
       {"range": "Sheet1!2:2", "values": [["Carl", "40"]]}
       """
@@ -160,7 +160,7 @@ Feature: Google Sheets node
       """
       {}
       """
-    And the mock service responds to PUT "/v4/spreadsheets/SS1/values/Sheet1!3%3A3" with status 200 and body:
+    And the mock service responds to PUT "/v4/spreadsheets/SS1/values/Sheet1!3:3" with status 200 and body:
       """
       {}
       """
@@ -178,7 +178,7 @@ Feature: Google Sheets node
     And the node "Node" uses the "googleApi" credential "Service Account"
     When I execute the workflow
     Then the execution succeeds
-    And the last request to "/v4/spreadsheets/SS1/values/Sheet1!3%3A3" had a JSON body matching:
+    And the last request to "/v4/spreadsheets/SS1/values/Sheet1!3:3" had a JSON body matching:
       """
       {"range": "Sheet1!3:3", "values": [["2", "NewPerson"]]}
       """
@@ -608,7 +608,7 @@ Feature: Google Sheets node
       """
       {
         "url": "%{MOCK_URL}",
-        "accessTokenUrl": "%{MOCK_URL}/oauth2/token",
+        "accessTokenUrl": "%{MOCK_URL}/oauth2/refresh",
         "clientId": "client-1",
         "clientSecret": "secret-1",
         "oauthTokenData": {"access_token": "expired-token", "refresh_token": "refresh-1"}
@@ -619,7 +619,7 @@ Feature: Google Sheets node
       """
       {}
       """
-    And the mock service responds to POST "/oauth2/token" with status 200 and body:
+    And the mock service responds to POST "/oauth2/refresh" with status 200 and body:
       """
       {"access_token": "fresh-token", "refresh_token": "refresh-2"}
       """
@@ -638,5 +638,5 @@ Feature: Google Sheets node
     When I execute the workflow
     Then the execution succeeds
     And the mock service received 2 requests to "/v4/spreadsheets/SS1/values/'Sheet1':clear"
-    And the mock service received 1 request to "/oauth2/token"
+    And the mock service received 1 request to "/oauth2/refresh"
     And the last request to "/v4/spreadsheets/SS1/values/'Sheet1':clear" had the header "authorization" equal to "Bearer fresh-token"
