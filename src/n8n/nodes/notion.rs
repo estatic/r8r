@@ -662,10 +662,19 @@ fn simplify_object(object: Value) -> Value {
     let obj_type = object.get("object").and_then(Value::as_str).unwrap_or("");
     let parent_type = object.pointer("/parent/type").and_then(Value::as_str).unwrap_or("");
     let id = object.get("id").cloned().unwrap_or(Value::Null);
-    let url = object.get("url").cloned().unwrap_or(Value::Null);
+    // n8n destructures `url` and spreads `{url}`; when the source object has
+    // no `url` field at all, `url` is `undefined` and JSON.stringify drops
+    // it -- so the key is omitted entirely, not written as `null`.
+    let url = object.get("url").cloned();
     if obj_type == "page" && (parent_type == "page_id" || parent_type == "workspace") {
         let name = object.pointer("/properties/title/title/0/plain_text").cloned().unwrap_or(json!(""));
-        return json!({"id": id, "name": name, "url": url});
+        let mut out = Map::new();
+        out.insert("id".into(), id);
+        out.insert("name".into(), name);
+        if let Some(u) = url {
+            out.insert("url".into(), u);
+        }
+        return Value::Object(out);
     }
     if obj_type == "page" {
         let properties = object.get("properties").and_then(Value::as_object).cloned().unwrap_or_default();
@@ -673,7 +682,9 @@ fn simplify_object(object: Value) -> Value {
         let mut out = Map::new();
         out.insert("id".into(), id);
         out.insert("name".into(), json!(name));
-        out.insert("url".into(), url);
+        if let Some(u) = url {
+            out.insert("url".into(), u);
+        }
         for (k, v) in prepend_property(simplify_properties(&properties)) {
             out.insert(k, v);
         }
@@ -681,7 +692,13 @@ fn simplify_object(object: Value) -> Value {
     }
     if obj_type == "database" {
         let name = object.pointer("/title/0/plain_text").cloned().unwrap_or(json!(""));
-        return json!({"id": id, "name": name, "url": url});
+        let mut out = Map::new();
+        out.insert("id".into(), id);
+        out.insert("name".into(), name);
+        if let Some(u) = url {
+            out.insert("url".into(), u);
+        }
+        return Value::Object(out);
     }
     object
 }

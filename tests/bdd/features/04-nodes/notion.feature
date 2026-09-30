@@ -40,14 +40,14 @@ Feature: Notion node
     And the connections "Start -> Append"
     When I execute the workflow
     Then the execution succeeds
-    And the last request to "/v1/blocks/parent1/children" had the header "authorization" equal to "Bearer secret_test_token "
+    And the last request to "/v1/blocks/parent1/children" had the header "authorization" equal to "Bearer secret_test_token"
     And the last request to "/v1/blocks/parent1/children" had the header "notion-version" equal to "2021-08-16"
     And the last request to "/v1/blocks/parent1/children" had a JSON body matching:
       """
       {
         "children": [
-          {"object": "block", "type": "paragraph", "paragraph": {"text": [{"content": "Hello world"}]}},
-          {"object": "block", "type": "to_do", "to_do": {"checked": true, "text": [{"content": "Buy milk"}]}},
+          {"object": "block", "type": "paragraph", "paragraph": {"text": [{"text": {"content": "Hello world"}}]}},
+          {"object": "block", "type": "to_do", "to_do": {"checked": true, "text": [{"text": {"content": "Buy milk"}}]}},
           {"object": "block", "type": "image", "image": {"type": "external", "external": {"url": "https://example.com/pic.png"}}}
         ]
       }
@@ -342,7 +342,7 @@ Feature: Notion node
     Then the execution succeeds
     And the mock service received 1 requests to "/v1/databases/db1"
     And the mock service received 0 requests to "/v1/databases/db2"
-    And the 2nd request to "/v1/pages" had the header "authorization" equal to "Bearer secret_test_token "
+    And the 2nd request to "/v1/pages" had the header "authorization" equal to "Bearer secret_test_token"
 
   Scenario: Getting a database page simplifies with a property_ prefix
     Given the mock service responds to GET "/v1/pages/page1" with status 200 and body:
@@ -410,7 +410,7 @@ Feature: Notion node
       """
     And the node "GetMany" outputs:
       """
-      [{"id": "p1", "name": "Task 1"}]
+      [{"id": "p1", "name": "Task 1", "property_name": "Task 1"}]
       """
 
   Scenario: Getting many database pages with a JSON filter and sort sends both as-is
