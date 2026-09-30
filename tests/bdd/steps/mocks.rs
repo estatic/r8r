@@ -56,6 +56,34 @@ async fn respond_n(w: &mut R8rWorld, m: String, p: String, status: u16, times: u
         .await;
 }
 
+/// Query-param-scoped variant (e.g. GitHub's `?page=1` pagination): only
+/// matches requests whose query string has `name=value`.
+#[given(regex = r#"^the mock service responds to ([A-Z]+) "([^"]*)" with query parameter "([^"]*)" equal to "([^"]*)" with status (\d+) and body:$"#)]
+async fn respond_query_body(w: &mut R8rWorld, m: String, p: String, qname: String, qvalue: String, status: u16, step: &Step) {
+    let body = w.expand(docstring(step));
+    Mock::given(method(m.as_str()))
+        .and(path(p.as_str()))
+        .and(wiremock::matchers::query_param(qname.as_str(), qvalue.as_str()))
+        .respond_with(response(status, Some(&body)))
+        .mount(mock(w).await)
+        .await;
+}
+
+/// As above, plus a response header (used for GitHub's `Link: <...>; rel="next"`
+/// pagination header).
+#[given(regex = r#"^the mock service responds to ([A-Z]+) "([^"]*)" with query parameter "([^"]*)" equal to "([^"]*)" with status (\d+), header "([^"]*)" "([^"]*)" and body:$"#)]
+#[allow(clippy::too_many_arguments)]
+async fn respond_query_header_body(w: &mut R8rWorld, m: String, p: String, qname: String, qvalue: String, status: u16, hname: String, hvalue: String, step: &Step) {
+    let body = w.expand(docstring(step));
+    let hvalue = w.expand(&hvalue);
+    Mock::given(method(m.as_str()))
+        .and(path(p.as_str()))
+        .and(wiremock::matchers::query_param(qname.as_str(), qvalue.as_str()))
+        .respond_with(response(status, Some(&body)).insert_header(hname.as_str(), hvalue.as_str()))
+        .mount(mock(w).await)
+        .await;
+}
+
 #[given(regex = r#"^the mock service responds to ([A-Z]+) "([^"]*)" with status (\d+) after (\d+) ms$"#)]
 async fn respond_delay(w: &mut R8rWorld, m: String, p: String, status: u16, ms: u64) {
     Mock::given(method(m.as_str()))

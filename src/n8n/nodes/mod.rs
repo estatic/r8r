@@ -8,6 +8,7 @@ mod core;
 mod email;
 mod files;
 mod googlesheets;
+mod github;
 mod html;
 mod http;
 mod jwt;
@@ -88,6 +89,7 @@ impl Default for Registry {
         }
         r.add(Box::new(slack::Slack));
         r.add(Box::new(googlesheets::GoogleSheets));
+        r.add(Box::new(github::Github));
         for n in files::all() {
             r.add(n);
         }
