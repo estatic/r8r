@@ -122,6 +122,36 @@ pub fn all() -> Vec<CredentialType> {
                 f("url", "Base URL", false, false, json!("https://slack.com/api")),
             ],
         },
+        CredentialType {
+            name: "githubApi",
+            display_name: "GitHub API",
+            fields: vec![
+                f("server", "Github Server", false, false, json!("https://api.github.com")),
+                f("user", "User", false, false, json!("")),
+                f("accessToken", "Access Token", true, false, json!("")),
+            ],
+        },
+        CredentialType {
+            name: "githubOAuth2Api",
+            display_name: "GitHub OAuth2 API",
+            fields: vec![
+                f("grantType", "Grant Type", false, false, json!("authorizationCode")),
+                f("server", "Github Server", false, false, json!("https://api.github.com")),
+                f("authUrl", "Authorization URL", false, true, json!("")),
+                f("accessTokenUrl", "Access Token URL", false, true, json!("")),
+                f("clientId", "Client ID", false, false, json!("")),
+                f("clientSecret", "Client Secret", true, false, json!("")),
+                f(
+                    "scope",
+                    "Scope",
+                    false,
+                    false,
+                    json!("repo,admin:repo_hook,admin:org,admin:org_hook,gist,notifications,user,write:packages,read:packages,delete:packages,workflow"),
+                ),
+                f("authQueryParameters", "Auth URI Query Parameters", false, false, json!("")),
+                f("authentication", "Authentication", false, false, json!("header")),
+            ],
+        },
     ]
 }
 
