@@ -7,6 +7,7 @@ mod conditions;
 mod core;
 mod email;
 mod files;
+mod googlesheets;
 mod html;
 mod http;
 mod jwt;
@@ -81,6 +82,7 @@ impl Default for Registry {
             r.add(n);
         }
         r.add(Box::new(slack::Slack));
+        r.add(Box::new(googlesheets::GoogleSheets));
         for n in files::all() {
             r.add(n);
         }
