@@ -144,6 +144,99 @@ async fn nth_header(w: &mut R8rWorld, n: usize, p: String, name: String, value: 
     assert_eq!(got, value);
 }
 
+// ---- multipart/form-data request bodies ---------------------------------
+
+/// Splits a `multipart/form-data` body (from its `Content-Type` boundary)
+/// into `(field name, filename, content bytes)` triples, one per part.
+fn multipart_parts(body: &[u8], boundary: &str) -> Vec<(String, Option<String>, Vec<u8>)> {
+    fn find(hay: &[u8], needle: &[u8], from: usize) -> Option<usize> {
+        if from > hay.len() || needle.is_empty() {
+            return None;
+        }
+        hay[from..].windows(needle.len()).position(|w| w == needle).map(|p| p + from)
+    }
+    let delim = format!("--{boundary}").into_bytes();
+    let mut positions = Vec::new();
+    let mut from = 0;
+    while let Some(p) = find(body, &delim, from) {
+        positions.push(p);
+        from = p + delim.len();
+    }
+    let mut parts = Vec::new();
+    for w in positions.windows(2) {
+        let start = w[0] + delim.len();
+        let end = w[1];
+        let mut chunk = &body[start..end];
+        if chunk.starts_with(b"--") {
+            continue;
+        }
+        if let Some(rest) = chunk.strip_prefix(b"\r\n") {
+            chunk = rest;
+        }
+        let Some(hpos) = find(chunk, b"\r\n\r\n", 0) else { continue };
+        let header_str = String::from_utf8_lossy(&chunk[..hpos]).to_string();
+        let mut content = &chunk[hpos + 4..];
+        if let Some(rest) = content.strip_suffix(b"\r\n") {
+            content = rest;
+        }
+        let mut name = String::new();
+        let mut filename = None;
+        for line in header_str.split("\r\n") {
+            if line.to_ascii_lowercase().starts_with("content-disposition:") {
+                for kv in line.split(';') {
+                    let kv = kv.trim();
+                    if let Some(v) = kv.strip_prefix("name=\"") {
+                        name = v.trim_end_matches('"').to_string();
+                    }
+                    if let Some(v) = kv.strip_prefix("filename=\"") {
+                        filename = Some(v.trim_end_matches('"').to_string());
+                    }
+                }
+            }
+        }
+        parts.push((name, filename, content.to_vec()));
+    }
+    parts
+}
+
+async fn last_multipart_parts(w: &mut R8rWorld, p: &str) -> Vec<(String, Option<String>, Vec<u8>)> {
+    let r = last_to(w, p).await;
+    let ct = r.headers.get("content-type").and_then(|v| v.to_str().ok()).unwrap_or("").to_string();
+    let boundary = ct.split("boundary=").nth(1).unwrap_or("").trim_matches('"').to_string();
+    multipart_parts(&r.body, &boundary)
+}
+
+#[then(expr = "the last request to {string} had the multipart field {string} equal to {string}")]
+async fn last_multipart_field(w: &mut R8rWorld, p: String, name: String, value: String) {
+    let expected = w.expand(&value);
+    let parts = last_multipart_parts(w, &p).await;
+    let got = parts.iter().find(|(n, _, _)| *n == name).map(|(_, _, b)| String::from_utf8_lossy(b).to_string());
+    assert_eq!(
+        got.as_deref(),
+        Some(expected.as_str()),
+        "multipart field {name:?} in request to {p}; parts: {:?}",
+        parts.iter().map(|(n, f, _)| (n.clone(), f.clone())).collect::<Vec<_>>()
+    );
+}
+
+#[then(expr = "the last request to {string} had a multipart file field {string} with filename {string}")]
+async fn last_multipart_file(w: &mut R8rWorld, p: String, name: String, filename: String) {
+    let parts = last_multipart_parts(w, &p).await;
+    let got = parts.iter().find(|(n, _, _)| *n == name).and_then(|(_, f, _)| f.clone());
+    assert_eq!(
+        got.as_deref(),
+        Some(filename.as_str()),
+        "multipart file field {name:?} in request to {p}; parts: {:?}",
+        parts.iter().map(|(n, f, _)| (n.clone(), f.clone())).collect::<Vec<_>>()
+    );
+}
+
+#[then(expr = "the last request to {string} had no multipart field {string}")]
+async fn last_multipart_field_absent(w: &mut R8rWorld, p: String, name: String) {
+    let parts = last_multipart_parts(w, &p).await;
+    assert!(!parts.iter().any(|(n, _, _)| *n == name), "multipart field {name:?} unexpectedly present in request to {p}");
+}
+
 // ---- OAuth2 token endpoint ---------------------------------------------
 
 #[given(expr = "the mock service issues the OAuth2 access tokens {string} in order at {string}")]

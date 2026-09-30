@@ -21,6 +21,7 @@ mod server_nodes;
 mod set;
 mod slack;
 mod sql_common;
+mod telegram;
 mod transform;
 mod utility;
 
@@ -90,6 +91,7 @@ impl Default for Registry {
         r.add(Box::new(slack::Slack));
         r.add(Box::new(googlesheets::GoogleSheets));
         r.add(Box::new(github::Github));
+        r.add(Box::new(telegram::Telegram));
         for n in files::all() {
             r.add(n);
         }
