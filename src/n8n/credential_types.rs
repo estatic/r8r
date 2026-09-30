@@ -122,6 +122,37 @@ pub fn all() -> Vec<CredentialType> {
                 f("url", "Base URL", false, false, json!("https://slack.com/api")),
             ],
         },
+        CredentialType {
+            name: "googleSheetsOAuth2Api",
+            display_name: "Google Sheets OAuth2 API",
+            fields: vec![
+                f("grantType", "Grant Type", false, false, json!("authorizationCode")),
+                f("authUrl", "Authorization URL", false, false, json!("https://accounts.google.com/o/oauth2/v2/auth")),
+                f("accessTokenUrl", "Access Token URL", false, false, json!("https://oauth2.googleapis.com/token")),
+                f("clientId", "Client ID", false, false, json!("")),
+                f("clientSecret", "Client Secret", true, false, json!("")),
+                f("scope", "Scope", false, false, json!("https://www.googleapis.com/auth/drive.file https://www.googleapis.com/auth/spreadsheets https://www.googleapis.com/auth/drive.metadata")),
+                f("authentication", "Authentication", false, false, json!("body")),
+                // Sheets API base URL; overridden in tests so wiremock can stand in
+                // for sheets.googleapis.com (mirrors slackOAuth2Api's `url` field).
+                f("url", "Base URL", false, false, json!("https://sheets.googleapis.com")),
+            ],
+        },
+        CredentialType {
+            name: "googleApi",
+            display_name: "Google Service Account API",
+            fields: vec![
+                f("email", "Service Account Email", false, true, json!("")),
+                f("privateKey", "Private Key", true, true, json!("")),
+                f("inpersonate", "Impersonate a User", false, false, json!(false)),
+                f("delegatedEmail", "Email", false, false, json!("")),
+                // Sheets API base URL and the OAuth2 token exchange URL; both
+                // overridden in tests so wiremock can stand in for
+                // sheets.googleapis.com and oauth2.googleapis.com.
+                f("url", "Base URL", false, false, json!("https://sheets.googleapis.com")),
+                f("tokenUrl", "Token URL", false, false, json!("https://oauth2.googleapis.com/token")),
+            ],
+        },
     ]
 }
 
