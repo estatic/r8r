@@ -46,7 +46,11 @@
 //!   `lastEditedTimeValue`); every other filter type follows the
 //!   `camelCase(type) + "Value"` pattern.
 //! - `NotionApi.credentials.js`'s `authenticate()` sends
-//!   `Authorization: Bearer <key> ` with a trailing space -- kept here.
+//!   `Authorization: Bearer <key> ` with a trailing space -- kept here (the
+//!   BDD suite can't observe the trailing space itself: wiremock parses
+//!   captured requests into typed `http::HeaderValue`s, which trim
+//!   optional trailing whitespace per RFC 7230 before the assertion step
+//!   ever sees it).
 //!
 //! Known simplifications vs real n8n: only `apiKey` authentication
 //! (`notionOAuth2Api` is out of scope); `options.downloadFiles` on
@@ -55,7 +59,12 @@
 //! does not apply to v2.0/2.2; the `page` resource additionally supports a
 //! `get` operation (real n8n's v2 UI does not offer it -- only v1 does -- but
 //! it is cheap and useful to support since it is the same `GET /pages/:id`
-//! call as `databasePage:get`).
+//! call as `databasePage:get`); a `relation` property's ids are not
+//! validated as UUIDs (real n8n throws `NodeOperationError` on an invalid
+//! one -- here they are passed through as given); rich text `mention`/
+//! `equation` items are mapped but the mention-typed database RLC
+//! unwrapping (`extractDatabaseMentionRLC`) is not, since r8r's own
+//! resource-locator handling already normalises to a plain value.
 
 use crate::n8n::node::{ExecCtx, NodeError, NodeResult, NodeType};
 use crate::n8n::types::{Item, NodeOutput};
