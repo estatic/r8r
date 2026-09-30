@@ -728,7 +728,11 @@ async fn op_append(ctx: &ExecCtx<'_>, auth: &mut Auth, ssid: &str, sheet_title: 
     }
     let use_append = options.get("useAppend").and_then(Value::as_bool).unwrap_or(false);
     let rows = convert_object_array_to_sheet_data(&input_data, &column_names);
-    let last_row = sheet_data.len() as i64 + 1;
+    // n8n's `appendData`: `(sheetData ?? [{}]).length + 1` -- a truly empty
+    // sheet (Google omits `values` entirely) behaves like a one-element
+    // dummy array, landing data on row 2 (below the header just written),
+    // not row 1.
+    let last_row = if sheet_data.is_empty() { 2 } else { sheet_data.len() as i64 + 1 };
     if use_append {
         update_rows(ctx, auth, ssid, sheet_title, rows.clone(), &cell_format, last_row, Some(rows.len() as i64), true).await?;
     } else {
