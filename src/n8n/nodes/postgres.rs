@@ -513,7 +513,13 @@ fn exists_query(schema: &str, table: &str, match_values: &[(String, Value)]) -> 
 
 fn row_exists_from(rows: Vec<PgRow>) -> NodeResult<bool> {
     let Some(row) = rows.into_iter().next() else { return Ok(false) };
-    Ok(text_col(&row, 0)? == "t")
+    // Typed decode (not `text_col`'s raw-bytes-as-text, which assumes text
+    // wire format): `EXISTS(...)` returns `bool`, and boolean's binary wire
+    // representation (what `sqlx::query`'s extended protocol actually sends)
+    // is a single 0/1 byte, not `"t"`/`"f"` -- reading it as text silently
+    // produced a control character that never equalled `"t"`, so this
+    // always returned `false` regardless of the real value.
+    row.try_get::<bool, _>(0).map_err(|e| NodeError::new(e.to_string()))
 }
 
 // ---- SQL literal formatting ---------------------------------------------------
@@ -858,146 +864,112 @@ fn push_rows(out: &mut Vec<Item>, rows: Vec<PgRow>, sql: &str, idx: usize, large
     }
 }
 
+/// Decodes one row into a JSON object, one column at a time, dispatching
+/// on the column's Postgres type name.
+///
+/// This uses sqlx's own typed `Row::try_get::<T, _>` accessors rather than
+/// reading the column's raw bytes and treating them as text: `sqlx::query`
+/// (the extended query protocol -- see the module doc comment for why
+/// `sqlx::raw_sql`'s simple-protocol, always-text path isn't used here)
+/// has Postgres return most columns in *binary* format, so a naive
+/// "decode the bytes as UTF-8 text" (which is what the simple protocol
+/// would hand back, and what an earlier version of this function assumed)
+/// silently produces garbage for anything but text-family columns --
+/// e.g. an `int4` `1` decodes to `"\u0000\u0000\u0000\u0001"`. `try_get`
+/// asks sqlx's own per-type `Decode` impl to do it instead, which handles
+/// both wire formats correctly.
+fn decode_column(row: &PgRow, idx: usize, type_name: &str, large_numbers: &str) -> Value {
+    macro_rules! get {
+        ($t:ty) => {
+            row.try_get::<Option<$t>, _>(idx).ok().flatten()
+        };
+    }
+    match type_name {
+        "BOOL" => get!(bool).map(Value::Bool).unwrap_or(Value::Null),
+        "INT2" => get!(i16).map(|v| json!(v)).unwrap_or(Value::Null),
+        "INT4" => get!(i32).map(|v| json!(v)).unwrap_or(Value::Null),
+        "INT8" => bigint_json(get!(i64), large_numbers),
+        "FLOAT4" => get!(f32).and_then(|v| serde_json::Number::from_f64(v as f64)).map(Value::Number).unwrap_or(Value::Null),
+        "FLOAT8" => get!(f64).and_then(serde_json::Number::from_f64).map(Value::Number).unwrap_or(Value::Null),
+        "NUMERIC" => numeric_json(get!(sqlx::types::Decimal), large_numbers),
+        "JSON" | "JSONB" => get!(Value).unwrap_or(Value::Null),
+        "UUID" => get!(uuid::Uuid).map(|u| Value::String(u.to_string())).unwrap_or(Value::Null),
+        "DATE" => get!(chrono::NaiveDate).map(|d| Value::String(d.to_string())).unwrap_or(Value::Null),
+        "TIME" => get!(chrono::NaiveTime).map(|t| Value::String(t.to_string())).unwrap_or(Value::Null),
+        // n8n's own behaviour for TIMESTAMP (no time zone) on typeVersion <
+        // 2.7 is environment-dependent (pg-promise hands back a native JS
+        // `Date`, which `new Date("2024-01-15 10:30:00")` interprets in the
+        // *server's local* time zone before it gets JSON-serialised) -- see
+        // the "unverified n8n behaviour" note in the final report. r8r
+        // instead formats it as a zone-less ISO string, deterministic and
+        // not dependent on guessing the reference n8n process's `TZ`.
+        "TIMESTAMP" => get!(chrono::NaiveDateTime).map(|d| Value::String(d.format("%Y-%m-%dT%H:%M:%S%.3f").to_string())).unwrap_or(Value::Null),
+        // Matches n8n's `parseDateToISO` (`new Date(value).toISOString()`).
+        "TIMESTAMPTZ" => get!(chrono::DateTime<chrono::Utc>).map(|d| Value::String(d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))).unwrap_or(Value::Null),
+        "BYTEA" => get!(Vec<u8>).map(|b| Value::String(format!("\\x{}", hex::encode(b)))).unwrap_or(Value::Null),
+        t if t.ends_with("[]") => decode_array(row, idx, &t[..t.len() - 2], large_numbers),
+        // TEXT/VARCHAR/CHAR/NAME and anything else String-compatible
+        // (citext, and most custom/domain types over text). True
+        // non-text-compatible custom/enum types fall through to NULL --
+        // documented gap, see the final report.
+        _ => get!(String).map(Value::String).unwrap_or(Value::Null),
+    }
+}
+
+fn bigint_json(v: Option<i64>, large_numbers: &str) -> Value {
+    match v {
+        None => Value::Null,
+        Some(n) if large_numbers == "numbers" => json!(n),
+        Some(n) => Value::String(n.to_string()),
+    }
+}
+
+fn numeric_json(v: Option<sqlx::types::Decimal>, large_numbers: &str) -> Value {
+    match v {
+        None => Value::Null,
+        Some(d) if large_numbers == "numbers" => d.to_string().parse::<f64>().ok().and_then(serde_json::Number::from_f64).map(Value::Number).unwrap_or_else(|| Value::String(d.to_string())),
+        Some(d) => Value::String(d.to_string()),
+    }
+}
+
+fn decode_array(row: &PgRow, idx: usize, elem_type: &str, large_numbers: &str) -> Value {
+    macro_rules! arr {
+        ($t:ty, $f:expr) => {
+            match row.try_get::<Option<Vec<$t>>, _>(idx) {
+                Ok(Some(v)) => Value::Array(v.into_iter().map($f).collect()),
+                Ok(None) => Value::Null,
+                Err(_) => Value::Null,
+            }
+        };
+    }
+    match elem_type {
+        "BOOL" => arr!(bool, Value::Bool),
+        "INT2" => arr!(i16, |v| json!(v)),
+        "INT4" => arr!(i32, |v| json!(v)),
+        "INT8" => match row.try_get::<Option<Vec<i64>>, _>(idx) {
+            Ok(Some(v)) => Value::Array(v.into_iter().map(|n| bigint_json(Some(n), large_numbers)).collect()),
+            _ => Value::Null,
+        },
+        "FLOAT4" => arr!(f32, |v: f32| serde_json::Number::from_f64(v as f64).map(Value::Number).unwrap_or(Value::Null)),
+        "FLOAT8" => arr!(f64, |v: f64| serde_json::Number::from_f64(v).map(Value::Number).unwrap_or(Value::Null)),
+        "NUMERIC" => match row.try_get::<Option<Vec<sqlx::types::Decimal>>, _>(idx) {
+            Ok(Some(v)) => Value::Array(v.into_iter().map(|d| numeric_json(Some(d), large_numbers)).collect()),
+            _ => Value::Null,
+        },
+        "JSON" | "JSONB" => arr!(Value, |v| v),
+        "UUID" => arr!(uuid::Uuid, |u: uuid::Uuid| Value::String(u.to_string())),
+        "DATE" => arr!(chrono::NaiveDate, |d: chrono::NaiveDate| Value::String(d.to_string())),
+        "TIMESTAMP" => arr!(chrono::NaiveDateTime, |d: chrono::NaiveDateTime| Value::String(d.format("%Y-%m-%dT%H:%M:%S%.3f").to_string())),
+        "TIMESTAMPTZ" => arr!(chrono::DateTime<chrono::Utc>, |d: chrono::DateTime<chrono::Utc>| Value::String(d.to_rfc3339_opts(chrono::SecondsFormat::Millis, true))),
+        _ => arr!(String, Value::String),
+    }
+}
+
 fn row_to_json_map(row: &PgRow, large_numbers: &str) -> Map<String, Value> {
     let mut m = Map::new();
     for (idx, col) in row.columns().iter().enumerate() {
-        let name = col.name().to_string();
-        let value = match row.try_get_raw(idx) {
-            Ok(vref) if !vref.is_null() => {
-                let type_name = vref.type_info().name().to_string();
-                let text = vref.as_str().unwrap_or("");
-                pg_text_to_json(text, &type_name, large_numbers)
-            }
-            _ => Value::Null,
-        };
-        m.insert(name, value);
+        let type_name = col.type_info().name().to_string();
+        m.insert(col.name().to_string(), decode_column(row, idx, &type_name, large_numbers));
     }
     m
-}
-
-fn pg_text_to_json(text: &str, type_name: &str, large_numbers: &str) -> Value {
-    match type_name {
-        "INT2" | "INT4" => text.parse::<i64>().map(Value::from).unwrap_or_else(|_| Value::String(text.to_string())),
-        "INT8" => {
-            if large_numbers == "numbers" {
-                text.parse::<i64>().map(Value::from).unwrap_or_else(|_| Value::String(text.to_string()))
-            } else {
-                Value::String(text.to_string())
-            }
-        }
-        "NUMERIC" => {
-            if large_numbers == "numbers" {
-                text.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map(Value::Number).unwrap_or_else(|| Value::String(text.to_string()))
-            } else {
-                Value::String(text.to_string())
-            }
-        }
-        "FLOAT4" | "FLOAT8" => text.parse::<f64>().ok().and_then(serde_json::Number::from_f64).map(Value::Number).unwrap_or_else(|| Value::String(text.to_string())),
-        "BOOL" => Value::Bool(text == "t"),
-        "JSON" | "JSONB" => serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.to_string())),
-        "TIMESTAMPTZ" => Value::String(format_timestamptz(text)),
-        "TIMESTAMP" => Value::String(format_timestamp(text)),
-        t if t.ends_with("[]") => parse_pg_array(text, &t[..t.len() - 2], large_numbers),
-        _ => Value::String(text.to_string()),
-    }
-}
-
-/// `2024-01-15 10:30:00[.ffffff][+TZ]` -> RFC3339 UTC
-/// (`2024-01-15T10:30:00.000Z`), matching n8n's `parseDateToISO`
-/// (`new Date(value).toISOString()`) for TIMESTAMPTZ columns.
-fn format_timestamptz(text: &str) -> String {
-    for fmt in ["%Y-%m-%d %H:%M:%S%.f%#z", "%Y-%m-%d %H:%M:%S%#z"] {
-        if let Ok(dt) = chrono::DateTime::parse_from_str(text, fmt) {
-            return dt.with_timezone(&chrono::Utc).to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-        }
-    }
-    text.to_string()
-}
-
-/// `2024-01-15 10:30:00[.ffffff]` -> `2024-01-15T10:30:00.000`.
-///
-/// n8n's own behaviour for TIMESTAMP (no time zone) on typeVersion < 2.7
-/// is environment-dependent (pg-promise hands back a native JS `Date`,
-/// which `new Date("2024-01-15 10:30:00")` interprets in the *server's
-/// local* time zone before it gets JSON-serialised) -- see the plan's
-/// "unverified n8n behaviour" note. r8r instead formats it as a
-/// zone-less ISO string, which is deterministic and avoids guessing the
-/// reference n8n process's `TZ`.
-fn format_timestamp(text: &str) -> String {
-    for fmt in ["%Y-%m-%d %H:%M:%S%.f", "%Y-%m-%d %H:%M:%S"] {
-        if let Ok(dt) = chrono::NaiveDateTime::parse_from_str(text, fmt) {
-            return dt.format("%Y-%m-%dT%H:%M:%S%.3f").to_string();
-        }
-    }
-    text.to_string()
-}
-
-/// A (single-level-recursive) parser for Postgres' array text format
-/// (`{1,2,3}`, `{"a","b"}`, nested `{{1,2},{3,4}}`, `NULL` elements).
-/// Covers the common cases; unusual element types (box, point, ...) fall
-/// back to their raw text.
-fn parse_pg_array(text: &str, elem_type: &str, large_numbers: &str) -> Value {
-    let trimmed = text.trim();
-    let inner = trimmed.strip_prefix('{').and_then(|s| s.strip_suffix('}')).unwrap_or(trimmed);
-    if inner.is_empty() {
-        return Value::Array(vec![]);
-    }
-    let parts = split_pg_array_elements(inner);
-    Value::Array(
-        parts
-            .into_iter()
-            .map(|p| {
-                if p.eq_ignore_ascii_case("null") {
-                    Value::Null
-                } else if p.starts_with('{') {
-                    parse_pg_array(&p, elem_type, large_numbers)
-                } else if let Some(unquoted) = p.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
-                    let unescaped = unquoted.replace("\\\"", "\"").replace("\\\\", "\\");
-                    if matches!(elem_type, "TEXT" | "VARCHAR" | "CHAR" | "\"CHAR\"" | "UUID" | "JSON" | "JSONB") {
-                        Value::String(unescaped)
-                    } else {
-                        pg_text_to_json(&unescaped, elem_type, large_numbers)
-                    }
-                } else {
-                    pg_text_to_json(&p, elem_type, large_numbers)
-                }
-            })
-            .collect(),
-    )
-}
-
-fn split_pg_array_elements(s: &str) -> Vec<String> {
-    let mut parts = Vec::new();
-    let mut depth = 0i32;
-    let mut in_quotes = false;
-    let mut cur = String::new();
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        match c {
-            '"' => {
-                in_quotes = !in_quotes;
-                cur.push(c);
-            }
-            '\\' if in_quotes => {
-                cur.push(c);
-                if let Some(next) = chars.next() {
-                    cur.push(next);
-                }
-            }
-            '{' if !in_quotes => {
-                depth += 1;
-                cur.push(c);
-            }
-            '}' if !in_quotes => {
-                depth -= 1;
-                cur.push(c);
-            }
-            ',' if !in_quotes && depth == 0 => parts.push(std::mem::take(&mut cur)),
-            _ => cur.push(c),
-        }
-    }
-    if !cur.is_empty() || !parts.is_empty() {
-        parts.push(cur);
-    }
-    parts
 }
