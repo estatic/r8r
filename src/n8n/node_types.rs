@@ -129,7 +129,17 @@ const DESCRIPTIONS: &[Desc] = &[
     ),
     d("n8n-nodes-base.gmail", "Gmail", "transform", &[2.0, 2.1], "Consume the Gmail API", 1, 1, &["resource", "operation", "sendTo", "subject", "message", "options"], &["gmailOAuth2"]),
     d("n8n-nodes-base.googleDrive", "Google Drive", "input", &[3.0], "Access data on Google Drive", 1, 1, &["resource", "operation", "fileId", "options"], &["googleDriveOAuth2Api"]),
-    d("n8n-nodes-base.notion", "Notion", "output", &[2.0, 2.2], "Consume Notion API", 1, 1, &["resource", "operation", "databaseId", "options"], &["notionApi"]),
+    d(
+        "n8n-nodes-base.notion",
+        "Notion",
+        "output",
+        &[2.0, 2.2],
+        "Consume Notion API",
+        1,
+        1,
+        &["authentication", "resource", "operation", "databaseId", "pageId", "blockId", "title", "propertiesUi", "blockUi", "filterType", "matchType", "filters", "filterJson", "returnAll", "limit", "simple", "options"],
+        &["notionApi"],
+    ),
     d("n8n-nodes-base.airtable", "Airtable", "input", &[2.0, 2.1], "Read, update, write and delete data from Airtable", 1, 1, &["resource", "operation", "base", "table", "options"], &["airtableTokenApi"]),
     d(
         "n8n-nodes-base.github",

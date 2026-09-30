@@ -13,6 +13,7 @@ mod html;
 mod http;
 mod jwt;
 mod merge;
+mod notion;
 mod postgres;
 mod python;
 mod redis;
@@ -90,6 +91,7 @@ impl Default for Registry {
         r.add(Box::new(slack::Slack));
         r.add(Box::new(googlesheets::GoogleSheets));
         r.add(Box::new(github::Github));
+        r.add(Box::new(notion::Notion));
         for n in files::all() {
             r.add(n);
         }

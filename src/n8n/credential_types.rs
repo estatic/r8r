@@ -174,6 +174,17 @@ pub fn all() -> Vec<CredentialType> {
             ],
         },
         CredentialType {
+            name: "notionApi",
+            display_name: "Notion API",
+            fields: vec![
+                f("apiKey", "Internal Integration Secret", true, true, json!("")),
+                // Notion's base URL; overridden in tests so wiremock can
+                // stand in for api.notion.com (mirrors slackApi's `url`
+                // field).
+                f("url", "Base URL", false, false, json!("https://api.notion.com")),
+            ],
+        },
+        CredentialType {
             name: "githubApi",
             display_name: "GitHub API",
             fields: vec![
