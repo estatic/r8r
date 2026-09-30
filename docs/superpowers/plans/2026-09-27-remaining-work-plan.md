@@ -77,7 +77,7 @@ and on n8n; `codex.r8r.native = false` removed.
 | 1.3 ✅ | Redis | get/set/delete/incr/keys/publish/push/pop |
 | 1.4 ✅ | Send Email (SMTP) | lettre; attachments from binary; `sendAndWait` (v2.1) not supported natively yet |
 | 1.5 ✅ | Slack | message/channel/user/reaction/file upload; not yet: scheduled messages, star, userGroup, profile ops; OAuth2 without refresh |
-| 1.6 | Google Sheets | OAuth2 credential; read/append/update/lookup; wiremock |
+| 1.6 ✅ | Google Sheets | append/appendOrUpdate/clear/create/delete/read/remove/update + spreadsheet create/deleteSpreadsheet; `googleApi` (service-account JWT) + `googleSheetsOAuth2Api` (with refresh); wiremock |
 | 1.7 ✅ | HTML | extract (CSS selectors), generate table, convert |
 | 1.8 ✅ | JWT | sign/decode/verify (c2e660e) |
 | 1.9 ✅ | Extract from File / Convert to File | CSV, XLSX, JSON, text, HTML, PDF text |
