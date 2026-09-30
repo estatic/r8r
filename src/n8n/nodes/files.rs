@@ -752,9 +752,25 @@ fn normalize_lexically(p: &Path) -> PathBuf {
     out
 }
 
-/// Whether `target` lies inside (or is exactly) `base`, path-component-wise.
+/// n8n-core's `resolvePath`: follows symlinks so a link inside an allowed
+/// directory can't reach a file outside it. A missing file (a write
+/// destination) resolves through its parent directory; if that is missing
+/// too, the write fails anyway and the lexical form is used.
+fn resolve_real(p: &Path) -> PathBuf {
+    if let Ok(real) = std::fs::canonicalize(p) {
+        return real;
+    }
+    let lexical = normalize_lexically(p);
+    match (lexical.parent().map(std::fs::canonicalize), lexical.file_name()) {
+        (Some(Ok(dir)), Some(name)) => dir.join(name),
+        _ => lexical,
+    }
+}
+
+/// Whether `target` lies inside (or is exactly) `base`, path-component-wise,
+/// after resolving symlinks on both sides.
 fn is_contained_within(base: &Path, target: &Path) -> bool {
-    normalize_lexically(target).starts_with(normalize_lexically(base))
+    resolve_real(target).starts_with(resolve_real(base))
 }
 
 /// n8n-core's `isFilePathBlocked`: the n8n user folder is always off-limits
@@ -772,11 +788,14 @@ fn file_access_blocked(ctx: &ExecCtx<'_>, path: &Path) -> bool {
     false
 }
 
-fn check_file_access(ctx: &ExecCtx<'_>, path: &Path, i: usize) -> NodeResult<()> {
-    if file_access_blocked(ctx, path) {
+/// Checks `path` against the access rules and returns the resolved path the
+/// caller must use for the I/O, so the file checked is the file touched.
+fn check_file_access(ctx: &ExecCtx<'_>, path: &Path, i: usize) -> NodeResult<PathBuf> {
+    let real = resolve_real(path);
+    if file_access_blocked(ctx, &real) {
         Err(NodeError::new("Access to the file is not allowed.").at(i))
     } else {
-        Ok(())
+        Ok(real)
     }
 }
 
@@ -873,8 +892,8 @@ fn read_item(ctx: &ExecCtx<'_>, i: usize, type_version: f64) -> NodeResult<Vec<I
 
     let mut items = Vec::with_capacity(matches.len());
     for path in matches {
-        check_file_access(ctx, &path, i)?;
-        let bytes = std::fs::read(&path).map_err(|e| read_error(&e, &path, i))?;
+        let real = check_file_access(ctx, &path, i)?;
+        let bytes = std::fs::read(&real).map_err(|e| read_error(&e, &path, i))?;
 
         let ext = file_ext_override.clone().unwrap_or_else(|| path.extension().and_then(|e| e.to_str()).unwrap_or("").to_string());
         let mime = mime_override.clone().unwrap_or_else(|| guess_mime_from_extension(&ext).to_string());
@@ -940,8 +959,7 @@ fn write_item(ctx: &ExecCtx<'_>, i: usize) -> NodeResult<Item> {
     let entry = binary_entry(item, &data_property_name, i)?;
     let bytes = binary_bytes(entry, i)?;
 
-    let path = resolve_path(&file_name);
-    check_file_access(ctx, &path, i)?;
+    let path = check_file_access(ctx, &resolve_path(&file_name), i)?;
 
     let write_result = if append {
         use std::io::Write;

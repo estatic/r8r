@@ -215,6 +215,53 @@ Feature: Read/Write Files from Disk node (v1, v1.1)
     Then the execution fails
     And the node "Read" failed with an error containing "Access to the file is not allowed."
 
+  Scenario: A symlink inside N8N_RESTRICT_FILE_ACCESS_TO cannot reach a file outside it
+    Given a workflow with nodes:
+      | name  | type          |
+      | Start | manualTrigger |
+      | Read  | readWriteFile |
+    And the connections "Start -> Read"
+    And the trigger outputs the items:
+      """
+      [{}]
+      """
+    And the file "outside.txt" contains:
+      """
+      secret data
+      """
+    And the file "allowed/link.txt" is a symlink to "outside.txt"
+    And the environment variable "N8N_RESTRICT_FILE_ACCESS_TO" is "%{USER_FOLDER}/allowed"
+    And the node "Read" has parameters:
+      """
+      {"operation": "read", "fileSelector": "%{USER_FOLDER}/allowed/link.txt"}
+      """
+    When I execute the workflow
+    Then the execution fails
+    And the node "Read" failed with an error containing "Access to the file is not allowed."
+
+  Scenario: Writing through a symlinked directory inside N8N_RESTRICT_FILE_ACCESS_TO is rejected
+    Given a workflow with nodes:
+      | name  | type          |
+      | Start | manualTrigger |
+      | Write | readWriteFile |
+    And the connections "Start -> Write"
+    And the trigger outputs the items:
+      """
+      [{}]
+      """
+    And the trigger item 0 has the binary property "data" with content "pwned" and mime type "text/plain"
+    And the file "outside/keep.txt" is a symlink to "outside.txt"
+    And the file "allowed/escape" is a symlink to "outside"
+    And the environment variable "N8N_RESTRICT_FILE_ACCESS_TO" is "%{USER_FOLDER}/allowed"
+    And the node "Write" has parameters:
+      """
+      {"operation": "write", "fileName": "%{USER_FOLDER}/allowed/escape/new.txt", "dataPropertyName": "data"}
+      """
+    When I execute the workflow
+    Then the execution fails
+    And the node "Write" failed with an error containing "Access to the file is not allowed."
+    And the file "outside/new.txt" does not exist
+
   Scenario: Reading from the n8n user folder is blocked even without N8N_RESTRICT_FILE_ACCESS_TO
     Given a workflow with nodes:
       | name  | type          |
