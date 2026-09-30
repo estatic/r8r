@@ -237,6 +237,27 @@ async fn last_multipart_field_absent(w: &mut R8rWorld, p: String, name: String) 
     assert!(!parts.iter().any(|(n, _, _)| *n == name), "multipart field {name:?} unexpectedly present in request to {p}");
 }
 
+/// A sequence of `{"status": N, "body": {...}}` replies for one method+path,
+/// returned in order (the last one repeats). Used for pagination scenarios
+/// where each page's body must differ (e.g. Notion's `start_cursor`/
+/// `has_more`), mirroring the priority/`up_to_n_times` technique used by
+/// `oauth_tokens`/`openai` below.
+#[given(regex = r#"^the mock service responds to ([A-Z]+) "([^"]*)" in order with:$"#)]
+async fn respond_in_order(w: &mut R8rWorld, m: String, p: String, step: &Step) {
+    let body = w.expand(docstring(step));
+    let replies = parse_strict(&body, "ordered responses");
+    let replies = replies.as_array().expect("array of {status, body} replies").clone();
+    let server = mock(w).await;
+    let count = replies.len();
+    for (i, reply) in replies.into_iter().enumerate() {
+        let status = reply.get("status").and_then(Value::as_u64).unwrap_or(200) as u16;
+        let body_val = reply.get("body").cloned().unwrap_or(json!({}));
+        let m_builder = Mock::given(method(m.as_str())).and(path(p.as_str())).respond_with(ResponseTemplate::new(status).set_body_json(body_val));
+        let m_builder = if i + 1 < count { m_builder.up_to_n_times(1) } else { m_builder };
+        m_builder.with_priority((i + 1) as u8).mount(server).await;
+    }
+}
+
 // ---- OAuth2 token endpoint ---------------------------------------------
 
 #[given(expr = "the mock service issues the OAuth2 access tokens {string} in order at {string}")]
