@@ -72,6 +72,7 @@ async fn respond_query_body(w: &mut R8rWorld, m: String, p: String, qname: Strin
 /// As above, plus a response header (used for GitHub's `Link: <...>; rel="next"`
 /// pagination header).
 #[given(regex = r#"^the mock service responds to ([A-Z]+) "([^"]*)" with query parameter "([^"]*)" equal to "([^"]*)" with status (\d+), header "([^"]*)" "([^"]*)" and body:$"#)]
+#[allow(clippy::too_many_arguments)]
 async fn respond_query_header_body(w: &mut R8rWorld, m: String, p: String, qname: String, qvalue: String, status: u16, hname: String, hvalue: String, step: &Step) {
     let body = w.expand(docstring(step));
     let hvalue = w.expand(&hvalue);

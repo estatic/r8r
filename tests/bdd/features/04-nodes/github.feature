@@ -565,7 +565,7 @@ Feature: GitHub node
       """
 
   Scenario: Getting all releases paginates while the Link response header says there is a next page
-    Given the mock service responds to GET "/repos/octocat/hello-world/releases" with query parameter "page" equal to "1" with status 200, header "Link" "<%{MOCK_URL}/repos/octocat/hello-world/releases?page=2>; rel=\"next\"" and body:
+    Given the mock service responds to GET "/repos/octocat/hello-world/releases" with query parameter "page" equal to "1" with status 200, header "Link" "<%{MOCK_URL}/repos/octocat/hello-world/releases?page=2>; rel=next" and body:
       """
       [{"id": 1}]
       """

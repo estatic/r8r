@@ -8,7 +8,7 @@ use serde_json::{json, Map, Value};
 /// check them against the pinned n8n version in Phase 0.
 pub fn default_type_version(node_type: &str) -> Value {
     let short = node_type.rsplit('.').next().unwrap_or(node_type);
-    let v = match short {
+    match short {
         "set" => json!(3.4),
         "if" => json!(2.2),
         "filter" => json!(2.2),
@@ -35,8 +35,7 @@ pub fn default_type_version(node_type: &str) -> Value {
         "slack" => json!(2.2),
         "github" => json!(1.1),
         _ => json!(1),
-    };
-    v
+    }
 }
 
 /// `set` -> `n8n-nodes-base.set`, `lc.agent` ->
