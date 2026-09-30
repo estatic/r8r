@@ -22,6 +22,14 @@ pub struct Config {
     pub executions_data_max_age_hours: u64,
     pub block_env_access_in_node: bool,
     pub nodes_exclude: Vec<String>,
+    /// Read/Write Files from Disk (spec §6.6, task 1.11): directories the
+    /// node may access (`N8N_RESTRICT_FILE_ACCESS_TO`, `;`-separated; empty
+    /// = unrestricted). A leading `~` expands to `$HOME`.
+    pub restrict_file_access_to: Vec<PathBuf>,
+    /// Whether the node is additionally blocked from the n8n user folder
+    /// (`~/.n8n`) whatever `restrict_file_access_to` says
+    /// (`N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES`, default true).
+    pub block_file_access_to_n8n_files: bool,
     /// Hosts the SSRF guard lets through even though they resolve to
     /// private addresses (`R8R_SSRF_ALLOWED_HOSTS`).
     pub ssrf_allowed_hosts: Vec<String>,
@@ -84,6 +92,21 @@ fn string_list(name: &str, default: &[&str]) -> Result<Vec<String>, ConfigError>
     }
 }
 
+/// A `;`-separated list of directories, `~` expanded to `$HOME` (n8n's
+/// `N8N_RESTRICT_FILE_ACCESS_TO` format).
+fn path_list(name: &str) -> Vec<PathBuf> {
+    let Some(raw) = var(name) else { return vec![] };
+    raw.split(';')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|s| match s.strip_prefix('~') {
+            Some(rest) => format!("{}{rest}", var("HOME").unwrap_or_default()),
+            None => s.to_string(),
+        })
+        .map(PathBuf::from)
+        .collect()
+}
+
 impl Config {
     /// Reads and validates the environment. Also makes sure an encryption
     /// key exists: like n8n, one is generated into
@@ -143,6 +166,8 @@ impl Config {
                 "NODES_EXCLUDE",
                 &["n8n-nodes-base.executeCommand", "n8n-nodes-base.localFileTrigger"],
             )?,
+            restrict_file_access_to: path_list("N8N_RESTRICT_FILE_ACCESS_TO"),
+            block_file_access_to_n8n_files: parse_bool("N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES", true)?,
             ssrf_allowed_hosts: string_list("R8R_SSRF_ALLOWED_HOSTS", &[])?,
             webhook_url: var("WEBHOOK_URL").map(|u| if u.ends_with('/') { u } else { format!("{u}/") }).unwrap_or_else(|| format!("http://localhost:{port}/")),
             timezone: var("GENERIC_TIMEZONE").unwrap_or_else(|| "America/New_York".into()),
@@ -172,6 +197,8 @@ impl Config {
             ("N8N_LOG_FORMAT", self.log_format.clone()),
             ("N8N_BLOCK_ENV_ACCESS_IN_NODE", self.block_env_access_in_node.to_string()),
             ("NODES_EXCLUDE", serde_json::to_string(&self.nodes_exclude).unwrap()),
+            ("N8N_RESTRICT_FILE_ACCESS_TO", self.restrict_file_access_to.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(";")),
+            ("N8N_BLOCK_FILE_ACCESS_TO_N8N_FILES", self.block_file_access_to_n8n_files.to_string()),
             ("R8R_SSRF_ALLOWED_HOSTS", self.ssrf_allowed_hosts.join(",")),
             ("WEBHOOK_URL", self.webhook_url.clone()),
             ("GENERIC_TIMEZONE", self.timezone.clone()),

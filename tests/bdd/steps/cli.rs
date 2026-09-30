@@ -73,6 +73,14 @@ async fn write_file(w: &mut R8rWorld, name: String, step: &Step) {
     std::fs::write(w.dir.path().join(name), content).unwrap();
 }
 
+/// A symlink inside the scenario folder; parent directories are created.
+#[given(expr = "the file {string} is a symlink to {string}")]
+async fn symlink_file(w: &mut R8rWorld, name: String, target: String) {
+    let link = w.dir.path().join(name);
+    std::fs::create_dir_all(link.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(w.dir.path().join(target), link).unwrap();
+}
+
 /// Runs a command line; a leading `r8r` is optional. Relative file
 /// arguments resolve against the scenario folder (the working directory).
 #[given(expr = "I run {string}")]
@@ -169,6 +177,19 @@ async fn file_json(w: &mut R8rWorld, name: String, step: &Step) {
 async fn file_not_contains(w: &mut R8rWorld, name: String, needle: String) {
     let text = std::fs::read_to_string(w.dir.path().join(&name)).unwrap_or_default();
     assert!(!text.contains(&needle), "{name} contains {needle:?}");
+}
+
+#[then(expr = "the file {string} contains {string}")]
+async fn file_contains(w: &mut R8rWorld, name: String, needle: String) {
+    let path = w.dir.path().join(&name);
+    let text = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+    let needle = w.expand(&needle);
+    assert!(text.contains(&needle), "{name} does not contain {needle:?}; actual: {text:?}");
+}
+
+#[then(expr = "the file {string} does not exist")]
+async fn file_absent(w: &mut R8rWorld, name: String) {
+    assert!(!w.dir.path().join(&name).exists(), "{name} exists but should not");
 }
 
 #[then(expr = "the object at {string} in the file {string} has the keys in the order {string}")]
