@@ -520,6 +520,7 @@ fn get_range_string(sheet_name: &str, range_definition: &str, range: Option<&str
     }
 }
 
+#[allow(clippy::needless_range_loop)]
 fn convert_sheet_data_array_to_object_array(sheet: &[Vec<Value>], start_row: usize, column_keys: &[String], add_empty: bool, include_headers_with_empty_cells: bool) -> Vec<Map<String, Value>> {
     let mut out = Vec::new();
     for row_index in start_row..sheet.len() {
@@ -548,6 +549,7 @@ fn structure_array_data_by_column(input: &[Vec<Value>], key_row: usize, data_sta
 }
 
 /// n8n's `GoogleSheet.lookupValues`.
+#[allow(clippy::needless_range_loop)]
 fn lookup_values(input_data: &mut [Vec<Value>], key_row_index: usize, data_start_row_index: usize, lookup: &[(String, String)], return_all_matches: bool, combine_filters: &str, node_version: f64) -> NodeResult<Vec<Map<String, Value>>> {
     if key_row_index >= input_data.len() || data_start_row_index < key_row_index {
         return Err(NodeError::new("The key row does not exist"));
@@ -743,6 +745,7 @@ async fn op_append(ctx: &ExecCtx<'_>, auth: &mut Auth, ssid: &str, sheet_title: 
 }
 
 /// Shared by `appendOrUpdate` (`upsert = true`) and `update` (`upsert = false`).
+#[allow(clippy::needless_range_loop)]
 async fn op_upsert(ctx: &ExecCtx<'_>, auth: &mut Auth, ssid: &str, sheet_title: &str, sheet_id: i64, items: &[Item], upsert: bool) -> NodeResult<Vec<Item>> {
     let options = ctx.param("options", 0)?;
     let cell_format = options.get("cellFormat").and_then(Value::as_str).unwrap_or("USER_ENTERED").to_string();
