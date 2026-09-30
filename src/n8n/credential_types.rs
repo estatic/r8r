@@ -10,6 +10,8 @@ pub struct Field {
     pub secret: bool,
     pub required: bool,
     pub default: Value,
+    /// JSON-schema / editor field type: "string", "number" or "boolean".
+    pub kind: &'static str,
 }
 
 pub struct CredentialType {
@@ -23,7 +25,11 @@ pub struct CredentialType {
 pub const BLANK: &str = "__n8n_BLANK_VALUE_e5362baf-c777-4d57-a609-6eaf1f9e87f6";
 
 fn f(name: &'static str, display: &'static str, secret: bool, required: bool, default: Value) -> Field {
-    Field { name, display, secret, required, default }
+    Field { name, display, secret, required, default, kind: "string" }
+}
+
+fn f_typed(name: &'static str, display: &'static str, secret: bool, required: bool, default: Value, kind: &'static str) -> Field {
+    Field { name, display, secret, required, default, kind }
 }
 
 pub fn all() -> Vec<CredentialType> {
@@ -94,6 +100,20 @@ pub fn all() -> Vec<CredentialType> {
             fields: vec![f("apiKey", "API Key", true, true, json!("")), f("url", "Base URL", false, false, json!("https://api.anthropic.com"))],
         },
         CredentialType {
+            name: "postgres",
+            display_name: "Postgres",
+            fields: vec![
+                f("host", "Host", false, false, json!("localhost")),
+                f("database", "Database", false, false, json!("postgres")),
+                f("user", "User", false, false, json!("postgres")),
+                f("password", "Password", true, false, json!("")),
+                f_typed("maxConnections", "Maximum Number of Connections", false, false, json!(100), "number"),
+                f_typed("allowUnauthorizedCerts", "Ignore SSL Issues (Insecure)", false, false, json!(false), "boolean"),
+                f("ssl", "SSL", false, false, json!("disable")),
+                f_typed("port", "Port", false, false, json!(5432), "number"),
+            ],
+        },
+        CredentialType {
             name: "telegramApi",
             display_name: "Telegram API",
             fields: vec![f("accessToken", "Access Token", true, true, json!("")), f("baseUrl", "Base URL", false, false, json!("https://api.telegram.org"))],
@@ -135,7 +155,7 @@ const SYSTEM_FIELDS: &[&str] = &["oauthTokenData"];
 impl CredentialType {
     /// JSON schema as `GET /api/v1/credentials/schema/:type` serves it.
     pub fn json_schema(&self) -> Value {
-        let props: Map<String, Value> = self.fields.iter().map(|f| (f.name.to_string(), json!({"type": "string"}))).collect();
+        let props: Map<String, Value> = self.fields.iter().map(|f| (f.name.to_string(), json!({"type": f.kind}))).collect();
         let required: Vec<&str> = self.fields.iter().filter(|f| f.required).map(|f| f.name).collect();
         json!({"type": "object", "properties": props, "required": required, "additionalProperties": false})
     }
@@ -178,7 +198,7 @@ impl CredentialType {
             .fields
             .iter()
             .map(|f| {
-                let mut p = json!({"displayName": f.display, "name": f.name, "type": "string", "default": f.default});
+                let mut p = json!({"displayName": f.display, "name": f.name, "type": f.kind, "default": f.default});
                 if f.secret {
                     p["typeOptions"] = json!({"password": true});
                 }

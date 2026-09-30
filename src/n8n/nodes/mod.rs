@@ -11,12 +11,14 @@ mod html;
 mod http;
 mod jwt;
 mod merge;
+mod postgres;
 mod python;
 mod redis;
 mod routing;
 mod server_nodes;
 mod set;
 mod slack;
+mod sql_common;
 mod transform;
 mod utility;
 
@@ -75,6 +77,9 @@ impl Default for Registry {
             r.add(n);
         }
         for n in ai::all() {
+            r.add(n);
+        }
+        for n in postgres::all() {
             r.add(n);
         }
         for n in server_nodes::all() {

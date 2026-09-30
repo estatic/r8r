@@ -72,7 +72,7 @@ and on n8n; `codex.r8r.native = false` removed.
 
 | Order | Node(s) | Notes / chunks |
 | --- | --- | --- |
-| 1.1 | Postgres | operations: executeQuery, insert, update, upsert, delete, select; query params; chunks: read ops · write ops |
+| 1.1 ✅ | Postgres | operations: executeQuery, insert, update, upsert, delete, select; query params; chunks: read ops · write ops |
 | 1.2 | MySQL | reuse 1.1's SQL layer |
 | 1.3 ✅ | Redis | get/set/delete/incr/keys/publish/push/pop |
 | 1.4 ✅ | Send Email (SMTP) | lettre; attachments from binary; `sendAndWait` (v2.1) not supported natively yet |
