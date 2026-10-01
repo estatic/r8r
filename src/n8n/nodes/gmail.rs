@@ -1116,8 +1116,7 @@ impl NodeType for Gmail {
         let node_version = ctx.node.type_version;
         let mut auth = resolve_auth(ctx).await?;
         let mut out: Vec<Item> = Vec::new();
-        for i in 0..items.len() {
-            let item = &items[i];
+        for (i, item) in items.iter().enumerate() {
             match run_one(ctx, &mut auth, &resource, &operation, item, i, node_version).await {
                 Ok(produced) => out.extend(produced.into_iter().map(|it| it.paired(i))),
                 Err(e) if ctx.continue_on_fail() => {
