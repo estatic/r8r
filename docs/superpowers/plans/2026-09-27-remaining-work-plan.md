@@ -73,7 +73,7 @@ and on n8n; `codex.r8r.native = false` removed.
 | Order | Node(s) | Notes / chunks |
 | --- | --- | --- |
 | 1.1 ✅ | Postgres | operations: executeQuery, insert, update, upsert, delete, select; query params; chunks: read ops · write ops |
-| 1.2 | MySQL | reuse 1.1's SQL layer |
+| 1.2 ✅ | MySQL | reuses sql_common.rs; v2 uses dataMode/valuesToSend/columnToMatchOn (no resourceMapper); BLOB as hex, multi-statement queries unsupported |
 | 1.3 ✅ | Redis | get/set/delete/incr/keys/publish/push/pop |
 | 1.4 ✅ | Send Email (SMTP) | lettre; attachments from binary; `sendAndWait` (v2.1) not supported natively yet |
 | 1.5 ✅ | Slack | message/channel/user/reaction/file upload; not yet: scheduled messages, star, userGroup, profile ops; OAuth2 without refresh |
