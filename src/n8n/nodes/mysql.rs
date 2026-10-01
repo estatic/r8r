@@ -145,7 +145,8 @@ impl NodeType for MySql {
         // why this split is kept even though it's no longer required to
         // dodge an `Executor`/HRTB compile error here (no schema lookup
         // means no ctx-borrow ever crosses an await point).
-        let handle = tokio::spawn(run_all(cred, connect_timeout_secs, statements, query_batching, large_numbers, decimal_numbers, detailed_output, continue_on_fail));
+        let opts = RunOpts { batching: query_batching, large_numbers, decimal_numbers, detailed: detailed_output, continue_on_fail };
+        let handle = tokio::spawn(run_all(cred, connect_timeout_secs, statements, opts));
         let batch = handle.await.map_err(|e| NodeError::new(format!("The MySQL task panicked: {e}")))??;
 
         for (idx, e) in batch.errors {
@@ -492,7 +493,7 @@ fn is_inside_quotes(s: &str, idx: usize) -> bool {
     let before = &s[..idx];
     let single = before.matches('\'').count();
     let double = before.matches('"').count();
-    single % 2 != 0 || double % 2 != 0
+    !single.is_multiple_of(2) || !double.is_multiple_of(2)
 }
 
 /// Substitutes `$1`, `$2`, ... (value) and `$1:name`, `$2:name`, ...
@@ -583,17 +584,20 @@ struct BatchResult {
     errors: Vec<(usize, NodeError)>,
 }
 
-async fn run_all(
-    cred: Value,
-    connect_timeout_secs: u64,
-    statements: Vec<(usize, String)>,
+/// Node-level (resolved once, at item 0 -- see `execute`) options that
+/// shape how the batch runs and how rows are formatted. Bundled into one
+/// struct so `run_all` doesn't trip clippy's `too_many_arguments`.
+struct RunOpts {
     batching: String,
     large_numbers: String,
     decimal_numbers: bool,
     detailed: bool,
     continue_on_fail: bool,
-) -> NodeResult<BatchResult> {
+}
+
+async fn run_all(cred: Value, connect_timeout_secs: u64, statements: Vec<(usize, String)>, opts: RunOpts) -> NodeResult<BatchResult> {
     let pool = connect(&cred, connect_timeout_secs).await?;
+    let RunOpts { batching, large_numbers, decimal_numbers, detailed, continue_on_fail } = opts;
     let result = match batching.as_str() {
         "independently" => run_independently(&pool, statements, &large_numbers, decimal_numbers, detailed, continue_on_fail).await,
         "transaction" => run_transaction(&pool, statements, &large_numbers, decimal_numbers, detailed, continue_on_fail).await,
