@@ -150,7 +150,17 @@ const DESCRIPTIONS: &[Desc] = &[
         &["authentication", "resource", "operation", "databaseId", "pageId", "blockId", "title", "propertiesUi", "blockUi", "filterType", "matchType", "filters", "filterJson", "returnAll", "limit", "simple", "options"],
         &["notionApi"],
     ),
-    d("n8n-nodes-base.airtable", "Airtable", "input", &[2.0, 2.1], "Read, update, write and delete data from Airtable", 1, 1, &["resource", "operation", "base", "table", "options"], &["airtableTokenApi"]),
+    d(
+        "n8n-nodes-base.airtable",
+        "Airtable",
+        "input",
+        &[2.0, 2.1, 2.2],
+        "Read, update, write and delete data from Airtable",
+        1,
+        1,
+        &["authentication", "resource", "operation", "base", "table", "id", "columns", "filterByFormula", "sort", "returnAll", "limit", "options"],
+        &["airtableTokenApi", "airtableOAuth2Api"],
+    ),
     d(
         "n8n-nodes-base.github",
         "GitHub",
