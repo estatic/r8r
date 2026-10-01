@@ -16,6 +16,7 @@ use russh::keys::{decode_secret_key, PrivateKeyWithHashAlg, PublicKeyOrCertifica
 use russh_sftp::client::SftpSession;
 use std::sync::Arc;
 use std::time::Duration;
+use tokio::io::AsyncWriteExt;
 
 /// Owned (`'static`) connection parameters, resolved from the node's
 /// credential before crossing into the `tokio::spawn`ed task (see
@@ -99,6 +100,19 @@ pub async fn open_sftp(session: &mut Handle<ClientHandler>) -> Result<SftpSessio
     let channel = session.channel_open_session().await.map_err(conn_error)?;
     channel.request_subsystem(true, "sftp").await.map_err(conn_error)?;
     SftpSession::new(channel.into_stream()).await.map_err(|e| NodeError::new(format!("SFTP session failed: {e}")))
+}
+
+/// Writes `data` to `path`, creating it if it doesn't exist and truncating
+/// it if it does. `SftpSession::write` (the obvious high-level method) only
+/// opens with `OpenFlags::WRITE`, no `CREATE`/`TRUNCATE` -- it fails with
+/// "No such file" against a path that doesn't already exist, so every
+/// upload here goes through `create` + the `File`'s `AsyncWrite` impl
+/// instead.
+pub async fn sftp_write(sftp: &SftpSession, path: &str, data: &[u8]) -> Result<(), NodeError> {
+    let mut file = sftp.create(path.to_string()).await.map_err(|e| NodeError::new(format!("SFTP write failed: {e}")))?;
+    file.write_all(data).await.map_err(|e| NodeError::new(format!("SFTP write failed: {e}")))?;
+    file.close().await.map_err(|e| NodeError::new(format!("SFTP write failed: {e}")))?;
+    Ok(())
 }
 
 /// A short, byte-exact shell quote: wraps in single quotes, escaping any

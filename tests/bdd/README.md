@@ -34,7 +34,7 @@ R8R_BIN=/path/to/r8r cargo test --test bdd             # test another build
 | — | 127.0.0.1:3306, root/mysql, db `r8r` (Docker `r8r-bdd-mysql`) | MySQL for `@requires-mysql` |
 | — | 127.0.0.1:1025 (SMTP) / :8025 (HTTP) | Mailpit (Docker `r8r-bdd-mailpit`) for `@requires-mailpit` |
 | — | 127.0.0.1:2222, user/password r8r/r8r (Docker `r8r-bdd-ssh`) | SSH/SFTP for `@requires-ssh` |
-| — | 127.0.0.1:2121, user/password r8r/r8r, passive 30000-30009 (Docker `r8r-bdd-ftp`) | FTP for `@requires-ftp` |
+| — | 127.0.0.1:2121, user/password r8r/r8r, passive 30000-30009 (Docker `r8r-bdd-ftp`) | FTP for `@requires-ftp`. The pure-ftpd test image caps simultaneous logins at 5; run `@requires-ftp` scenarios with `R8R_BDD_CONCURRENCY=4` or lower (default is 8) to avoid spurious "5 users (the maximum) are already logged in" failures. |
 | `R8R_BDD_STORAGE` | sqlite | `postgres` runs every scenario with `DB_TYPE=postgresdb`, one schema per scenario |
 | `R8R_BDD_START_TIMEOUT` | 30 | Seconds a server may take to become ready |
 

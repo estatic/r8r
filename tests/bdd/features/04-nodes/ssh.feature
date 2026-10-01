@@ -70,16 +70,16 @@ Feature: SSH node
       """
 
   Scenario: Upload a file from binary data, then download it back with the same bytes
-    Given the trigger outputs the items:
-      """
-      [{}]
-      """
-    And the trigger item 0 has the binary property "data" with content "round trip payload 12345" and mime type "text/plain"
-    And a workflow with nodes:
+    Given a workflow with nodes:
       | name     | type          |
       | Start    | manualTrigger |
       | Upload   | ssh           |
       | Download | ssh           |
+    And the trigger outputs the items:
+      """
+      [{}]
+      """
+    And the trigger item 0 has the binary property "data" with content "round trip payload 12345" and mime type "text/plain"
     And the node "Upload" has parameters:
       """
       {"authentication": "password", "resource": "file", "operation": "upload", "binaryPropertyName": "data", "path": "/tmp", "options": {"fileName": "r8r-bdd-roundtrip.txt"}}

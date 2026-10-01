@@ -307,7 +307,7 @@ async fn run_one_file_plan(sftp: &russh_sftp::client::SftpSession, plan: FilePla
     match plan {
         FilePlan::Upload { target_dir, file_name, bytes } => {
             let remote_path = if target_dir.ends_with('/') { format!("{target_dir}{file_name}") } else { format!("{target_dir}/{file_name}") };
-            sftp.write(remote_path, &bytes).await.map_err(|e| NodeError::new(format!("SFTP upload failed: {e}")))?;
+            ssh_common::sftp_write(sftp, &remote_path, &bytes).await?;
             Ok(FileOutcome::Uploaded)
         }
         FilePlan::Download { remote_path, binary_prop, file_name_override } => {

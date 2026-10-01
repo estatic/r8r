@@ -62,17 +62,17 @@ Feature: FTP node
       """
       {"host": "127.0.0.1", "port": 2121, "username": "r8r", "password": "r8r"}
       """
-    And the trigger outputs the items:
-      """
-      [{}]
-      """
-    And the trigger item 0 has the binary property "data" with content "binary ftp round trip 42" and mime type "application/octet-stream"
     And a workflow with nodes:
       | name     | type |
       | Start    | manualTrigger |
       | Upload   | ftp |
       | Download | ftp |
       | Cleanup  | ftp |
+    And the trigger outputs the items:
+      """
+      [{}]
+      """
+    And the trigger item 0 has the binary property "data" with content "binary ftp round trip 42" and mime type "application/octet-stream"
     And the node "Upload" has parameters:
       """
       {"protocol": "ftp", "operation": "upload", "path": "/r8r-bdd-ftp-bin-1.bin", "binaryData": true, "binaryPropertyName": "data", "options": {}}
@@ -152,6 +152,7 @@ Feature: FTP node
       | Start   | manualTrigger |
       | Setup   | ftp |
       | List    | ftp |
+      | OneItem | limit |
       | Cleanup | ftp |
     And the node "Setup" has parameters:
       """
@@ -163,12 +164,16 @@ Feature: FTP node
       {"protocol": "ftp", "operation": "list", "path": "/r8r-bdd-ftp-rec", "recursive": true, "options": {}}
       """
     And the node "List" uses the "ftp" credential "FTP Server"
+    And the node "OneItem" has parameters:
+      """
+      {"maxItems": 1}
+      """
     And the node "Cleanup" has parameters:
       """
       {"protocol": "ftp", "operation": "delete", "path": "/r8r-bdd-ftp-rec", "options": {"folder": true, "recursive": true}}
       """
     And the node "Cleanup" uses the "ftp" credential "FTP Server"
-    And the connections "Start -> Setup -> List -> Cleanup"
+    And the connections "Start -> Setup -> List -> OneItem -> Cleanup"
     When I execute the workflow
     Then the execution succeeds
     And the node "List" outputs items matching:

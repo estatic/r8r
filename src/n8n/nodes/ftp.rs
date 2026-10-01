@@ -462,7 +462,7 @@ async fn run_sftp_plan(sftp: &SftpSession, plan: FtpPlan) -> NodeResult<FtpOutco
             if let Some(dir) = parent_dir(&path) {
                 sftp_mkdir_p(sftp, &dir).await;
             }
-            sftp.write(path.clone(), &bytes).await.map_err(|e| NodeError::new(e.to_string()))?;
+            ssh_common::sftp_write(sftp, &path, &bytes).await?;
             Ok(FtpOutcome::PassThrough)
         }
         FtpPlan::Download { path, binary_prop } => {
