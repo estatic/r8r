@@ -6,6 +6,7 @@ mod code;
 mod compression;
 mod conditions;
 mod core;
+mod discord;
 mod email;
 mod files;
 mod googlesheets;
@@ -100,6 +101,7 @@ impl Default for Registry {
         r.add(Box::new(telegram::Telegram));
         r.add(Box::new(notion::Notion));
         r.add(Box::new(airtable::Airtable));
+        r.add(Box::new(discord::Discord));
         for n in files::all() {
             r.add(n);
         }
