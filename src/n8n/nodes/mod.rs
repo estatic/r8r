@@ -10,12 +10,16 @@ mod discord;
 mod email;
 mod files;
 mod ftp;
+mod gmail;
+mod google_auth;
+mod googledrive;
 mod googlesheets;
 mod github;
 mod html;
 mod http;
 mod jwt;
 mod merge;
+mod mongodb;
 mod mysql;
 mod notion;
 mod openai;
@@ -96,11 +100,16 @@ impl Default for Registry {
         for n in mysql::all() {
             r.add(n);
         }
+        for n in mongodb::all() {
+            r.add(n);
+        }
         for n in server_nodes::all() {
             r.add(n);
         }
         r.add(Box::new(slack::Slack));
         r.add(Box::new(googlesheets::GoogleSheets));
+        r.add(Box::new(gmail::Gmail));
+        r.add(Box::new(googledrive::GoogleDrive));
         r.add(Box::new(github::Github));
         r.add(Box::new(telegram::Telegram));
         r.add(Box::new(notion::Notion));

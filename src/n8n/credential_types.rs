@@ -137,6 +137,24 @@ pub fn all() -> Vec<CredentialType> {
             ],
         },
         CredentialType {
+            name: "mongoDb",
+            display_name: "MongoDB",
+            fields: vec![
+                f("configurationType", "Configuration Type", false, false, json!("values")),
+                f("connectionString", "Connection String", true, false, json!("")),
+                f("host", "Host", false, false, json!("localhost")),
+                f("database", "Database", false, false, json!("")),
+                f("user", "User", false, false, json!("")),
+                f("password", "Password", true, false, json!("")),
+                f_typed("port", "Port", false, false, json!(27017), "number"),
+                f_typed("tls", "Use TLS", false, false, json!(false), "boolean"),
+                f("ca", "CA Certificate", true, false, json!("")),
+                f("cert", "Public Client Certificate", true, false, json!("")),
+                f("key", "Private Client Key", true, false, json!("")),
+                f("passphrase", "Passphrase", true, false, json!("")),
+            ],
+        },
+        CredentialType {
             name: "telegramApi",
             display_name: "Telegram API",
             fields: vec![f("accessToken", "Access Token", true, true, json!("")), f("baseUrl", "Base URL", false, false, json!("https://api.telegram.org"))],
@@ -194,6 +212,52 @@ pub fn all() -> Vec<CredentialType> {
                 // sheets.googleapis.com and oauth2.googleapis.com.
                 f("url", "Base URL", false, false, json!("https://sheets.googleapis.com")),
                 f("tokenUrl", "Token URL", false, false, json!("https://oauth2.googleapis.com/token")),
+            ],
+        },
+        CredentialType {
+            name: "gmailOAuth2",
+            display_name: "Gmail OAuth2 API",
+            fields: vec![
+                f("grantType", "Grant Type", false, false, json!("authorizationCode")),
+                f("authUrl", "Authorization URL", false, false, json!("https://accounts.google.com/o/oauth2/v2/auth")),
+                f("accessTokenUrl", "Access Token URL", false, false, json!("https://oauth2.googleapis.com/token")),
+                f("clientId", "Client ID", false, false, json!("")),
+                f("clientSecret", "Client Secret", true, false, json!("")),
+                f(
+                    "scope",
+                    "Scope",
+                    false,
+                    false,
+                    json!("https://www.googleapis.com/auth/gmail.labels https://www.googleapis.com/auth/gmail.addons.current.action.compose https://www.googleapis.com/auth/gmail.addons.current.message.action https://mail.google.com/ https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.compose"),
+                ),
+                f("authentication", "Authentication", false, false, json!("body")),
+                // Gmail API base URL; overridden in tests so wiremock can
+                // stand in for www.googleapis.com (mirrors googleSheetsOAuth2Api's `url` field).
+                f("url", "Base URL", false, false, json!("https://www.googleapis.com")),
+            ],
+        },
+        CredentialType {
+            name: "googleDriveOAuth2Api",
+            display_name: "Google Drive OAuth2 API",
+            fields: vec![
+                f("grantType", "Grant Type", false, false, json!("authorizationCode")),
+                f("authUrl", "Authorization URL", false, false, json!("https://accounts.google.com/o/oauth2/v2/auth")),
+                f("accessTokenUrl", "Access Token URL", false, false, json!("https://oauth2.googleapis.com/token")),
+                f("clientId", "Client ID", false, false, json!("")),
+                f("clientSecret", "Client Secret", true, false, json!("")),
+                f(
+                    "scope",
+                    "Scope",
+                    false,
+                    false,
+                    json!("https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.photos.readonly"),
+                ),
+                f("authentication", "Authentication", false, false, json!("body")),
+                // Drive API base URL; overridden in tests so wiremock can
+                // stand in for www.googleapis.com and its
+                // /upload/drive/v3 endpoint (mirrors gmailOAuth2's `url`
+                // field).
+                f("url", "Base URL", false, false, json!("https://www.googleapis.com")),
             ],
         },
         CredentialType {
