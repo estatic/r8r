@@ -59,6 +59,8 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 flate2 = "1.1.10"
 glob = "0.3"
 lettre = { version = "0.11.23", default-features = false, features = ["tokio1", "tokio1-rustls-tls", "smtp-transport", "builder", "hostname"] }
+mongodb = "3.9.1"
+futures-util = "0.3"
 
 [dev-dependencies]
 cucumber = "0.23"
@@ -66,7 +68,6 @@ tokio = { version = "1", features = ["full", "test-util"] }
 http-body-util = "0.1"
 wiremock = "0.6"
 tokio-tungstenite = "0.24"
-futures-util = "0.3"
 tempfile = "3"
 aes = "0.8"
 md-5 = "0.10"

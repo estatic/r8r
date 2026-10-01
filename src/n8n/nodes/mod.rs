@@ -18,6 +18,7 @@ mod html;
 mod http;
 mod jwt;
 mod merge;
+mod mongodb;
 mod mysql;
 mod notion;
 mod openai;
@@ -94,6 +95,9 @@ impl Default for Registry {
             r.add(n);
         }
         for n in mysql::all() {
+            r.add(n);
+        }
+        for n in mongodb::all() {
             r.add(n);
         }
         for n in server_nodes::all() {
