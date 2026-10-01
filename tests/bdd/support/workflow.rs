@@ -35,6 +35,7 @@ pub fn default_type_version(node_type: &str) -> Value {
         "slack" => json!(2.2),
         "googleSheets" => json!(4.5),
         "github" => json!(1.1),
+        "mySql" => json!(2.5),
         "telegram" => json!(1.2),
         "notion" => json!(2.2),
         "airtable" => json!(2.2),
