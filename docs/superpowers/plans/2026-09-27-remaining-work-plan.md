@@ -85,7 +85,7 @@ and on n8n; `codex.r8r.native = false` removed.
 | 1.11 ✅ | Read/Write Files | behind the same allow-list as Execute Command |
 | 1.12 | Microsoft SQL, MongoDB, Data Tables | |
 | 1.13 | RabbitMQ, Kafka, MQTT | incl. their trigger variants (leader-only, Phase 4.1) |
-| 1.14 | Gmail, Google Drive, Notion ✅, Airtable, GitHub ✅, Telegram ✅, Discord | one task each; GitHub: file/issue/release/repository/review/user/organization (pullRequest, workflow, GitHub App auth out of scope) |
+| 1.14 | Gmail, Google Drive, Notion ✅, Airtable, GitHub ✅, Telegram ✅, Discord ✅ | one task each; GitHub: file/issue/release/repository/review/user/organization (pullRequest, workflow, GitHub App auth out of scope) |
 | 1.15 | Email Trigger (IMAP), FTP/SFTP, SSH | |
 | 1.16 | OpenAI (non-chat) | |
 
