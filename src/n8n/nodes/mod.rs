@@ -17,6 +17,7 @@ mod jwt;
 mod merge;
 mod mysql;
 mod notion;
+mod openai;
 mod postgres;
 mod python;
 mod redis;
@@ -102,6 +103,7 @@ impl Default for Registry {
         r.add(Box::new(notion::Notion));
         r.add(Box::new(airtable::Airtable));
         r.add(Box::new(discord::Discord));
+        r.add(Box::new(openai::OpenAi));
         for n in files::all() {
             r.add(n);
         }

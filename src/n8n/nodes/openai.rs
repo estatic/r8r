@@ -69,13 +69,6 @@ fn rlc_value(v: &Value) -> Option<String> {
     }
 }
 
-fn to_items(value: Value, i: usize) -> Vec<Item> {
-    match value {
-        Value::Array(a) => a.into_iter().map(|v| Item::from_value(v).paired(i)).collect(),
-        other => vec![Item::from_value(other).paired(i)],
-    }
-}
-
 fn binary_bytes<'a>(item: &'a Item, name: &str, i: usize) -> NodeResult<(Vec<u8>, &'a Map<String, Value>)> {
     let entry = item.binary.as_ref().and_then(|b| b.get(name)).ok_or_else(|| NodeError::new(format!("Item has no binary field '{name}'")).at(i))?;
     let meta = entry.as_object().ok_or_else(|| NodeError::new(format!("Item has no binary field '{name}'")).at(i))?;
@@ -267,7 +260,7 @@ async fn request_multipart(ctx: &ExecCtx<'_>, auth: &Auth, i: usize, endpoint: &
 // ---- text:response (v2, Responses API) --------------------------------------
 
 /// Converts one `responses.values` entry to a Responses-API input message.
-async fn format_input_message(ctx: &ExecCtx<'_>, item: &Item, i: usize, m: &Value) -> NodeResult<Value> {
+async fn format_input_message(item: &Item, i: usize, m: &Value) -> NodeResult<Value> {
     let role = m.get("role").and_then(Value::as_str).unwrap_or("user");
     let kind = m.get("type").and_then(Value::as_str).unwrap_or("text");
     let content = match kind {
@@ -325,7 +318,7 @@ async fn text_response(ctx: &ExecCtx<'_>, i: usize, item: &Item, auth: &Auth) ->
     }
     let mut input = Vec::new();
     for m in &messages {
-        input.push(format_input_message(ctx, item, i, m).await?);
+        input.push(format_input_message(item, i, m).await?);
     }
 
     let instructions = ctx.param_str("options.instructions", i, "")?;
