@@ -29,6 +29,7 @@ pub fn default_type_version(node_type: &str) -> Value {
         "formTrigger" => json!(2.2),
         "agent" => json!(2),
         "lmChatOpenAi" => json!(1.2),
+        "openAi" => json!(2.3),
         "chainLlm" => json!(1.5),
         "memoryBufferWindow" => json!(1.3),
         "emailSend" => json!(2.1),
@@ -38,6 +39,8 @@ pub fn default_type_version(node_type: &str) -> Value {
         "mySql" => json!(2.5),
         "telegram" => json!(1.2),
         "notion" => json!(2.2),
+        "airtable" => json!(2.2),
+        "discord" => json!(2),
         _ => json!(1),
     }
 }
