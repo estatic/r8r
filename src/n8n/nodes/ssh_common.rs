@@ -12,8 +12,7 @@
 
 use crate::n8n::node::NodeError;
 use russh::client::{self, Handle};
-use russh::keys::{decode_secret_key, PrivateKeyWithHashAlg};
-use russh::keys::ssh_key::PublicKey;
+use russh::keys::{decode_secret_key, PrivateKeyWithHashAlg, PublicKeyOrCertificate};
 use russh_sftp::client::SftpSession;
 use std::sync::Arc;
 use std::time::Duration;
@@ -47,7 +46,7 @@ pub struct ClientHandler;
 impl client::Handler for ClientHandler {
     type Error = russh::Error;
 
-    async fn check_server_key(&mut self, _server_public_key: &PublicKey) -> Result<bool, Self::Error> {
+    async fn check_server_key(&mut self, _server_public_key: &PublicKeyOrCertificate) -> Result<bool, Self::Error> {
         Ok(true)
     }
 }
