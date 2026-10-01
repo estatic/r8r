@@ -17,16 +17,22 @@ use serde_json::Value;
 pub enum IdentQuote {
     /// Postgres, standard SQL: `"name"`, embedded `"` doubled.
     Double,
-    /// MySQL: `` `name` ``, embedded backtick doubled. Unused until the
-    /// MySQL node (not yet implemented) starts sharing this module.
-    #[allow(dead_code)]
+    /// MySQL: `` `name` ``, embedded backtick doubled.
     Backtick,
+    /// Microsoft SQL: `[name]`, embedded `]` doubled; if `name` already
+    /// comes wrapped in one layer of brackets, that layer is stripped
+    /// before re-wrapping (mirrors the reference `escapeIdentifier`).
+    Bracket,
 }
 
 pub fn quote_ident(name: &str, style: IdentQuote) -> String {
     match style {
         IdentQuote::Double => format!("\"{}\"", name.replace('"', "\"\"")),
         IdentQuote::Backtick => format!("`{}`", name.replace('`', "``")),
+        IdentQuote::Bracket => {
+            let inner = name.strip_prefix('[').and_then(|s| s.strip_suffix(']')).unwrap_or(name);
+            format!("[{}]", inner.replace(']', "]]"))
+        }
     }
 }
 

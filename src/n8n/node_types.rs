@@ -120,7 +120,17 @@ const DESCRIPTIONS: &[Desc] = &[
         &["operation", "table", "dataMode", "valuesToSend", "columnToMatchOn", "valueToMatchOn", "where", "sort", "combineConditions", "returnAll", "limit", "deleteCommand", "query", "options"],
         &["mySql"],
     ),
-    d("n8n-nodes-base.microsoftSql", "Microsoft SQL", "input", &[1.0, 1.1], "Get, add and update data in Microsoft SQL", 1, 1, &["operation", "query"], &["microsoftSql"]),
+    d(
+        "n8n-nodes-base.microsoftSql",
+        "Microsoft SQL",
+        "input",
+        &[1.0, 1.1, 1.2],
+        "Get, add and update data in Microsoft SQL",
+        1,
+        1,
+        &["operation", "query", "options", "table", "columns", "updateKey", "deleteKey"],
+        &["microsoftSql"],
+    ),
     d(
         "n8n-nodes-base.mongoDb",
         "MongoDB",
