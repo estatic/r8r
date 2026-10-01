@@ -19,7 +19,7 @@ use cucumber::World as _;
 /// Scenarios with these tags need infrastructure or time the default run
 /// shouldn't assume. Opt in via `R8R_BDD_INCLUDE` (comma-separated), or
 /// select them explicitly with `--tags`, which replaces this filter.
-const OPT_IN_TAGS: &[&str] = &["perf", "slow", "requires-redis", "requires-postgres", "requires-mysql", "requires-python-runner", "requires-mailpit"];
+const OPT_IN_TAGS: &[&str] = &["perf", "slow", "requires-redis", "requires-postgres", "requires-mysql", "requires-python-runner", "requires-mailpit", "requires-ssh", "requires-ftp"];
 
 #[tokio::main]
 async fn main() {

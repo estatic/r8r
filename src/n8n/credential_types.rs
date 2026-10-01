@@ -296,6 +296,49 @@ pub fn all() -> Vec<CredentialType> {
             display_name: "Discord Webhook",
             fields: vec![f("webhookUri", "Webhook URL", true, true, json!(""))],
         },
+        CredentialType {
+            name: "sshPassword",
+            display_name: "SSH Password",
+            fields: vec![
+                f("host", "Host", false, true, json!("")),
+                f_typed("port", "Port", false, true, json!(22), "number"),
+                f("username", "Username", false, false, json!("")),
+                f("password", "Password", true, false, json!("")),
+            ],
+        },
+        CredentialType {
+            name: "sshPrivateKey",
+            display_name: "SSH Private Key",
+            fields: vec![
+                f("host", "Host", false, true, json!("")),
+                f_typed("port", "Port", false, true, json!(22), "number"),
+                f("username", "Username", false, false, json!("")),
+                f("privateKey", "Private Key", true, false, json!("")),
+                f("passphrase", "Passphrase", true, false, json!("")),
+            ],
+        },
+        CredentialType {
+            name: "ftp",
+            display_name: "FTP",
+            fields: vec![
+                f("host", "Host", false, true, json!("")),
+                f_typed("port", "Port", false, true, json!(21), "number"),
+                f("username", "Username", false, false, json!("")),
+                f("password", "Password", true, false, json!("")),
+            ],
+        },
+        CredentialType {
+            name: "sftp",
+            display_name: "SFTP",
+            fields: vec![
+                f("host", "Host", false, true, json!("")),
+                f_typed("port", "Port", false, true, json!(22), "number"),
+                f("username", "Username", false, true, json!("")),
+                f("password", "Password", true, false, json!("")),
+                f("privateKey", "Private Key", true, false, json!("")),
+                f("passphrase", "Passphrase", true, false, json!("")),
+            ],
+        },
     ]
 }
 
