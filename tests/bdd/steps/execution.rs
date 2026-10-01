@@ -98,6 +98,19 @@ async fn outputs_count(w: &mut R8rWorld, node: String, count: usize) {
     assert_eq!(items.len(), count, "items:\n{}", pretty(&Value::Array(items.clone())));
 }
 
+/// Checks a binary property (e.g. a downloaded email attachment) on one
+/// output item, since `the node ... outputs:` only compares `.json`.
+#[then(expr = "the node {string} output item {int} has the binary property {string} with file name {string}")]
+async fn output_binary_filename(w: &mut R8rWorld, node: String, item_index: usize, prop: String, filename: String) {
+    let items = w.node_output_items(&node, 0, None);
+    let item = items.get(item_index).unwrap_or_else(|| panic!("node \"{node}\" output has no item {item_index}; items:\n{}", pretty(&Value::Array(items.clone()))));
+    let got = item
+        .pointer(&format!("/binary/{prop}/fileName"))
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| panic!("no binary property {prop:?} on item {item_index}: {}", pretty(item)));
+    assert_eq!(got, filename);
+}
+
 #[then(regex = r#"^output (\d+) of the node "([^"]*)" has (\d+) items?$"#)]
 async fn output_n_count(w: &mut R8rWorld, output: usize, node: String, count: usize) {
     let items = w.node_output(&node, output, None);

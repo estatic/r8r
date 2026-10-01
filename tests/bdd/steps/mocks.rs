@@ -136,6 +136,30 @@ async fn last_body(w: &mut R8rWorld, p: String, step: &Step) {
     assert_matches(&expected, &actual, Mode::Subset).unwrap_or_else(|e| panic!("{e}\nbody: {}", pretty(&actual)));
 }
 
+/// Gmail's `format=raw` response: wraps a doc-string MIME message (its
+/// `\n`s normalized to `\r\n`) as the base64url-encoded `raw` field,
+/// alongside `id`/`threadId`/`labelIds`/`sizeEstimate`, so scenarios can
+/// write MIME messages as readable text instead of precomputed base64url.
+#[given(regex = r#"^the mock service responds to GET "([^"]*)" with status 200 and the raw message \(id "([^"]*)", thread "([^"]*)"\):$"#)]
+async fn respond_raw_message(w: &mut R8rWorld, p: String, id: String, thread_id: String, step: &Step) {
+    use base64::Engine as _;
+    let mime = w.expand(docstring(step)).replace('\n', "\r\n");
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mime.as_bytes());
+    let body = json!({"id": id, "threadId": thread_id, "labelIds": ["INBOX"], "sizeEstimate": mime.len(), "raw": raw});
+    Mock::given(method("GET")).and(path(p.as_str())).respond_with(ResponseTemplate::new(200).set_body_json(body)).mount(mock(w).await).await;
+}
+
+/// Gmail's draft `format=raw` response: wraps a doc-string MIME message as
+/// `{"id": ..., "message": {"id": ..., "threadId": ..., "raw": ...}}`.
+#[given(regex = r#"^the mock service responds to GET "([^"]*)" with status 200 and the raw draft \(id "([^"]*)", message id "([^"]*)", thread "([^"]*)"\):$"#)]
+async fn respond_raw_draft(w: &mut R8rWorld, p: String, id: String, message_id: String, thread_id: String, step: &Step) {
+    use base64::Engine as _;
+    let mime = w.expand(docstring(step)).replace('\n', "\r\n");
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mime.as_bytes());
+    let body = json!({"id": id, "message": {"id": message_id, "threadId": thread_id, "raw": raw}});
+    Mock::given(method("GET")).and(path(p.as_str())).respond_with(ResponseTemplate::new(200).set_body_json(body)).mount(mock(w).await).await;
+}
+
 /// Gmail (and other Google APIs) send MIME messages as a base64url-encoded
 /// `raw` field in the JSON body. Decodes it so scenarios can assert on
 /// headers/body text without a full MIME parser in the step definitions.
