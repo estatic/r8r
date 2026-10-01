@@ -6,8 +6,11 @@ mod code;
 mod compression;
 mod conditions;
 mod core;
+mod discord;
 mod email;
 mod files;
+mod gmail;
+mod google_auth;
 mod googlesheets;
 mod github;
 mod html;
@@ -17,6 +20,7 @@ mod merge;
 mod mongodb;
 mod mysql;
 mod notion;
+mod openai;
 mod postgres;
 mod python;
 mod redis;
@@ -100,10 +104,13 @@ impl Default for Registry {
         }
         r.add(Box::new(slack::Slack));
         r.add(Box::new(googlesheets::GoogleSheets));
+        r.add(Box::new(gmail::Gmail));
         r.add(Box::new(github::Github));
         r.add(Box::new(telegram::Telegram));
         r.add(Box::new(notion::Notion));
         r.add(Box::new(airtable::Airtable));
+        r.add(Box::new(discord::Discord));
+        r.add(Box::new(openai::OpenAi));
         for n in files::all() {
             r.add(n);
         }

@@ -92,7 +92,14 @@ pub fn all() -> Vec<CredentialType> {
         CredentialType {
             name: "openAiApi",
             display_name: "OpenAi",
-            fields: vec![f("apiKey", "API Key", true, true, json!("")), f("organizationId", "Organization ID", false, false, json!("")), f("url", "Base URL", false, false, json!("https://api.openai.com/v1"))],
+            fields: vec![
+                f("apiKey", "API Key", true, true, json!("")),
+                f("organizationId", "Organization ID", false, false, json!("")),
+                f("url", "Base URL", false, false, json!("https://api.openai.com/v1")),
+                f_typed("header", "Add Custom Header", false, false, json!(false), "boolean"),
+                f("headerName", "Header Name", false, false, json!("")),
+                f("headerValue", "Header Value", true, false, json!("")),
+            ],
         },
         CredentialType {
             name: "anthropicApi",
@@ -208,6 +215,28 @@ pub fn all() -> Vec<CredentialType> {
             ],
         },
         CredentialType {
+            name: "gmailOAuth2",
+            display_name: "Gmail OAuth2 API",
+            fields: vec![
+                f("grantType", "Grant Type", false, false, json!("authorizationCode")),
+                f("authUrl", "Authorization URL", false, false, json!("https://accounts.google.com/o/oauth2/v2/auth")),
+                f("accessTokenUrl", "Access Token URL", false, false, json!("https://oauth2.googleapis.com/token")),
+                f("clientId", "Client ID", false, false, json!("")),
+                f("clientSecret", "Client Secret", true, false, json!("")),
+                f(
+                    "scope",
+                    "Scope",
+                    false,
+                    false,
+                    json!("https://www.googleapis.com/auth/gmail.labels https://www.googleapis.com/auth/gmail.addons.current.action.compose https://www.googleapis.com/auth/gmail.addons.current.message.action https://mail.google.com/ https://www.googleapis.com/auth/gmail.modify https://www.googleapis.com/auth/gmail.compose"),
+                ),
+                f("authentication", "Authentication", false, false, json!("body")),
+                // Gmail API base URL; overridden in tests so wiremock can
+                // stand in for www.googleapis.com (mirrors googleSheetsOAuth2Api's `url` field).
+                f("url", "Base URL", false, false, json!("https://www.googleapis.com")),
+            ],
+        },
+        CredentialType {
             name: "notionApi",
             display_name: "Notion API",
             fields: vec![
@@ -272,6 +301,40 @@ pub fn all() -> Vec<CredentialType> {
                 f("authQueryParameters", "Auth URI Query Parameters", false, false, json!("")),
                 f("authentication", "Authentication", false, false, json!("header")),
             ],
+        },
+        CredentialType {
+            name: "discordBotApi",
+            display_name: "Discord Bot API",
+            fields: vec![
+                f("botToken", "Bot Token", true, true, json!("")),
+                f("applicationId", "Application ID", false, false, json!("")),
+                f("publicKey", "Public Key", true, false, json!("")),
+                // Discord API base URL; overridden in tests so wiremock can
+                // stand in for discord.com (mirrors slackApi's `url` field).
+                f("url", "Base URL", false, false, json!("https://discord.com/api/v10")),
+            ],
+        },
+        CredentialType {
+            name: "discordOAuth2Api",
+            display_name: "Discord OAuth2 API",
+            fields: vec![
+                // Discord's OAuth2 credential carries its own bot token:
+                // every API call except the guild-access check uses `Bot
+                // <botToken>`, not the OAuth access token (see discord.rs).
+                f("botToken", "Bot Token", true, false, json!("")),
+                f("grantType", "Grant Type", false, false, json!("authorizationCode")),
+                f("authUrl", "Authorization URL", false, false, json!("https://discord.com/api/oauth2/authorize")),
+                f("accessTokenUrl", "Access Token URL", false, false, json!("https://discord.com/api/oauth2/token")),
+                f("clientId", "Client ID", false, false, json!("")),
+                f("clientSecret", "Client Secret", true, false, json!("")),
+                f("scope", "Scope", false, false, json!("identify guilds guilds.join bot")),
+                f("url", "Base URL", false, false, json!("https://discord.com/api/v10")),
+            ],
+        },
+        CredentialType {
+            name: "discordWebhookApi",
+            display_name: "Discord Webhook",
+            fields: vec![f("webhookUri", "Webhook URL", true, true, json!(""))],
         },
     ]
 }
