@@ -114,6 +114,22 @@ pub fn all() -> Vec<CredentialType> {
             ],
         },
         CredentialType {
+            name: "mySql",
+            display_name: "MySQL",
+            fields: vec![
+                f("host", "Host", false, false, json!("localhost")),
+                f("database", "Database", false, false, json!("mysql")),
+                f("user", "User", false, false, json!("mysql")),
+                f("password", "Password", true, false, json!("")),
+                f_typed("port", "Port", false, false, json!(3306), "number"),
+                f_typed("connectTimeout", "Connect Timeout", false, false, json!(10000), "number"),
+                f_typed("ssl", "SSL", false, false, json!(false), "boolean"),
+                f("caCertificate", "CA Certificate", true, false, json!("")),
+                f("clientPrivateKey", "Client Private Key", true, false, json!("")),
+                f("clientCertificate", "Client Certificate", true, false, json!("")),
+            ],
+        },
+        CredentialType {
             name: "telegramApi",
             display_name: "Telegram API",
             fields: vec![f("accessToken", "Access Token", true, true, json!("")), f("baseUrl", "Base URL", false, false, json!("https://api.telegram.org"))],

@@ -13,6 +13,7 @@ mod html;
 mod http;
 mod jwt;
 mod merge;
+mod mysql;
 mod notion;
 mod postgres;
 mod python;
@@ -84,6 +85,9 @@ impl Default for Registry {
             r.add(n);
         }
         for n in postgres::all() {
+            r.add(n);
+        }
+        for n in mysql::all() {
             r.add(n);
         }
         for n in server_nodes::all() {
