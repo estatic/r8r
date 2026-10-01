@@ -37,7 +37,7 @@ Feature: MySQL node
       """
     And the node "Count" has parameters:
       """
-      {"operation": "executeQuery", "query": "SELECT count(*) AS cnt, (SELECT name FROM my_bdd_inj WHERE id = 1) AS stored FROM my_bdd_inj", "options": {}}
+      {"operation": "executeQuery", "query": "SELECT count(*) AS cnt, (SELECT name FROM my_bdd_inj WHERE id = 1) AS stored_val FROM my_bdd_inj", "options": {}}
       """
     And the node "Cleanup" has parameters:
       """
@@ -51,7 +51,7 @@ Feature: MySQL node
     When I execute the workflow
     Then the execution succeeds
     And the field "cnt" of item 0 from the node "Count" is "1"
-    And the field "stored" of item 0 from the node "Count" is "Robert'); DROP TABLE my_bdd_inj;--"
+    And the field "stored_val" of item 0 from the node "Count" is "Robert'); DROP TABLE my_bdd_inj;--"
 
   Scenario: executeQuery surfaces a MySQL syntax error with a clear message
     Given a workflow with nodes:
