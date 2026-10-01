@@ -136,12 +136,77 @@ async fn last_body(w: &mut R8rWorld, p: String, step: &Step) {
     assert_matches(&expected, &actual, Mode::Subset).unwrap_or_else(|e| panic!("{e}\nbody: {}", pretty(&actual)));
 }
 
+/// Gmail's `format=raw` response: wraps a doc-string MIME message (its
+/// `\n`s normalized to `\r\n`) as the base64url-encoded `raw` field,
+/// alongside `id`/`threadId`/`labelIds`/`sizeEstimate`, so scenarios can
+/// write MIME messages as readable text instead of precomputed base64url.
+#[given(regex = r#"^the mock service responds to GET "([^"]*)" with status 200 and the raw message \(id "([^"]*)", thread "([^"]*)"\):$"#)]
+async fn respond_raw_message(w: &mut R8rWorld, p: String, id: String, thread_id: String, step: &Step) {
+    use base64::Engine as _;
+    let mime = w.expand(docstring(step)).replace('\n', "\r\n");
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mime.as_bytes());
+    let body = json!({"id": id, "threadId": thread_id, "labelIds": ["INBOX"], "sizeEstimate": mime.len(), "raw": raw});
+    Mock::given(method("GET")).and(path(p.as_str())).respond_with(ResponseTemplate::new(200).set_body_json(body)).mount(mock(w).await).await;
+}
+
+/// Gmail's draft `format=raw` response: wraps a doc-string MIME message as
+/// `{"id": ..., "message": {"id": ..., "threadId": ..., "raw": ...}}`.
+#[given(regex = r#"^the mock service responds to GET "([^"]*)" with status 200 and the raw draft \(id "([^"]*)", message id "([^"]*)", thread "([^"]*)"\):$"#)]
+async fn respond_raw_draft(w: &mut R8rWorld, p: String, id: String, message_id: String, thread_id: String, step: &Step) {
+    use base64::Engine as _;
+    let mime = w.expand(docstring(step)).replace('\n', "\r\n");
+    let raw = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(mime.as_bytes());
+    let body = json!({"id": id, "message": {"id": message_id, "threadId": thread_id, "raw": raw}});
+    Mock::given(method("GET")).and(path(p.as_str())).respond_with(ResponseTemplate::new(200).set_body_json(body)).mount(mock(w).await).await;
+}
+
+/// Gmail (and other Google APIs) send MIME messages as a base64url-encoded
+/// `raw` field in the JSON body. Decodes it so scenarios can assert on
+/// headers/body text without a full MIME parser in the step definitions.
+/// Finds the `raw` field directly on the body, or nested under `message`
+/// (Gmail's drafts.create body shape is `{"message": {"raw": ...}}`).
+fn find_raw_field(body: &Value) -> Option<&str> {
+    body.get("raw").and_then(Value::as_str).or_else(|| body.get("message").and_then(|m| m.get("raw")).and_then(Value::as_str))
+}
+
+#[then(expr = "the last request to {string} has a decoded raw body containing {string}")]
+async fn last_raw_contains(w: &mut R8rWorld, p: String, needle: String) {
+    use base64::Engine as _;
+    let r = last_to(w, &p).await;
+    let body: Value = serde_json::from_slice(&r.body).unwrap_or_else(|_| panic!("body is not JSON: {}", String::from_utf8_lossy(&r.body)));
+    let raw = find_raw_field(&body).unwrap_or_else(|| panic!("no 'raw' field in body: {body}"));
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(raw).unwrap_or_else(|e| panic!("raw is not base64url: {e}"));
+    let text = String::from_utf8_lossy(&decoded).into_owned();
+    let expected = w.expand(&needle);
+    assert!(text.contains(expected.as_str()), "decoded raw doesn't contain {expected:?}:\n{text}");
+}
+
+#[then(expr = "the last request to {string} has a decoded raw body not containing {string}")]
+async fn last_raw_not_contains(w: &mut R8rWorld, p: String, needle: String) {
+    use base64::Engine as _;
+    let r = last_to(w, &p).await;
+    let body: Value = serde_json::from_slice(&r.body).unwrap_or_else(|_| panic!("body is not JSON: {}", String::from_utf8_lossy(&r.body)));
+    let raw = find_raw_field(&body).unwrap_or_else(|| panic!("no 'raw' field in body: {body}"));
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(raw).unwrap_or_else(|e| panic!("raw is not base64url: {e}"));
+    let text = String::from_utf8_lossy(&decoded).into_owned();
+    let expected = w.expand(&needle);
+    assert!(!text.contains(expected.as_str()), "decoded raw unexpectedly contains {expected:?}:\n{text}");
+}
+
 #[then(regex = r#"^the (\d+)(?:st|nd|rd|th) request to "([^"]*)" had the header "([^"]*)" equal to "([^"]*)"$"#)]
 async fn nth_header(w: &mut R8rWorld, n: usize, p: String, name: String, value: String) {
     let all = requests_to(w, &p).await;
     let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} requests to {p}", all.len()));
     let got = r.headers.get(name.as_str()).and_then(|v| v.to_str().ok()).unwrap_or("<absent>");
     assert_eq!(got, value);
+}
+
+#[then(regex = r#"^the (\d+)(?:st|nd|rd|th) request to "([^"]*)" had the query parameter "([^"]*)" equal to "([^"]*)"$"#)]
+async fn nth_query(w: &mut R8rWorld, n: usize, p: String, name: String, value: String) {
+    let all = requests_to(w, &p).await;
+    let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} requests to {p}", all.len()));
+    let got = r.url.query_pairs().find(|(k, _)| *k == name).map(|(_, v)| v.to_string());
+    assert_eq!(got.as_deref(), Some(value.as_str()), "url: {}", r.url);
 }
 
 // ---- multipart/form-data request bodies ---------------------------------

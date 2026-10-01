@@ -9,6 +9,8 @@ mod core;
 mod discord;
 mod email;
 mod files;
+mod gmail;
+mod google_auth;
 mod googlesheets;
 mod github;
 mod html;
@@ -98,6 +100,7 @@ impl Default for Registry {
         }
         r.add(Box::new(slack::Slack));
         r.add(Box::new(googlesheets::GoogleSheets));
+        r.add(Box::new(gmail::Gmail));
         r.add(Box::new(github::Github));
         r.add(Box::new(telegram::Telegram));
         r.add(Box::new(notion::Notion));

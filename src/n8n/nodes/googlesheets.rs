@@ -28,7 +28,7 @@
 //! call, and the `documentId`/`sheetName` "by URL" extraction/validation
 //! regexes are approximated.
 
-use super::check_ssrf;
+use super::google_auth::{self, GoogleAuth};
 use crate::n8n::node::{ExecCtx, NodeError, NodeResult, NodeType};
 use crate::n8n::types::{Item, NodeOutput};
 use serde_json::{json, Map, Value};
@@ -163,18 +163,9 @@ fn unsupported(resource: &str, operation: &str) -> NodeError {
 }
 
 // ---- authentication & the underlying HTTP call -----------------------------
+// (shared with the Gmail node; see `google_auth.rs`.)
 
-enum AuthKind {
-    ServiceAccount,
-    OAuth2 { cred_id: String, cred_data: Value },
-}
-
-struct Auth {
-    bearer: String,
-    sheets_base: String,
-    drive_base: String,
-    kind: AuthKind,
-}
+type Auth = GoogleAuth;
 
 fn drive_base_from(sheets_base: &str) -> String {
     if sheets_base.contains("sheets.googleapis.com") {
@@ -184,104 +175,8 @@ fn drive_base_from(sheets_base: &str) -> String {
     }
 }
 
-/// n8n's `formatPemBlock`, plus the `\n`-literal unescape n8n's
-/// `getGoogleAccessToken`/`GoogleApi.credentials` both apply first.
-fn format_pem_block(key: &str) -> String {
-    let unescaped = key.replace("\\n", "\n");
-    let trimmed = unescaped.trim();
-    if trimmed.contains("-----BEGIN") {
-        return trimmed.to_string();
-    }
-    let body: String = trimmed.chars().filter(|c| !c.is_whitespace()).collect();
-    let mut lines = vec!["-----BEGIN PRIVATE KEY-----".to_string()];
-    for chunk in body.as_bytes().chunks(64) {
-        lines.push(String::from_utf8_lossy(chunk).into_owned());
-    }
-    lines.push("-----END PRIVATE KEY-----".to_string());
-    lines.join("\n")
-}
-
-async fn service_account_token(ctx: &ExecCtx<'_>) -> NodeResult<Auth> {
-    let (_, cred) = ctx.credentials("googleApi").await?;
-    let email = cred["email"].as_str().unwrap_or("").trim().to_string();
-    let private_key_raw = cred["privateKey"].as_str().unwrap_or("").to_string();
-    if email.is_empty() || private_key_raw.is_empty() {
-        return Err(NodeError::new("Google Service Account credentials are not set")
-            .describe("Add a Service Account Email and Private Key to the Google Service Account API credential."));
-    }
-    let delegated = cred["delegatedEmail"].as_str().filter(|s| !s.is_empty()).unwrap_or(&email).to_string();
-    let token_url = cred["tokenUrl"].as_str().filter(|s| !s.is_empty()).unwrap_or("https://oauth2.googleapis.com/token").to_string();
-    let sheets_base = cred["url"].as_str().filter(|s| !s.is_empty()).unwrap_or("https://sheets.googleapis.com").trim_end_matches('/').to_string();
-
-    let pem = format_pem_block(&private_key_raw);
-    let key = jsonwebtoken::EncodingKey::from_rsa_pem(pem.as_bytes()).map_err(|e| NodeError::new(format!("The private key could not be parsed: {e}")))?;
-    let now = chrono::Utc::now().timestamp();
-    let claims = json!({"iss": email, "sub": delegated, "scope": SHEETS_SCOPES, "aud": token_url, "iat": now, "exp": now + 3600});
-    let header = jsonwebtoken::Header::new(jsonwebtoken::Algorithm::RS256);
-    let assertion = jsonwebtoken::encode(&header, &claims, &key).map_err(|e| NodeError::new(format!("Could not sign the service-account JWT: {e}")))?;
-
-    let url = reqwest::Url::parse(&token_url).map_err(|_| NodeError::new(format!("Invalid token URL: {token_url}")))?;
-    check_ssrf(&url, ctx.config()).await.map_err(NodeError::new)?;
-    let form = [("grant_type", "urn:ietf:params:oauth:grant-type:jwt-bearer"), ("assertion", assertion.as_str())];
-    let resp = ctx.services.http.post(url).form(&form).send().await.map_err(|e| NodeError::new(format!("Could not get a Google OAuth2 access token: {e}")))?;
-    let status = resp.status().as_u16();
-    let body: Value = resp.json().await.unwrap_or(Value::Null);
-    let token = body["access_token"]
-        .as_str()
-        .filter(|_| status < 400)
-        .ok_or_else(|| NodeError::api("Could not get a Google OAuth2 access token", Some(status), Some(body.to_string())))?
-        .to_string();
-    Ok(Auth { bearer: token, drive_base: drive_base_from(&sheets_base), sheets_base, kind: AuthKind::ServiceAccount })
-}
-
-async fn oauth2_token(ctx: &ExecCtx<'_>) -> NodeResult<Auth> {
-    let (cred_id, cred) = ctx.credentials("googleSheetsOAuth2Api").await?;
-    let token = cred
-        .pointer("/oauthTokenData/access_token")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| NodeError::new("The Google Sheets OAuth2 credential is not connected").describe("Complete the OAuth2 authorization for this credential before using it."))?
-        .to_string();
-    let sheets_base = cred["url"].as_str().filter(|s| !s.is_empty()).unwrap_or("https://sheets.googleapis.com").trim_end_matches('/').to_string();
-    Ok(Auth { bearer: token, drive_base: drive_base_from(&sheets_base), sheets_base, kind: AuthKind::OAuth2 { cred_id, cred_data: cred } })
-}
-
 async fn resolve_auth(ctx: &ExecCtx<'_>) -> NodeResult<Auth> {
-    let method = ctx.param_str("authentication", 0, "serviceAccount")?;
-    if method == "serviceAccount" {
-        service_account_token(ctx).await
-    } else {
-        oauth2_token(ctx).await
-    }
-}
-
-async fn refresh_oauth2(ctx: &ExecCtx<'_>, auth: &mut Auth) -> NodeResult<()> {
-    let AuthKind::OAuth2 { cred_id, cred_data } = &mut auth.kind else { return Ok(()) };
-    let refresh_token = cred_data
-        .pointer("/oauthTokenData/refresh_token")
-        .and_then(Value::as_str)
-        .map(String::from)
-        .ok_or_else(|| NodeError::new("The Google Sheets OAuth2 credential has no refresh token"))?;
-    let token_url = cred_data["accessTokenUrl"].as_str().filter(|s| !s.is_empty()).unwrap_or("https://oauth2.googleapis.com/token").to_string();
-    let client_id = cred_data["clientId"].as_str().unwrap_or("").to_string();
-    let client_secret = cred_data["clientSecret"].as_str().unwrap_or("").to_string();
-    let url = reqwest::Url::parse(&token_url).map_err(|_| NodeError::new(format!("Invalid access token URL: {token_url}")))?;
-    check_ssrf(&url, ctx.config()).await.map_err(NodeError::new)?;
-    let form = [("grant_type", "refresh_token"), ("refresh_token", refresh_token.as_str()), ("client_id", client_id.as_str()), ("client_secret", client_secret.as_str())];
-    let resp = ctx.services.http.post(url).form(&form).send().await.map_err(|e| NodeError::new(format!("Could not refresh the Google OAuth2 access token: {e}")))?;
-    let status = resp.status().as_u16();
-    let body: Value = resp.json().await.unwrap_or(Value::Null);
-    let token = body["access_token"]
-        .as_str()
-        .filter(|_| status < 400)
-        .ok_or_else(|| NodeError::api("Could not refresh the Google OAuth2 access token", Some(status), Some(body.to_string())))?
-        .to_string();
-    auth.bearer = token;
-    cred_data["oauthTokenData"] = body;
-    if let Some(store) = &ctx.services.store {
-        let _ = store.update_credential_data(cred_id, cred_data).await;
-    }
-    Ok(())
+    google_auth::resolve_auth(ctx, "googleSheetsOAuth2Api", "Google Sheets", SHEETS_SCOPES, "https://sheets.googleapis.com", "serviceAccount").await
 }
 
 /// Maps a Google API `{error: {message, ...}}` error payload the way n8n's
@@ -298,41 +193,13 @@ fn google_error(status: u16, body: &Value) -> NodeError {
 }
 
 async fn api_request(ctx: &ExecCtx<'_>, auth: &mut Auth, method: &str, url_str: &str, body: Option<Value>, query: &[(String, String)]) -> NodeResult<Value> {
-    let mut refreshed = false;
-    loop {
-        let mut url = reqwest::Url::parse(url_str).map_err(|_| NodeError::new(format!("Invalid Google Sheets API URL: {url_str}")))?;
-        check_ssrf(&url, ctx.config()).await.map_err(NodeError::new)?;
-        if !query.is_empty() {
-            let mut pairs = url.query_pairs_mut();
-            for (k, v) in query {
-                pairs.append_pair(k, v);
-            }
-        }
-        let m = reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| NodeError::new(format!("Invalid HTTP method \"{method}\"")))?;
-        let mut req = ctx.services.http.request(m, url).bearer_auth(&auth.bearer);
-        if let Some(b) = &body {
-            req = req.json(b);
-        }
-        let resp = req.send().await.map_err(|e| NodeError::api(format!("The request to Google Sheets failed: {e}"), None, None))?;
-        let status = resp.status().as_u16();
-        if status == 401 && !refreshed && matches!(auth.kind, AuthKind::OAuth2 { .. }) {
-            refreshed = true;
-            refresh_oauth2(ctx, auth).await?;
-            continue;
-        }
-        let text = resp.text().await.unwrap_or_default();
-        let value: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
-        if status >= 400 {
-            return Err(google_error(status, &value));
-        }
-        return Ok(value);
-    }
+    google_auth::api_request(ctx, auth, method, url_str, body, query, google_error).await
 }
 
 // ---- Sheets/Drive API calls (n8n's `helpers/GoogleSheet.js`) ---------------
 
 async fn get_data(ctx: &ExecCtx<'_>, auth: &mut Auth, ssid: &str, range: &str, value_render_mode: &str, date_time_render_option: Option<&str>) -> NodeResult<Vec<Vec<Value>>> {
-    let url = format!("{}/v4/spreadsheets/{}/values/{}", auth.sheets_base, ssid, encode_range(range));
+    let url = format!("{}/v4/spreadsheets/{}/values/{}", auth.base, ssid, encode_range(range));
     let query = vec![
         ("valueRenderOption".to_string(), value_render_mode.to_string()),
         ("dateTimeRenderOption".to_string(), date_time_render_option.unwrap_or("FORMATTED_STRING").to_string()),
@@ -343,12 +210,12 @@ async fn get_data(ctx: &ExecCtx<'_>, auth: &mut Auth, ssid: &str, range: &str, v
 }
 
 async fn clear_data(ctx: &ExecCtx<'_>, auth: &mut Auth, ssid: &str, range: &str) -> NodeResult<Value> {
-    let url = format!("{}/v4/spreadsheets/{}/values/{}:clear", auth.sheets_base, ssid, encode_range(range));
+    let url = format!("{}/v4/spreadsheets/{}/values/{}:clear", auth.base, ssid, encode_range(range));
     api_request(ctx, auth, "POST", &url, Some(json!({"spreadsheetId": ssid, "range": range})), &[]).await
 }
 
 async fn spreadsheet_get_sheets(ctx: &ExecCtx<'_>, auth: &mut Auth, ssid: &str) -> NodeResult<Vec<Value>> {
-    let url = format!("{}/v4/spreadsheets/{}", auth.sheets_base, ssid);
+    let url = format!("{}/v4/spreadsheets/{}", auth.base, ssid);
     let resp = api_request(ctx, auth, "GET", &url, None, &[("fields".to_string(), "sheets.properties".to_string())]).await?;
     Ok(resp.get("sheets").and_then(Value::as_array).cloned().unwrap_or_default())
 }
@@ -370,12 +237,12 @@ async fn spreadsheet_get_sheet(ctx: &ExecCtx<'_>, auth: &mut Auth, ssid: &str, m
 }
 
 async fn spreadsheet_batch_update(ctx: &ExecCtx<'_>, auth: &mut Auth, ssid: &str, requests: Value) -> NodeResult<Value> {
-    let url = format!("{}/v4/spreadsheets/{}:batchUpdate", auth.sheets_base, ssid);
+    let url = format!("{}/v4/spreadsheets/{}:batchUpdate", auth.base, ssid);
     api_request(ctx, auth, "POST", &url, Some(json!({"requests": requests})), &[]).await
 }
 
 async fn batch_update_values(ctx: &ExecCtx<'_>, auth: &mut Auth, ssid: &str, data: Vec<Value>, value_input_mode: &str) -> NodeResult<Value> {
-    let url = format!("{}/v4/spreadsheets/{}/values:batchUpdate", auth.sheets_base, ssid);
+    let url = format!("{}/v4/spreadsheets/{}/values:batchUpdate", auth.base, ssid);
     api_request(ctx, auth, "POST", &url, Some(json!({"data": data, "valueInputOption": value_input_mode})), &[]).await
 }
 
@@ -387,7 +254,7 @@ async fn update_rows(ctx: &ExecCtx<'_>, auth: &mut Auth, ssid: &str, sheet_name:
         _ => row,
     };
     let range = format!("{name}!{row}:{end}");
-    let url_base = format!("{}/v4/spreadsheets/{}/values/{}", auth.sheets_base, ssid, encode_range(&range));
+    let url_base = format!("{}/v4/spreadsheets/{}/values/{}", auth.base, ssid, encode_range(&range));
     let body = json!({"range": range, "values": data});
     let query = [("valueInputOption".to_string(), value_input_mode.to_string())];
     if use_append {
@@ -1018,7 +885,7 @@ async fn op_spreadsheet_create(ctx: &ExecCtx<'_>, auth: &mut Auth, items: &[Item
         }
         let sheets: Vec<Value> = sheets_ui.as_array().cloned().unwrap_or_default().into_iter().map(|s| json!({"properties": s})).collect();
         let body = json!({"properties": Value::Object(properties), "sheets": sheets});
-        let url = format!("{}/v4/spreadsheets", auth.sheets_base);
+        let url = format!("{}/v4/spreadsheets", auth.base);
         let resp = api_request(ctx, auth, "POST", &url, Some(body), &[]).await?;
         out.push(Item::from_value(resp).paired(i));
     }
@@ -1032,7 +899,7 @@ async fn op_spreadsheet_delete(ctx: &ExecCtx<'_>, auth: &mut Auth, items: &[Item
         let mode = locator_mode(&doc);
         let value = locator_str(&doc).unwrap_or_default();
         let id = get_spreadsheet_id(&mode, &value)?;
-        let url = format!("{}/drive/v3/files/{}", auth.drive_base, id);
+        let url = format!("{}/drive/v3/files/{}", drive_base_from(&auth.base), id);
         api_request(ctx, auth, "DELETE", &url, None, &[]).await?;
         let mut m = Map::new();
         m.insert("success".into(), json!(true));
