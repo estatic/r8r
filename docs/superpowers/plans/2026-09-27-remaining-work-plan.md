@@ -87,7 +87,7 @@ and on n8n; `codex.r8r.native = false` removed.
 | 1.13 | RabbitMQ, Kafka, MQTT | incl. their trigger variants (leader-only, Phase 4.1) |
 | 1.14 | Gmail, Google Drive, Notion ✅, Airtable ✅, GitHub ✅, Telegram ✅, Discord ✅ | one task each; GitHub: file/issue/release/repository/review/user/organization (pullRequest, workflow, GitHub App auth out of scope) |
 | 1.15 | Email Trigger (IMAP), FTP/SFTP, SSH | |
-| 1.16 | OpenAI (non-chat) | |
+| 1.16 ✅ | OpenAI (non-chat) | text (response/message/classify), image (generate/analyze), audio (generate/transcribe/translate), file (upload/list/deleteFile); not yet: assistant, conversation, video, built-in/connected tools |
 
 **Exit:** all 22 green on r8r and n8n; full BDD suite green on SQLite and
 PostgreSQL.
