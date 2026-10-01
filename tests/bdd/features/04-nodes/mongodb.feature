@@ -36,6 +36,19 @@ Feature: MongoDB node
     And the field "age" of item 0 from the node "Insert" is 30
     And the field "id" of item 0 from the node "Insert" is "$nonempty"
 
+    Given a workflow named "MdbInsertCleanup" with nodes:
+      | name    | type          | typeVersion |
+      | Start   | manualTrigger |             |
+      | Cleanup | mongoDb       | 1.4         |
+    And the node "Cleanup" has parameters:
+      """
+      {"resource": "document", "operation": "delete", "collection": "mdb_bdd_insert", "query": "{}", "queryParameters": "[]"}
+      """
+    And the node "Cleanup" uses the "mongoDb" credential "Local MongoDB"
+    And the connections "Start -> Cleanup"
+    When I execute the workflow "MdbInsertCleanup"
+    Then the execution succeeds
+
   Scenario: Find returns the documents matching the query
     Given a workflow with nodes:
       | name   | type          | typeVersion |
@@ -63,6 +76,19 @@ Feature: MongoDB node
     And the field "name" of item 0 from the node "Find" is "Bob"
     And the field "age" of item 0 from the node "Find" is 25
     And the field "_id" of item 0 from the node "Find" is "$nonempty"
+
+    Given a workflow named "MdbFindBasicCleanup" with nodes:
+      | name    | type          | typeVersion |
+      | Start   | manualTrigger |             |
+      | Cleanup | mongoDb       | 1.4         |
+    And the node "Cleanup" has parameters:
+      """
+      {"resource": "document", "operation": "delete", "collection": "mdb_bdd_find", "query": "{}", "queryParameters": "[]"}
+      """
+    And the node "Cleanup" uses the "mongoDb" credential "Local MongoDB"
+    And the connections "Start -> Cleanup"
+    When I execute the workflow "MdbFindBasicCleanup"
+    Then the execution succeeds
 
   Scenario: Find by ObjectId via a plain _id string
     Given a workflow with nodes:
@@ -482,7 +508,7 @@ Feature: MongoDB node
     When I execute the workflow "MdbDatesCleanup"
     Then the execution succeeds
 
-  Scenario: Insert with useDotNotation builds a nested document from a dotted field name
+  Scenario: Insert with useDotNotation picks nested subfields via a dotted field name
     Given a workflow with nodes:
       | name   | type          | typeVersion |
       | Start  | manualTrigger |             |
@@ -490,7 +516,7 @@ Feature: MongoDB node
       | Find   | mongoDb       | 1.4         |
     And the trigger outputs the items:
       """
-      [{"name": "Frank", "address.city": "Berlin", "address.zip": "10115"}]
+      [{"name": "Frank", "address": {"city": "Berlin", "zip": "10115", "country": "DE"}}]
       """
     And the node "Insert" has parameters:
       """
@@ -507,6 +533,7 @@ Feature: MongoDB node
     Then the execution succeeds
     And the field "address.city" of item 0 from the node "Find" is "Berlin"
     And the field "address.zip" of item 0 from the node "Find" is "10115"
+    And the field "address.country" of item 0 from the node "Find" is null
 
     Given a workflow named "MdbDotCleanup" with nodes:
       | name    | type          | typeVersion |
