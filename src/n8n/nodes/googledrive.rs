@@ -41,7 +41,6 @@
 //! through); service-account tokens are fetched once per node execution
 //! rather than once per HTTP call.
 
-use super::check_ssrf;
 use super::google_auth::{self, GoogleAuth};
 use crate::n8n::node::{ExecCtx, NodeError, NodeResult, NodeType};
 use crate::n8n::types::{Item, NodeOutput};
