@@ -136,6 +136,33 @@ async fn last_body(w: &mut R8rWorld, p: String, step: &Step) {
     assert_matches(&expected, &actual, Mode::Subset).unwrap_or_else(|e| panic!("{e}\nbody: {}", pretty(&actual)));
 }
 
+/// Gmail (and other Google APIs) send MIME messages as a base64url-encoded
+/// `raw` field in the JSON body. Decodes it so scenarios can assert on
+/// headers/body text without a full MIME parser in the step definitions.
+#[then(expr = "the last request to {string} has a decoded raw body containing {string}")]
+async fn last_raw_contains(w: &mut R8rWorld, p: String, needle: String) {
+    use base64::Engine as _;
+    let r = last_to(w, &p).await;
+    let body: Value = serde_json::from_slice(&r.body).unwrap_or_else(|_| panic!("body is not JSON: {}", String::from_utf8_lossy(&r.body)));
+    let raw = body.get("raw").and_then(Value::as_str).unwrap_or_else(|| panic!("no 'raw' field in body: {body}"));
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(raw).unwrap_or_else(|e| panic!("raw is not base64url: {e}"));
+    let text = String::from_utf8_lossy(&decoded).into_owned();
+    let expected = w.expand(&needle);
+    assert!(text.contains(expected.as_str()), "decoded raw doesn't contain {expected:?}:\n{text}");
+}
+
+#[then(expr = "the last request to {string} has a decoded raw body not containing {string}")]
+async fn last_raw_not_contains(w: &mut R8rWorld, p: String, needle: String) {
+    use base64::Engine as _;
+    let r = last_to(w, &p).await;
+    let body: Value = serde_json::from_slice(&r.body).unwrap_or_else(|_| panic!("body is not JSON: {}", String::from_utf8_lossy(&r.body)));
+    let raw = body.get("raw").and_then(Value::as_str).unwrap_or_else(|| panic!("no 'raw' field in body: {body}"));
+    let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(raw).unwrap_or_else(|e| panic!("raw is not base64url: {e}"));
+    let text = String::from_utf8_lossy(&decoded).into_owned();
+    let expected = w.expand(&needle);
+    assert!(!text.contains(expected.as_str()), "decoded raw unexpectedly contains {expected:?}:\n{text}");
+}
+
 #[then(regex = r#"^the (\d+)(?:st|nd|rd|th) request to "([^"]*)" had the header "([^"]*)" equal to "([^"]*)"$"#)]
 async fn nth_header(w: &mut R8rWorld, n: usize, p: String, name: String, value: String) {
     let all = requests_to(w, &p).await;
