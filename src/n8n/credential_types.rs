@@ -92,7 +92,14 @@ pub fn all() -> Vec<CredentialType> {
         CredentialType {
             name: "openAiApi",
             display_name: "OpenAi",
-            fields: vec![f("apiKey", "API Key", true, true, json!("")), f("organizationId", "Organization ID", false, false, json!("")), f("url", "Base URL", false, false, json!("https://api.openai.com/v1"))],
+            fields: vec![
+                f("apiKey", "API Key", true, true, json!("")),
+                f("organizationId", "Organization ID", false, false, json!("")),
+                f("url", "Base URL", false, false, json!("https://api.openai.com/v1")),
+                f_typed("header", "Add Custom Header", false, false, json!(false), "boolean"),
+                f("headerName", "Header Name", false, false, json!("")),
+                f("headerValue", "Header Value", true, false, json!("")),
+            ],
         },
         CredentialType {
             name: "anthropicApi",

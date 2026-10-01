@@ -29,6 +29,7 @@ pub fn default_type_version(node_type: &str) -> Value {
         "formTrigger" => json!(2.2),
         "agent" => json!(2),
         "lmChatOpenAi" => json!(1.2),
+        "openAi" => json!(2.3),
         "chainLlm" => json!(1.5),
         "memoryBufferWindow" => json!(1.3),
         "emailSend" => json!(2.1),
