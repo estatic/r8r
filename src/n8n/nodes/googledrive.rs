@@ -385,8 +385,7 @@ async fn op_file_create_from_text(ctx: &ExecCtx<'_>, auth: &mut GoogleAuth, i: u
     let mut qs = default_file_folder_qs();
     set_update_common_params(&mut qs, &options);
 
-    let response_id;
-    if convert {
+    let response_id = if convert {
         let document = drive_request(ctx, auth, "POST", "/drive/v3/files", Some(Value::Object(body_parameters)), &qs).await?;
         let doc_id = document.get("id").and_then(Value::as_str).unwrap_or("").to_string();
         let content = ctx.param_str("content", i, "")?;
@@ -394,7 +393,7 @@ async fn op_file_create_from_text(ctx: &ExecCtx<'_>, auth: &mut GoogleAuth, i: u
         let docs_base = if auth.base.contains("googleapis.com") { "https://docs.googleapis.com".to_string() } else { auth.base.clone() };
         let url = format!("{docs_base}/v1/documents/{doc_id}:batchUpdate");
         let update_resp = google_auth::api_request(ctx, auth, "POST", &url, Some(body), &[], drive_error).await?;
-        response_id = update_resp.get("documentId").cloned().unwrap_or(json!(doc_id));
+        update_resp.get("documentId").cloned().unwrap_or(json!(doc_id))
     } else {
         let content = ctx.param_str("content", i, "")?.into_bytes();
         let metadata_json = serde_json::to_vec(&Value::Object(metadata)).unwrap_or_default();
@@ -406,8 +405,8 @@ async fn op_file_create_from_text(ctx: &ExecCtx<'_>, auth: &mut GoogleAuth, i: u
         qs.insert("addParents".into(), json!(set_parent_folder(&folder_id, &drive_id)));
         body_parameters.remove("parents");
         let response_data = drive_request(ctx, auth, "PATCH", &format!("/drive/v3/files/{upload_id}"), Some(Value::Object(body_parameters)), &qs).await?;
-        response_id = response_data.get("id").cloned().unwrap_or(json!(upload_id));
-    }
+        response_data.get("id").cloned().unwrap_or(json!(upload_id))
+    };
     Ok(vec![Item::from_value(json!({"id": response_id}))])
 }
 
