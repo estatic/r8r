@@ -237,6 +237,22 @@ async fn trigger_item_binary_multiline(w: &mut R8rWorld, index: usize, property:
     w.wf().set_item_binary(&first, index, &property, entry);
 }
 
+/// Same as `the trigger item {int} has the binary property ...`, but the
+/// binary entry has no `fileName` key at all (unlike real upstream nodes,
+/// which normally always set one) -- for exercising nodes (like Telegram's
+/// binary-data sends) that require an explicit File Name additional field
+/// when the binary data itself carries none.
+#[given(expr = "the trigger item {int} has the binary property {string} with content {string} and mime type {string} and no file name")]
+async fn trigger_item_binary_no_filename(w: &mut R8rWorld, index: usize, property: String, content: String, mime: String) {
+    use base64::Engine as _;
+    let entry = json!({
+        "data": base64::engine::general_purpose::STANDARD.encode(content.as_bytes()),
+        "mimeType": mime,
+    });
+    let first = w.wf().first_node_name();
+    w.wf().set_item_binary(&first, index, &property, entry);
+}
+
 #[given(expr = "the workflow has no {string} setting")]
 async fn remove_setting(w: &mut R8rWorld, key: String) {
     w.wf().settings.remove(&key);

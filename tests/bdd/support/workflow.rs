@@ -36,6 +36,8 @@ pub fn default_type_version(node_type: &str) -> Value {
         "googleSheets" => json!(4.5),
         "github" => json!(1.1),
         "mySql" => json!(2.5),
+        "telegram" => json!(1.2),
+        "notion" => json!(2.2),
         _ => json!(1),
     }
 }
