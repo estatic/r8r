@@ -284,6 +284,19 @@ async fn last_multipart_field(w: &mut R8rWorld, p: String, name: String, value: 
     );
 }
 
+/// Like `had a JSON body matching:`, but for one `multipart/form-data` (or
+/// `multipart/related`) field's decoded bytes -- used for Google Drive's
+/// upload/createFromText `metadata` part, which is itself a JSON document
+/// rather than the whole request body.
+#[then(expr = "the last request to {string} had the multipart field {string} with a JSON body matching:")]
+async fn last_multipart_field_json(w: &mut R8rWorld, p: String, name: String, step: &Step) {
+    let parts = last_multipart_parts(w, &p).await;
+    let got = parts.iter().find(|(n, _, _)| *n == name).map(|(_, _, b)| b.clone()).unwrap_or_else(|| panic!("no multipart field {name:?} in request to {p}"));
+    let actual: Value = serde_json::from_slice(&got).unwrap_or_else(|_| panic!("multipart field {name:?} is not JSON: {}", String::from_utf8_lossy(&got)));
+    let expected = parse_strict(&w.expand(docstring(step)), "expected multipart field body");
+    assert_matches(&expected, &actual, Mode::Subset).unwrap_or_else(|e| panic!("{e}\nbody: {}", pretty(&actual)));
+}
+
 #[then(expr = "the last request to {string} had a multipart file field {string} with filename {string}")]
 async fn last_multipart_file(w: &mut R8rWorld, p: String, name: String, filename: String) {
     let parts = last_multipart_parts(w, &p).await;

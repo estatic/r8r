@@ -237,6 +237,30 @@ pub fn all() -> Vec<CredentialType> {
             ],
         },
         CredentialType {
+            name: "googleDriveOAuth2Api",
+            display_name: "Google Drive OAuth2 API",
+            fields: vec![
+                f("grantType", "Grant Type", false, false, json!("authorizationCode")),
+                f("authUrl", "Authorization URL", false, false, json!("https://accounts.google.com/o/oauth2/v2/auth")),
+                f("accessTokenUrl", "Access Token URL", false, false, json!("https://oauth2.googleapis.com/token")),
+                f("clientId", "Client ID", false, false, json!("")),
+                f("clientSecret", "Client Secret", true, false, json!("")),
+                f(
+                    "scope",
+                    "Scope",
+                    false,
+                    false,
+                    json!("https://www.googleapis.com/auth/drive https://www.googleapis.com/auth/drive.appdata https://www.googleapis.com/auth/drive.photos.readonly"),
+                ),
+                f("authentication", "Authentication", false, false, json!("body")),
+                // Drive API base URL; overridden in tests so wiremock can
+                // stand in for www.googleapis.com and its
+                // /upload/drive/v3 endpoint (mirrors gmailOAuth2's `url`
+                // field).
+                f("url", "Base URL", false, false, json!("https://www.googleapis.com")),
+            ],
+        },
+        CredentialType {
             name: "notionApi",
             display_name: "Notion API",
             fields: vec![

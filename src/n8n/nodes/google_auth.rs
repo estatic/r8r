@@ -185,3 +185,49 @@ pub async fn api_request(
         return Ok(value);
     }
 }
+
+/// Like `api_request`, but for raw-byte bodies/responses (multipart file
+/// uploads, binary file downloads), which don't fit `api_request`'s
+/// JSON-only `req.json(b)` / JSON-parsed-response shape. Same bearer auth +
+/// 401-refresh-retry behavior; `map_err` only fires on `>=400` (the
+/// response body is parsed as JSON best-effort for the error payload, same
+/// as `api_request`).
+pub async fn api_request_raw(
+    ctx: &ExecCtx<'_>,
+    auth: &mut GoogleAuth,
+    method: &str,
+    url_str: &str,
+    body: Option<(Vec<u8>, String)>,
+    query: &[(String, String)],
+    map_err: impl Fn(u16, &Value) -> NodeError,
+) -> NodeResult<Vec<u8>> {
+    let mut refreshed = false;
+    loop {
+        let mut url = reqwest::Url::parse(url_str).map_err(|_| NodeError::new(format!("Invalid Google API URL: {url_str}")))?;
+        check_ssrf(&url, ctx.config()).await.map_err(NodeError::new)?;
+        if !query.is_empty() {
+            let mut pairs = url.query_pairs_mut();
+            for (k, v) in query {
+                pairs.append_pair(k, v);
+            }
+        }
+        let m = reqwest::Method::from_bytes(method.as_bytes()).map_err(|_| NodeError::new(format!("Invalid HTTP method \"{method}\"")))?;
+        let mut req = ctx.services.http.request(m, url).bearer_auth(&auth.bearer);
+        if let Some((bytes, ctype)) = &body {
+            req = req.header(reqwest::header::CONTENT_TYPE, ctype.as_str()).body(bytes.clone());
+        }
+        let resp = req.send().await.map_err(|e| NodeError::api(format!("The request to Google failed: {e}"), None, None))?;
+        let status = resp.status().as_u16();
+        if status == 401 && !refreshed && matches!(auth.kind, AuthKind::OAuth2 { .. }) {
+            refreshed = true;
+            refresh_oauth2(ctx, auth).await?;
+            continue;
+        }
+        let bytes = resp.bytes().await.unwrap_or_default().to_vec();
+        if status >= 400 {
+            let value: Value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+            return Err(map_err(status, &value));
+        }
+        return Ok(bytes);
+    }
+}
