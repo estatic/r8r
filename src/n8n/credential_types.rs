@@ -185,6 +185,31 @@ pub fn all() -> Vec<CredentialType> {
             ],
         },
         CredentialType {
+            name: "airtableTokenApi",
+            display_name: "Airtable Personal Access Token API",
+            fields: vec![
+                f("accessToken", "Access Token", true, true, json!("")),
+                // Airtable's API base URL; overridden in tests so wiremock
+                // can stand in for api.airtable.com (mirrors slackApi's
+                // `url` field).
+                f("url", "Base URL", false, false, json!("https://api.airtable.com/v0")),
+            ],
+        },
+        CredentialType {
+            name: "airtableOAuth2Api",
+            display_name: "Airtable OAuth2 API",
+            fields: vec![
+                f("grantType", "Grant Type", false, false, json!("pkce")),
+                f("authUrl", "Authorization URL", false, false, json!("https://airtable.com/oauth2/v1/authorize")),
+                f("accessTokenUrl", "Access Token URL", false, false, json!("https://airtable.com/oauth2/v1/token")),
+                f("clientId", "Client ID", false, false, json!("")),
+                f("clientSecret", "Client Secret", true, false, json!("")),
+                f("scope", "Scope", false, false, json!("schema.bases:read data.records:read data.records:write")),
+                f("authentication", "Authentication", false, false, json!("header")),
+                f("url", "Base URL", false, false, json!("https://api.airtable.com/v0")),
+            ],
+        },
+        CredentialType {
             name: "githubApi",
             display_name: "GitHub API",
             fields: vec![

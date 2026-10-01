@@ -1,6 +1,7 @@
 //! Native node implementations (spec §6.6), keyed by n8n type name.
 
 mod ai;
+mod airtable;
 mod code;
 mod compression;
 mod conditions;
@@ -94,6 +95,7 @@ impl Default for Registry {
         r.add(Box::new(github::Github));
         r.add(Box::new(telegram::Telegram));
         r.add(Box::new(notion::Notion));
+        r.add(Box::new(airtable::Airtable));
         for n in files::all() {
             r.add(n);
         }

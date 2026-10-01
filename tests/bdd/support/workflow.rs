@@ -37,6 +37,7 @@ pub fn default_type_version(node_type: &str) -> Value {
         "github" => json!(1.1),
         "telegram" => json!(1.2),
         "notion" => json!(2.2),
+        "airtable" => json!(2.2),
         _ => json!(1),
     }
 }
