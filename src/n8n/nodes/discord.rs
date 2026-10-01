@@ -527,6 +527,7 @@ impl Discord {
         Ok(Value::Array(response))
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn channel(&self, ctx: &ExecCtx<'_>, auth: &Auth, operation: &str, guild_id: &str, user_guilds: &[Value], is_oauth2: bool, i: usize) -> NodeResult<Value> {
         match operation {
             "create" => {
@@ -590,6 +591,7 @@ impl Discord {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn message_send(&self, ctx: &ExecCtx<'_>, auth: &Auth, guild_id: &str, user_guilds: &[Value], is_oauth2: bool, i: usize, item: &Item) -> NodeResult<Value> {
         let content = ctx.param_str("content", i, "")?;
         let options = prepare_options(ctx.param("options", i)?.as_object().cloned().unwrap_or_default(), guild_id);
@@ -643,6 +645,7 @@ impl Discord {
         discord_request(ctx, auth, i, "POST", &format!("/channels/{channel_id}/messages"), Some(Value::Object(body)), &[]).await
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn message(&self, ctx: &ExecCtx<'_>, auth: &Auth, operation: &str, guild_id: &str, user_guilds: &[Value], is_oauth2: bool, i: usize, item: &Item) -> NodeResult<Value> {
         match operation {
             "send" => self.message_send(ctx, auth, guild_id, user_guilds, is_oauth2, i, item).await,
@@ -740,6 +743,7 @@ impl Discord {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     async fn run_item(&self, ctx: &ExecCtx<'_>, auth: &Auth, resource: &str, operation: &str, guild_id: &str, user_guilds: &[Value], is_oauth2: bool, i: usize, item: &Item) -> NodeResult<Vec<Item>> {
         let value = match resource {
             "channel" => self.channel(ctx, auth, operation, guild_id, user_guilds, is_oauth2, i).await?,
