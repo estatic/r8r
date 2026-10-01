@@ -163,12 +163,18 @@ async fn respond_raw_draft(w: &mut R8rWorld, p: String, id: String, message_id: 
 /// Gmail (and other Google APIs) send MIME messages as a base64url-encoded
 /// `raw` field in the JSON body. Decodes it so scenarios can assert on
 /// headers/body text without a full MIME parser in the step definitions.
+/// Finds the `raw` field directly on the body, or nested under `message`
+/// (Gmail's drafts.create body shape is `{"message": {"raw": ...}}`).
+fn find_raw_field(body: &Value) -> Option<&str> {
+    body.get("raw").and_then(Value::as_str).or_else(|| body.get("message").and_then(|m| m.get("raw")).and_then(Value::as_str))
+}
+
 #[then(expr = "the last request to {string} has a decoded raw body containing {string}")]
 async fn last_raw_contains(w: &mut R8rWorld, p: String, needle: String) {
     use base64::Engine as _;
     let r = last_to(w, &p).await;
     let body: Value = serde_json::from_slice(&r.body).unwrap_or_else(|_| panic!("body is not JSON: {}", String::from_utf8_lossy(&r.body)));
-    let raw = body.get("raw").and_then(Value::as_str).unwrap_or_else(|| panic!("no 'raw' field in body: {body}"));
+    let raw = find_raw_field(&body).unwrap_or_else(|| panic!("no 'raw' field in body: {body}"));
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(raw).unwrap_or_else(|e| panic!("raw is not base64url: {e}"));
     let text = String::from_utf8_lossy(&decoded).into_owned();
     let expected = w.expand(&needle);
@@ -180,7 +186,7 @@ async fn last_raw_not_contains(w: &mut R8rWorld, p: String, needle: String) {
     use base64::Engine as _;
     let r = last_to(w, &p).await;
     let body: Value = serde_json::from_slice(&r.body).unwrap_or_else(|_| panic!("body is not JSON: {}", String::from_utf8_lossy(&r.body)));
-    let raw = body.get("raw").and_then(Value::as_str).unwrap_or_else(|| panic!("no 'raw' field in body: {body}"));
+    let raw = find_raw_field(&body).unwrap_or_else(|| panic!("no 'raw' field in body: {body}"));
     let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD.decode(raw).unwrap_or_else(|e| panic!("raw is not base64url: {e}"));
     let text = String::from_utf8_lossy(&decoded).into_owned();
     let expected = w.expand(&needle);
@@ -193,6 +199,14 @@ async fn nth_header(w: &mut R8rWorld, n: usize, p: String, name: String, value: 
     let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} requests to {p}", all.len()));
     let got = r.headers.get(name.as_str()).and_then(|v| v.to_str().ok()).unwrap_or("<absent>");
     assert_eq!(got, value);
+}
+
+#[then(regex = r#"^the (\d+)(?:st|nd|rd|th) request to "([^"]*)" had the query parameter "([^"]*)" equal to "([^"]*)"$"#)]
+async fn nth_query(w: &mut R8rWorld, n: usize, p: String, name: String, value: String) {
+    let all = requests_to(w, &p).await;
+    let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} requests to {p}", all.len()));
+    let got = r.url.query_pairs().find(|(k, _)| *k == name).map(|(_, v)| v.to_string());
+    assert_eq!(got.as_deref(), Some(value.as_str()), "url: {}", r.url);
 }
 
 // ---- multipart/form-data request bodies ---------------------------------

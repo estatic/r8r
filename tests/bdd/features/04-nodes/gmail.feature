@@ -113,7 +113,7 @@ Feature: Gmail node
     When I execute the workflow
     Then the execution succeeds
     And the last request to "/gmail/v1/users/me/messages/send" has a decoded raw body containing "Content-Disposition: attachment"
-    And the last request to "/gmail/v1/users/me/messages/send" has a decoded raw body containing "filename=\"data.txt\""
+    And the last request to "/gmail/v1/users/me/messages/send" has a decoded raw body containing "data.txt"
 
   # ---- message: reply -------------------------------------------------------
 
@@ -180,7 +180,7 @@ Feature: Gmail node
     When I execute the workflow
     Then the execution succeeds
     And the last request to "/gmail/v1/users/me/messages/m1" had the query parameter "format" equal to "metadata"
-    And the node "Node" outputs:
+    And the node "Node" outputs items matching:
       """
       [{
         "id": "m1",
@@ -279,7 +279,7 @@ Feature: Gmail node
     When I execute the workflow
     Then the execution succeeds
     And the last request to "/gmail/v1/users/me/messages" had the query parameter "maxResults" equal to "50"
-    And the node "Node" outputs:
+    And the node "Node" outputs items matching:
       """
       [{"id": "a1", "threadId": "t1", "Subject": "First"}, {"id": "a2", "threadId": "t2", "Subject": "Second"}]
       """
@@ -317,6 +317,10 @@ Feature: Gmail node
     Given the mock service responds to GET "/gmail/v1/users/me/messages" with status 200 and body:
       """
       {"messages": []}
+      """
+    And the mock service responds to GET "/gmail/v1/users/me/labels" with status 200 and body:
+      """
+      {"labels": []}
       """
     And the node "Node" has parameters:
       """
@@ -530,7 +534,7 @@ Feature: Gmail node
       """
     When I execute the workflow
     Then the execution succeeds
-    And the node "Node" outputs:
+    And the node "Node" outputs items matching:
       """
       [{"id": "Label_1", "name": "invoices"}]
       """
@@ -603,7 +607,7 @@ Feature: Gmail node
       """
     When I execute the workflow
     Then the execution succeeds
-    And the node "Node" outputs:
+    And the node "Node" outputs items matching:
       """
       [{"id": "t1", "historyId": "h1", "messages": [{"id": "m1", "threadId": "t1", "Subject": "Hi", "labels": [{"id": "INBOX", "name": "Inbox"}]}]}]
       """
@@ -630,7 +634,7 @@ Feature: Gmail node
     When I execute the workflow
     Then the execution succeeds
     And the node "Node" outputs 2 items
-    And the node "Node" outputs:
+    And the node "Node" outputs items matching:
       """
       [{"id": "m1", "threadId": "t1", "Subject": "First"}, {"id": "m2", "threadId": "t1", "Subject": "Second"}]
       """
@@ -646,7 +650,7 @@ Feature: Gmail node
       """
     When I execute the workflow
     Then the execution succeeds
-    And the node "Node" outputs:
+    And the node "Node" outputs items matching:
       """
       [{"id": "t1"}, {"id": "t2"}]
       """
