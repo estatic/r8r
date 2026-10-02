@@ -45,7 +45,7 @@ Feature: Live execution push and health endpoints
     Then the response status is 200
     And the response JSON is:
       """
-      {"status": "ok"}
+      {"status": "ok", "isLeader": true}
       """
 
   Scenario: Metrics are off by default
