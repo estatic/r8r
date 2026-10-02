@@ -8,6 +8,7 @@
 pub mod cipher;
 pub mod config;
 pub mod credential_types;
+pub mod data_table;
 pub mod engine;
 pub mod expr;
 pub mod migrate;
