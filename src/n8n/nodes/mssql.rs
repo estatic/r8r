@@ -633,14 +633,14 @@ fn decode_column(row: &Row, idx: usize) -> Value {
         ColumnData::I32(v) => v.map(|n| json!(n)).unwrap_or(Value::Null),
         ColumnData::I64(v) => v.map(|n| json!(n)).unwrap_or(Value::Null),
         ColumnData::F32(v) => v.and_then(|n| serde_json::Number::from_f64(n as f64)).map(Value::Number).unwrap_or(Value::Null),
-        ColumnData::F64(v) => v.and_then(|n| serde_json::Number::from_f64(n)).map(Value::Number).unwrap_or(Value::Null),
+        ColumnData::F64(v) => v.and_then(serde_json::Number::from_f64).map(Value::Number).unwrap_or(Value::Null),
         ColumnData::Bit(v) => v.map(Value::Bool).unwrap_or(Value::Null),
         ColumnData::String(v) => v.clone().map(|s| Value::String(s.into_owned())).unwrap_or(Value::Null),
         ColumnData::Guid(v) => v.map(|u| Value::String(u.to_string())).unwrap_or(Value::Null),
         // Binary/varbinary/image: documented gap (see module doc comment)
         // -- real n8n <1.2 keeps this in json as a Buffer; r8r uses a
         // simpler hex string, matching mysql.rs's BLOB handling.
-        ColumnData::Binary(v) => v.clone().map(|b| Value::String(format!("\\x{}", hex::encode(b.into_owned())))).unwrap_or(Value::Null),
+        ColumnData::Binary(v) => v.as_ref().map(|b| Value::String(format!("\\x{}", hex::encode(b)))).unwrap_or(Value::Null),
         ColumnData::Numeric(v) => v.map(numeric_to_json).unwrap_or(Value::Null),
         ColumnData::DateTime(_) | ColumnData::SmallDateTime(_) | ColumnData::DateTime2(_) => {
             row.try_get::<chrono::NaiveDateTime, _>(idx).ok().flatten().map(|d| Value::String(mssql_datetime_string(d))).unwrap_or(Value::Null)
