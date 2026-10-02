@@ -74,6 +74,8 @@ pub trait ElectionBackend: Send + Sync {
     /// the next main doesn't wait out the TTL).
     async fn release(&self);
     fn describe(&self) -> String;
+    /// How long the lock outlives its last renewal (the key's TTL).
+    fn lease(&self) -> Duration;
 }
 
 /// Drives an [`ElectionBackend`] on an interval, exposing the result via a
@@ -83,6 +85,11 @@ pub struct Election {
     pub gate: LeaderGate,
     backend: Arc<dyn ElectionBackend>,
     checker: std::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
+    /// When the lock was last acquired or renewed. A leader that can't reach
+    /// Redis keeps leading only until the lock it last set has expired;
+    /// after that another main may hold it, and leading on would mean two
+    /// mains firing every schedule.
+    last_held: std::sync::Mutex<std::time::Instant>,
 }
 
 impl Election {
@@ -103,7 +110,13 @@ impl Election {
         } else {
             tracing::info!("[multi-main] this instance starts as a follower");
         }
-        let election = Arc::new(Self { gate_tx, gate: LeaderGate::new(rx), backend, checker: std::sync::Mutex::new(None) });
+        let election = Arc::new(Self {
+            gate_tx,
+            gate: LeaderGate::new(rx),
+            backend,
+            checker: std::sync::Mutex::new(None),
+            last_held: std::sync::Mutex::new(std::time::Instant::now()),
+        });
         let weak = Arc::downgrade(&election);
         let handle = tokio::spawn(async move {
             let mut tick = tokio::time::interval(interval);
@@ -122,19 +135,31 @@ impl Election {
         let was_leader = self.gate.is_leader();
         let now_leader = if was_leader {
             match self.backend.renew().await {
-                Ok(true) => true,
+                Ok(true) => {
+                    *self.last_held.lock().unwrap() = std::time::Instant::now();
+                    true
+                }
                 Ok(false) => {
                     tracing::warn!("[multi-main] lost the leader lock; stepping down");
                     false
                 }
-                Err(e) => {
-                    tracing::warn!(error = %e, "[multi-main] could not renew the leader lock; assuming we still hold it");
+                Err(e) if self.last_held.lock().unwrap().elapsed() < self.backend.lease() => {
+                    tracing::warn!(error = %e, "[multi-main] could not renew the leader lock; holding on until it expires");
                     true
+                }
+                Err(e) => {
+                    tracing::warn!(error = %e, "[multi-main] could not renew the leader lock and it has expired; stepping down");
+                    false
                 }
             }
         } else {
             match self.backend.try_acquire().await {
-                Ok(got) => got,
+                Ok(got) => {
+                    if got {
+                        *self.last_held.lock().unwrap() = std::time::Instant::now();
+                    }
+                    got
+                }
                 Err(e) => {
                     tracing::warn!(error = %e, "[multi-main] could not check the leader lock");
                     false
@@ -253,6 +278,13 @@ impl ElectionBackend for RedisElectionBackend {
     fn describe(&self) -> String {
         self.url.clone()
     }
+
+    /// 80% of the key's TTL: the key expires TTL after Redis applied the
+    /// last renewal, which was before we observed it, so stepping down at
+    /// the full TTL could overlap a new leader by a round trip.
+    fn lease(&self) -> Duration {
+        Duration::from_secs(self.ttl_secs).mul_f64(0.8)
+    }
 }
 
 #[cfg(test)]
@@ -263,5 +295,41 @@ mod tests {
     async fn always_leader_never_changes() {
         let gate = LeaderGate::always_leader();
         assert!(gate.is_leader());
+    }
+
+    /// Acquires once, then every renewal fails as if Redis were unreachable.
+    struct Unreachable {
+        lease: Duration,
+    }
+
+    #[async_trait::async_trait]
+    impl ElectionBackend for Unreachable {
+        async fn try_acquire(&self) -> anyhow::Result<bool> {
+            Ok(true)
+        }
+        async fn renew(&self) -> anyhow::Result<bool> {
+            anyhow::bail!("connection refused")
+        }
+        async fn release(&self) {}
+        fn describe(&self) -> String {
+            "unreachable".into()
+        }
+        fn lease(&self) -> Duration {
+            self.lease
+        }
+    }
+
+    #[tokio::test]
+    async fn a_leader_that_cannot_renew_steps_down_once_its_lease_is_over() {
+        // A long interval so only the explicit checks below run.
+        let election = Election::start(Arc::new(Unreachable { lease: Duration::from_millis(200) }), Duration::from_secs(3600)).await;
+        assert!(election.gate.is_leader());
+
+        election.check().await;
+        assert!(election.gate.is_leader(), "a failed renewal within the lease keeps leading");
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        election.check().await;
+        assert!(!election.gate.is_leader(), "past the lease another main may hold the lock");
     }
 }
