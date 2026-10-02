@@ -59,6 +59,9 @@ zip = { version = "8.6.0", default-features = false, features = ["deflate"] }
 flate2 = "1.1.10"
 glob = "0.3"
 lettre = { version = "0.11.23", default-features = false, features = ["tokio1", "tokio1-rustls-tls", "smtp-transport", "builder", "hostname"] }
+russh = "0.63.3"
+russh-sftp = "3.0.1"
+suppaftp = { version = "12.1.1", default-features = false, features = ["tokio"] }
 mongodb = "3.9.1"
 futures-util = "0.3"
 tiberius = { version = "0.13.0", default-features = false, features = ["rustls", "chrono", "bigdecimal", "tds73"] }

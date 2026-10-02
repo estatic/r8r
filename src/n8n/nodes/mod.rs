@@ -9,8 +9,10 @@ mod core;
 mod discord;
 mod email;
 mod files;
+mod ftp;
 mod gmail;
 mod google_auth;
+mod googledrive;
 mod googlesheets;
 mod github;
 mod html;
@@ -30,6 +32,8 @@ mod server_nodes;
 mod set;
 mod slack;
 mod sql_common;
+mod ssh;
+mod ssh_common;
 mod telegram;
 mod transform;
 mod utility;
@@ -109,6 +113,7 @@ impl Default for Registry {
         r.add(Box::new(slack::Slack));
         r.add(Box::new(googlesheets::GoogleSheets));
         r.add(Box::new(gmail::Gmail));
+        r.add(Box::new(googledrive::GoogleDrive));
         r.add(Box::new(github::Github));
         r.add(Box::new(telegram::Telegram));
         r.add(Box::new(notion::Notion));
@@ -119,6 +124,12 @@ impl Default for Registry {
             r.add(n);
         }
         for n in email::all() {
+            r.add(n);
+        }
+        for n in ssh::all() {
+            r.add(n);
+        }
+        for n in ftp::all() {
             r.add(n);
         }
         r

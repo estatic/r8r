@@ -28,13 +28,15 @@ R8R_BIN=/path/to/r8r cargo test --test bdd             # test another build
 | --- | --- | --- |
 | `R8R_BIN` | the `r8r` binary Cargo builds | Binary under test |
 | `R8R_BDD_CONCURRENCY` | 8 | Scenarios run in parallel |
-| `R8R_BDD_INCLUDE` | – | Opt-in tags to add: `perf`, `slow`, `requires-redis`, `requires-postgres`, `requires-mysql`, `requires-mongodb`, `requires-mssql`, `requires-python-runner`, `requires-mailpit` |
+| `R8R_BDD_INCLUDE` | – | Opt-in tags to add: `perf`, `slow`, `requires-redis`, `requires-postgres`, `requires-mysql`, `requires-mongodb`, `requires-mssql`, `requires-python-runner`, `requires-mailpit`, `requires-ssh`, `requires-ftp` |
 | `R8R_BDD_REDIS_HOST` / `_PORT` | 127.0.0.1 / 6379 | Redis for `@requires-redis` |
 | `R8R_BDD_POSTGRES_URL` | `postgres://postgres:postgres@127.0.0.1:5432/postgres` | PostgreSQL for `@requires-postgres` and `R8R_BDD_STORAGE=postgres` |
 | — | 127.0.0.1:3306, root/mysql, db `r8r` (Docker `r8r-bdd-mysql`) | MySQL for `@requires-mysql` |
 | — | 127.0.0.1:27017, no auth (Docker `r8r-bdd-mongo`) | MongoDB for `@requires-mongodb` |
 | — | 127.0.0.1:1433, sa/`R8r_Passw0rd!`, db `r8r` (Docker `r8r-bdd-mssql`) | SQL Server for `@requires-mssql` |
 | — | 127.0.0.1:1025 (SMTP) / :8025 (HTTP) | Mailpit (Docker `r8r-bdd-mailpit`) for `@requires-mailpit` |
+| — | 127.0.0.1:2222, user/password r8r/r8r (Docker `r8r-bdd-ssh`) | SSH/SFTP for `@requires-ssh` |
+| — | 127.0.0.1:2121, user/password r8r/r8r, passive 30000-30009 (Docker `r8r-bdd-ftp`) | FTP for `@requires-ftp`. The pure-ftpd test image caps simultaneous logins at 5; run `@requires-ftp` scenarios with `R8R_BDD_CONCURRENCY=4` or lower (default is 8) to avoid spurious "5 users (the maximum) are already logged in" failures. |
 | `R8R_BDD_STORAGE` | sqlite | `postgres` runs every scenario with `DB_TYPE=postgresdb`, one schema per scenario |
 | `R8R_BDD_START_TIMEOUT` | 30 | Seconds a server may take to become ready |
 

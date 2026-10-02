@@ -85,8 +85,8 @@ and on n8n; `codex.r8r.native = false` removed.
 | 1.11 ✅ | Read/Write Files | behind the same allow-list as Execute Command |
 | 1.12 | Microsoft SQL, MongoDB ✅, Data Tables | MongoDB: aggregate/delete/find/findOneAndReplace/findOneAndUpdate/insert/update + search-index ops (Atlas-only, fail against community `mongod` same as real n8n); `mongodb` crate (tokio-native, no spawn-split strictly required but kept for consistency); EJSON via `bson::Bson::try_from` (superset of the pinned reference, which has no `parseJsonToEjson` at all — only a hardcoded top-level `_id` string→ObjectId coercion, also reproduced) |
 | 1.13 | RabbitMQ, Kafka, MQTT | incl. their trigger variants (leader-only, Phase 4.1) |
-| 1.14 | Gmail ✅, Google Drive, Notion ✅, Airtable ✅, GitHub ✅, Telegram ✅, Discord ✅ | one task each; GitHub: file/issue/release/repository/review/user/organization (pullRequest, workflow, GitHub App auth out of scope); Gmail: Gmail Trigger and sendAndWait out of scope |
-| 1.15 | Email Trigger (IMAP), FTP/SFTP, SSH | |
+| 1.14 ✅ | Gmail ✅, Google Drive ✅, Notion ✅, Airtable ✅, GitHub ✅, Telegram ✅, Discord ✅ | one task each; GitHub: file/issue/release/repository/review/user/organization (pullRequest, workflow, GitHub App auth out of scope); Gmail: Gmail Trigger and sendAndWait out of scope; Google Drive: Google Drive Trigger out of scope |
+| 1.15 | Email Trigger (IMAP), FTP/SFTP ✅, SSH ✅ | FTP/SFTP and SSH: `russh`/`russh-sftp` (SSH exec + SFTP, pure Rust) and `suppaftp` (FTP, tokio feature); SSH resources command (execute) and file (upload/download, SFTP-backed); FTP operations delete/download/list/rename/upload across both protocols. Email Trigger (IMAP) out of scope for this task. |
 | 1.16 ✅ | OpenAI (non-chat) | text (response/message/classify), image (generate/analyze), audio (generate/transcribe/translate), file (upload/list/deleteFile); not yet: assistant, conversation, video, built-in/connected tools |
 
 **Exit:** all 22 green on r8r and n8n; full BDD suite green on SQLite and
