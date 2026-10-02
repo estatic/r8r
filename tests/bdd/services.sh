@@ -57,8 +57,15 @@ mqtt() {
 # Single-node KRaft broker, advertised on 127.0.0.1:9092.
 kafka() { run r8r-bdd-kafka -p 127.0.0.1:9092:9092 apache/kafka:3.8.0; }
 
+# GreenMail: SMTP 3025 / IMAP 3143 (plain), users created on first login.
+imap() {
+    run r8r-bdd-imap -p 127.0.0.1:3025:3025 -p 127.0.0.1:3143:3143 \
+        -e GREENMAIL_OPTS="-Dgreenmail.setup.test.smtp -Dgreenmail.setup.test.imap -Dgreenmail.hostname=0.0.0.0 -Dgreenmail.auth.disabled" \
+        greenmail/standalone:2.1.2
+}
+
 if [ $# -eq 0 ]; then
-    set -- postgres redis mailpit mysql mongo ssh ftp mssql rabbitmq mqtt kafka
+    set -- postgres redis mailpit mysql mongo ssh ftp mssql rabbitmq mqtt kafka imap
 fi
 for service in "$@"; do
     "$service"

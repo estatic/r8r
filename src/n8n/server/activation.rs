@@ -171,36 +171,124 @@ pub async fn register(n8n: &Arc<N8n>, workflow_json: &Value) -> Result<(), ApiEr
             }
         }
     }
-    let tz = workflow_tz(n8n, workflow_json);
-    let mut schedules = Vec::new();
     for node in triggers.iter().filter(|n| n.node_type == "n8n-nodes-base.scheduleTrigger") {
-        for rule in schedule_rules(&node.parameters).map_err(ApiError::bad_request)? {
-            schedules.push((node.name.clone(), rule));
-        }
+        // Validate every rule now, even if we won't spawn timers for it
+        // (not the leader): activation must fail the same way on every
+        // main (spec: "A cron expression with an invalid format is
+        // rejected on activation").
+        schedule_rules(&node.parameters).map_err(ApiError::bad_request)?;
     }
     unregister(n8n, &id);
     n8n.webhooks.write().unwrap().extend(registrations);
     let mut cached = workflow_json.clone();
     cached["active"] = json!(true);
     n8n.active.write().unwrap().insert(id.clone(), Arc::new(cached));
-    let handles: Vec<_> = if n8n.schedules_enabled.load(std::sync::atomic::Ordering::SeqCst) {
-        schedules.into_iter().map(|(node, rule)| spawn_rule(n8n, id.clone(), node, tz, rule)).collect()
-    } else {
-        Vec::new()
-    };
-    n8n.schedules.lock().unwrap().insert(id.clone(), handles);
+    if n8n.schedules_enabled.load(std::sync::atomic::Ordering::SeqCst) && n8n.leader.is_leader() {
+        start_schedules(n8n, &id, &workflow);
+    }
     tracing::info!(workflowId = %id, "Activated workflow \"{}\"", workflow.name);
     Ok(())
 }
 
-pub fn unregister(n8n: &N8n, workflow_id: &str) {
-    n8n.webhooks.write().unwrap().retain(|r| r.workflow_id != workflow_id);
-    n8n.active.write().unwrap().remove(workflow_id);
+/// Spawns schedule timers for `workflow`'s Schedule Trigger nodes,
+/// replacing any it already had. Only called while this instance is the
+/// leader (or single-main, which is always leader); see
+/// [`activate_schedules_for_all`]/[`deactivate_schedules_for_all`] for how a
+/// multi-main takeover/stepdown adds or removes these for workflows that
+/// were already active.
+fn start_schedules(n8n: &Arc<N8n>, id: &str, workflow: &Workflow) {
+    let raw = Value::Object(workflow.raw.clone());
+    let tz = workflow_tz(n8n, &raw);
+    let mut schedules = Vec::new();
+    for node in workflow.nodes.iter().filter(|n| !n.disabled && n.node_type == "n8n-nodes-base.scheduleTrigger") {
+        let Ok(rules) = schedule_rules(&node.parameters) else { continue };
+        for rule in rules {
+            schedules.push((node.name.clone(), rule));
+        }
+    }
+    let handles: Vec<_> = schedules.into_iter().map(|(node, rule)| spawn_rule(n8n, id.to_string(), node, tz, rule)).collect();
+    if let Some(old) = n8n.schedules.lock().unwrap().insert(id.to_string(), handles) {
+        for h in old {
+            h.abort();
+        }
+    }
+}
+
+fn stop_schedules(n8n: &N8n, workflow_id: &str) {
     if let Some(handles) = n8n.schedules.lock().unwrap().remove(workflow_id) {
         for h in handles {
             h.abort();
         }
     }
+}
+
+pub fn unregister(n8n: &N8n, workflow_id: &str) {
+    n8n.webhooks.write().unwrap().retain(|r| r.workflow_id != workflow_id);
+    n8n.active.write().unwrap().remove(workflow_id);
+    stop_schedules(n8n, workflow_id);
+}
+
+/// Multi-main takeover (plan task 4.1): adds schedule timers for every
+/// workflow that is already active (registered for its webhooks/forms by
+/// every main regardless of leadership), mirroring n8n's
+/// `addAllNonWebhookTriggerWorkflows`.
+pub async fn activate_schedules_for_all(n8n: &Arc<N8n>) {
+    if !n8n.schedules_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+        return;
+    }
+    let active: Vec<(String, Arc<Value>)> = n8n.active.read().unwrap().iter().map(|(id, w)| (id.clone(), w.clone())).collect();
+    let mut n = 0;
+    for (id, workflow_json) in active {
+        match Workflow::from_json(&workflow_json) {
+            Ok(workflow) => {
+                start_schedules(n8n, &id, &workflow);
+                n += 1;
+            }
+            Err(e) => tracing::warn!(workflowId = %id, error = %e, "could not add schedules for workflow on leader takeover"),
+        }
+    }
+    tracing::info!("[multi-main] leader takeover: added schedules for {n} active workflow(s)");
+}
+
+/// Picks up webhook/form registrations made by *another* process sharing
+/// this database: used by `r8r webhook` (always) and, since multi-main
+/// setup means more than one `r8r start` main shares a database, by every
+/// main when `N8N_MULTI_MAIN_SETUP_ENABLED=true`. A workflow activated
+/// through main A's REST API is otherwise invisible to main B until this
+/// runs; schedules/pollers are unaffected here (they come from
+/// leader election, not from this poll -- `register` only starts them
+/// when this instance is already the leader).
+pub async fn sync_registrations(n8n: &Arc<N8n>) {
+    let Ok(rows) = n8n.store.workflow_rows().await else { return };
+    let mut active_ids = Vec::new();
+    for row in rows.into_iter().filter(|r| r.active) {
+        let id = row.data["id"].as_str().unwrap_or_default().to_string();
+        let mut current = row.data.clone();
+        current["active"] = json!(true);
+        let unchanged = n8n.active.read().unwrap().get(&id).is_some_and(|w| **w == current);
+        if !unchanged {
+            if let Err(e) = register(n8n, &row.data).await {
+                tracing::warn!(workflowId = %id, error = %e.1, "could not register workflow webhooks");
+            }
+        }
+        active_ids.push(id);
+    }
+    let stale: Vec<String> = n8n.active.read().unwrap().keys().filter(|k| !active_ids.contains(k)).cloned().collect();
+    for id in stale {
+        unregister(n8n, &id);
+    }
+}
+
+/// Multi-main stepdown (plan task 4.1): removes every schedule timer this
+/// instance was running, leaving webhooks/forms (served by every main)
+/// untouched. Mirrors n8n's `removeAllNonWebhookTriggerWorkflows`.
+pub fn deactivate_schedules_for_all(n8n: &N8n) {
+    let ids: Vec<String> = n8n.schedules.lock().unwrap().keys().cloned().collect();
+    let n = ids.len();
+    for id in ids {
+        stop_schedules(n8n, &id);
+    }
+    tracing::info!("[multi-main] stepped down: removed schedules for {n} workflow(s)");
 }
 
 async fn set_active(n8n: &N8n, row: &WorkflowRow, active: bool) -> Result<WorkflowRow, ApiError> {

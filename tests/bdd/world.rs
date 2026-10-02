@@ -247,7 +247,18 @@ impl R8rWorld {
     }
 
     pub fn server(&self) -> &ServerProcess {
-        self.servers.get("main").expect("no r8r server running: add 'Given a running r8r server'")
+        if let Some(s) = self.servers.get("main") {
+            return s;
+        }
+        // Multi-main (plan task 4.1): "main" may have been stopped on
+        // purpose to watch leadership move to another main; fall back to
+        // whichever other main-like server (not a worker/webhook process,
+        // not one we already stopped) is still running.
+        self.servers
+            .iter()
+            .find(|(k, _)| !k.starts_with("worker:") && !k.starts_with("stopped:"))
+            .map(|(_, v)| v)
+            .expect("no r8r server running: add 'Given a running r8r server'")
     }
 
     pub fn server_url(&self) -> String {

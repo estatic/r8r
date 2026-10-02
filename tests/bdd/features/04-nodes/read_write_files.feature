@@ -272,9 +272,13 @@ Feature: Read/Write Files from Disk node (v1, v1.1)
       """
       [{}]
       """
+    And the file ".n8n/secret.txt" contains:
+      """
+      instance secret
+      """
     And the node "Read" has parameters:
       """
-      {"operation": "read", "fileSelector": "%{USER_FOLDER}/.n8n/database.sqlite"}
+      {"operation": "read", "fileSelector": "%{USER_FOLDER}/.n8n/secret.txt"}
       """
     When I execute the workflow
     Then the execution fails

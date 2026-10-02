@@ -19,6 +19,7 @@ pub mod perf;
 pub mod push;
 pub mod rabbitmq;
 pub mod redis;
+pub mod scaling;
 pub mod server;
 pub mod workflow;
 
