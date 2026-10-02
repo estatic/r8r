@@ -21,6 +21,7 @@ Feature: Multi-main leader election
     And the environment variable "N8N_MULTI_MAIN_SETUP_CHECK_INTERVAL" is "1"
     And a running r8r server with an owner and an API key
     And a running r8r server named "b" with the same configuration
+    And a running r8r worker named "w1"
     And a workflow named "Shared schedule" with nodes:
       | name     | type            | parameters                                                           |
       | Schedule | scheduleTrigger | {"rule": {"interval": [{"field": "seconds", "secondsInterval": 1}]}} |
@@ -37,6 +38,7 @@ Feature: Multi-main leader election
     And the environment variable "N8N_MULTI_MAIN_SETUP_CHECK_INTERVAL" is "1"
     And a running r8r server with an owner and an API key
     And a running r8r server named "b" with the same configuration
+    And a running r8r worker named "w1"
     And a workflow named "Takeover schedule" with nodes:
       | name     | type            | parameters                                                           |
       | Schedule | scheduleTrigger | {"rule": {"interval": [{"field": "seconds", "secondsInterval": 1}]}} |
@@ -54,6 +56,7 @@ Feature: Multi-main leader election
     And the environment variable "N8N_MULTI_MAIN_SETUP_CHECK_INTERVAL" is "1"
     And a running r8r server with an owner and an API key
     And a running r8r server named "b" with the same configuration
+    And a running r8r worker named "w1"
     And a workflow named "Shared webhook" with nodes:
       | name    | type    | parameters                                                                          |
       | Webhook | webhook | {"httpMethod": "POST", "path": "shared", "responseMode": "lastNode", "options": {}} |
