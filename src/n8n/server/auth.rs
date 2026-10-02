@@ -190,6 +190,11 @@ pub async fn settings(State(n8n): State<Arc<N8n>>) -> ApiResult {
         "saveDataSuccessExecution": std::env::var("EXECUTIONS_DATA_SAVE_ON_SUCCESS").unwrap_or_else(|_| "all".into()),
         "saveManualExecutions": std::env::var("EXECUTIONS_DATA_SAVE_MANUAL_EXECUTIONS").map(|v| v != "false").unwrap_or(true),
         "defaultLocale": "en",
+        // Multi-main leader election (plan task 4.1): not part of n8n's own
+        // settings payload in this version, but exposed here since this is
+        // the editor's main source of instance info.
+        "isMultiMainSetupEnabled": c.multi_main_enabled,
+        "isLeader": n8n.leader.is_leader(),
     })))
 }
 

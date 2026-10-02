@@ -100,7 +100,7 @@ async fn deactivate(w: &mut R8rWorld) {
     w.response = Some(resp);
 }
 
-async fn list_executions(w: &mut R8rWorld, workflow: &str) -> Vec<Value> {
+pub async fn list_executions(w: &mut R8rWorld, workflow: &str) -> Vec<Value> {
     let path = format!("/api/v1/executions?workflowId={workflow}&includeData=true&limit=250");
     let resp = call(w, Auth::ApiKey("owner".into()), "GET", &path, None).await;
     let json: Value = serde_json::from_str(&resp.body).unwrap_or(Value::Null);
