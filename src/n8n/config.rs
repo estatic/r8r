@@ -39,6 +39,14 @@ pub struct Config {
     pub node_function_allow_builtin: Vec<String>,
     /// Per-expression time limit (spec §6.4: 1 s by default).
     pub expression_timeout_ms: u64,
+    /// Multi-main leader election (plan task 4.1): `N8N_MULTI_MAIN_SETUP_ENABLED`.
+    /// Only meaningful with `EXECUTIONS_MODE=queue`; single-main (the
+    /// default) is always leader and ignores the rest of this group.
+    pub multi_main_enabled: bool,
+    /// `N8N_MULTI_MAIN_SETUP_KEY_TTL` seconds, default 10.
+    pub multi_main_key_ttl_secs: u64,
+    /// `N8N_MULTI_MAIN_SETUP_CHECK_INTERVAL` seconds, default 3.
+    pub multi_main_check_interval_secs: u64,
 }
 
 #[derive(Debug)]
@@ -140,6 +148,15 @@ impl Config {
             None => 1000,
             Some(v) => v.parse().map_err(|_| err("R8R_EXPRESSION_TIMEOUT_MS", format!("expected milliseconds, got \"{v}\"")))?,
         };
+        let multi_main_enabled = parse_bool("N8N_MULTI_MAIN_SETUP_ENABLED", false)?;
+        let multi_main_key_ttl_secs = match var("N8N_MULTI_MAIN_SETUP_KEY_TTL") {
+            None => 10,
+            Some(v) => v.parse().map_err(|_| err("N8N_MULTI_MAIN_SETUP_KEY_TTL", format!("expected seconds, got \"{v}\"")))?,
+        };
+        let multi_main_check_interval_secs = match var("N8N_MULTI_MAIN_SETUP_CHECK_INTERVAL") {
+            None => 3,
+            Some(v) => v.parse().map_err(|_| err("N8N_MULTI_MAIN_SETUP_CHECK_INTERVAL", format!("expected seconds, got \"{v}\"")))?,
+        };
         let n8n_dir = user_folder.join(".n8n");
         let sqlite_url = var("DATABASE_URL").filter(|u| u.starts_with("sqlite:")).unwrap_or_else(|| {
             let file = var("DB_SQLITE_DATABASE").map(PathBuf::from).unwrap_or_else(|| n8n_dir.join("database.sqlite"));
@@ -174,6 +191,9 @@ impl Config {
             runners_task_timeout_secs,
             node_function_allow_builtin: string_list("NODE_FUNCTION_ALLOW_BUILTIN", &[])?,
             expression_timeout_ms,
+            multi_main_enabled,
+            multi_main_key_ttl_secs,
+            multi_main_check_interval_secs,
             user_folder,
         })
     }
@@ -205,6 +225,9 @@ impl Config {
             ("N8N_RUNNERS_TASK_TIMEOUT", self.runners_task_timeout_secs.to_string()),
             ("NODE_FUNCTION_ALLOW_BUILTIN", self.node_function_allow_builtin.join(",")),
             ("R8R_EXPRESSION_TIMEOUT_MS", self.expression_timeout_ms.to_string()),
+            ("N8N_MULTI_MAIN_SETUP_ENABLED", self.multi_main_enabled.to_string()),
+            ("N8N_MULTI_MAIN_SETUP_KEY_TTL", self.multi_main_key_ttl_secs.to_string()),
+            ("N8N_MULTI_MAIN_SETUP_CHECK_INTERVAL", self.multi_main_check_interval_secs.to_string()),
         ]
     }
 }

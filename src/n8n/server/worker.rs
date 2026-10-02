@@ -19,7 +19,10 @@ async fn queue_state(config: Config, process: &str) -> anyhow::Result<Arc<N8n>> 
     if config.executions_mode != "queue" {
         anyhow::bail!("r8r {process} needs queue mode: set EXECUTIONS_MODE=queue (and QUEUE_BULL_REDIS_HOST, or R8R_QUEUE_BACKEND=postgres)");
     }
-    N8n::new(config).await
+    // Workers and the webhook process are not "main" instances (n8n's
+    // sense): they never run schedules regardless of leadership, so they
+    // don't contend for the multi-main leader lock.
+    N8n::new_for_role(config, false).await
 }
 
 async fn serve_health(port: u16) -> anyhow::Result<()> {

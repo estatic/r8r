@@ -133,6 +133,7 @@ async fn start_server() -> anyhow::Result<()> {
     // Let running executions finish (N8N_GRACEFUL_SHUTDOWN_TIMEOUT, as n8n).
     let grace = std::env::var("N8N_GRACEFUL_SHUTDOWN_TIMEOUT").ok().and_then(|v| v.parse::<u64>().ok()).unwrap_or(30);
     n8n.drain(std::time::Duration::from_secs(grace)).await;
+    n8n.release_leadership().await;
     tracing::info!("r8r stopped");
     Ok(())
 }

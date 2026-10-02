@@ -24,7 +24,7 @@ use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 pub use runner::{RunOutcome, RunRequest};
 
@@ -60,6 +60,15 @@ pub struct N8n {
     pub queue: Option<Arc<dyn crate::n8n::queue::Queue>>,
     /// False in `r8r webhook`, which leaves schedules to the main process.
     pub schedules_enabled: std::sync::atomic::AtomicBool,
+    /// Multi-main leader election (plan task 4.1). Always leader in
+    /// single-main (the default: [`crate::n8n::election::LeaderGate::always_leader`]);
+    /// with `N8N_MULTI_MAIN_SETUP_ENABLED=true` and queue mode, only the
+    /// elected main adds schedules, pollers and other long-lived triggers.
+    /// Webhooks and forms stay registered on every main.
+    pub leader: crate::n8n::election::LeaderGate,
+    /// `Some` only on the process actually contending for leadership (the
+    /// regular server; not `r8r worker`/`r8r webhook`).
+    pub election: Option<Arc<crate::n8n::election::Election>>,
 }
 
 #[derive(Default)]
@@ -124,6 +133,16 @@ impl N8n {
     /// Opens the database and builds the state. Fails when the encryption
     /// key cannot read existing credentials.
     pub async fn new(config: Config) -> anyhow::Result<Arc<Self>> {
+        Self::new_for_role(config, true).await
+    }
+
+    /// Like [`Self::new`], but `participates_in_election` controls whether
+    /// this process contends for the multi-main leader lock. `r8r worker`
+    /// and `r8r webhook` share this constructor but are not "main"
+    /// instances in n8n's sense (they never run schedules regardless of
+    /// leadership, since their `schedules_enabled` is false), so they pass
+    /// `false` to leave the Redis lock to the actual mains.
+    pub async fn new_for_role(config: Config, participates_in_election: bool) -> anyhow::Result<Arc<Self>> {
         let store = Store::open(&config.database_url, &config.encryption_key).await?;
         // Like n8n, refuse to start with a key that can't read existing data.
         if let Some(first) = store.list_credentials().await?.into_iter().next() {
@@ -157,6 +176,18 @@ impl N8n {
         } else {
             None
         };
+        let (leader, election) = if config.multi_main_enabled && participates_in_election {
+            if config.executions_mode != "queue" {
+                anyhow::bail!("invalid configuration: N8N_MULTI_MAIN_SETUP_ENABLED: requires EXECUTIONS_MODE=queue");
+            }
+            use crate::n8n::election::ElectionBackend as _;
+            let backend = crate::n8n::election::RedisElectionBackend::connect(config.multi_main_key_ttl_secs).await?;
+            tracing::info!("multi-main setup: leader election through {}", backend.describe());
+            let election = crate::n8n::election::Election::start(Arc::new(backend), Duration::from_secs(config.multi_main_check_interval_secs)).await;
+            (election.gate.clone(), Some(election))
+        } else {
+            (crate::n8n::election::LeaderGate::always_leader(), None)
+        };
         let state = Arc::new_cyclic(|weak: &std::sync::Weak<N8n>| {
             let mut services = Services::new(config.clone(), Some(store.clone()));
             services.sub_workflows = Some(Arc::new(runner::SubRunner(weak.clone())));
@@ -180,6 +211,8 @@ impl N8n {
                 exec,
                 queue,
                 schedules_enabled: std::sync::atomic::AtomicBool::new(true),
+                leader,
+                election,
             }
         });
         Ok(state)
@@ -208,6 +241,28 @@ impl N8n {
                 }
             }
             Err(e) => tracing::error!(error = %e, "could not load workflows for reactivation"),
+        }
+        // Multi-main (plan task 4.1): on takeover, add schedules/pollers for
+        // every already-active workflow (n8n's `OnLeaderTakeover` ->
+        // `addAllNonWebhookTriggerWorkflows`); on stepdown, remove them.
+        // Webhooks/forms (registered above regardless of leadership) are
+        // untouched either way.
+        if self.election.is_some() {
+            let me = Arc::downgrade(self);
+            let mut changes = self.leader.subscribe();
+            tokio::spawn(async move {
+                loop {
+                    if changes.changed().await.is_err() {
+                        return;
+                    }
+                    let Some(n8n) = me.upgrade() else { return };
+                    if *changes.borrow() {
+                        activation::activate_schedules_for_all(&n8n).await;
+                    } else {
+                        activation::deactivate_schedules_for_all(&n8n);
+                    }
+                }
+            });
         }
         // Timed waits resume when due; old executions are pruned.
         let me = Arc::downgrade(self);
@@ -254,6 +309,14 @@ impl N8n {
         });
     }
 
+    /// Gives up the leader lock (if held) on graceful shutdown, so the next
+    /// main doesn't wait out the full TTL before taking over.
+    pub async fn release_leadership(&self) {
+        if let Some(election) = &self.election {
+            election.shutdown().await;
+        }
+    }
+
     /// Waits for running executions to finish, up to `timeout`.
     pub async fn drain(&self, timeout: std::time::Duration) {
         let deadline = tokio::time::Instant::now() + timeout;
@@ -293,9 +356,13 @@ pub fn router(state: Arc<N8n>) -> Router {
 }
 
 async fn readiness(axum::extract::State(n8n): axum::extract::State<Arc<N8n>>) -> Response {
+    // Multi-main (plan task 4.1): n8n does not surface instance role on a
+    // public endpoint in this version, so r8r exposes it here (and in
+    // `/rest/settings`) instead, for operators and the BDD suite alike.
+    let is_leader = n8n.leader.is_leader();
     match n8n.store.user_count().await {
-        Ok(_) => Json(json!({"status": "ok"})).into_response(),
-        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"status": "error"}))).into_response(),
+        Ok(_) => Json(json!({"status": "ok", "isLeader": is_leader})).into_response(),
+        Err(_) => (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"status": "error", "isLeader": is_leader}))).into_response(),
     }
 }
 
