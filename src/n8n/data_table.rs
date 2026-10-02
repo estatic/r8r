@@ -642,6 +642,7 @@ impl Store {
             let id = super::store_batch::new_id(&mut conn, self.postgres).await?;
             inserted.push((id, now_s));
         }
+        drop(conn);
         match return_type {
             "count" => Ok(json!({"count": inserted.len()})),
             "id" => Ok(Value::Array(inserted.iter().map(|(id, _)| json!({"id": id})).collect())),
