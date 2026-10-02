@@ -21,6 +21,7 @@ mod http;
 mod jwt;
 mod merge;
 mod mongodb;
+mod mqtt;
 mod mssql;
 mod mysql;
 mod notion;
@@ -86,6 +87,7 @@ impl Default for Registry {
         r.add(Box::new(compression::Compression));
         r.add(Box::new(redis::Redis));
         r.add(Box::new(rabbitmq::RabbitMq));
+        r.add(Box::new(mqtt::Mqtt));
         for n in transform::all() {
             r.add(n);
         }

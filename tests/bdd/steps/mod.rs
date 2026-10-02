@@ -13,6 +13,7 @@ pub mod legacy;
 pub mod mail;
 pub mod migrate;
 pub mod mocks;
+pub mod mqtt;
 pub mod perf;
 pub mod push;
 pub mod rabbitmq;

@@ -80,6 +80,10 @@ pub struct R8rWorld {
     pub mock: Option<wiremock::MockServer>,
     pub push_messages: Arc<Mutex<Vec<Value>>>,
     pub push_task: Option<tokio::task::JoinHandle<()>>,
+    /// Messages received by a test MQTT subscriber (`steps/mqtt.rs`):
+    /// `(topic, payload)`.
+    pub mqtt_messages: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+    pub mqtt_task: Option<tokio::task::JoinHandle<()>>,
     pub expr: ExprState,
     pub load: Vec<(u16, Duration)>,
     /// Headers added to the next request only.
@@ -102,6 +106,9 @@ impl std::fmt::Debug for R8rWorld {
 impl Drop for R8rWorld {
     fn drop(&mut self) {
         if let Some(task) = self.push_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.mqtt_task.take() {
             task.abort();
         }
         // wiremock's MockServer blocks on an async verify() in its Drop; on
@@ -138,6 +145,8 @@ impl R8rWorld {
             mock: None,
             push_messages: Arc::new(Mutex::new(Vec::new())),
             push_task: None,
+            mqtt_messages: Arc::new(Mutex::new(Vec::new())),
+            mqtt_task: None,
             expr: ExprState::default(),
             load: Vec::new(),
             next_headers: Vec::new(),
