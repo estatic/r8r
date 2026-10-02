@@ -70,7 +70,9 @@ async fn execute_with_timeout(w: &mut R8rWorld, seconds: u64) {
 #[given(expr = "the file {string} contains:")]
 async fn write_file(w: &mut R8rWorld, name: String, step: &Step) {
     let content = w.expand(docstring(step));
-    std::fs::write(w.dir.path().join(name), content).unwrap();
+    let path = w.dir.path().join(name);
+    std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+    std::fs::write(path, content).unwrap();
 }
 
 /// A symlink inside the scenario folder; parent directories are created.
