@@ -16,6 +16,7 @@ pub mod mocks;
 pub mod perf;
 pub mod push;
 pub mod redis;
+pub mod scaling;
 pub mod server;
 pub mod workflow;
 
