@@ -49,8 +49,16 @@ mssql() {
     return 1
 }
 
+rabbitmq() { run r8r-bdd-rabbitmq -p 127.0.0.1:5672:5672 -p 127.0.0.1:15672:15672 rabbitmq:3-management; }
+mqtt() {
+    run r8r-bdd-mqtt -p 127.0.0.1:1883:1883 eclipse-mosquitto:2 \
+        sh -c 'printf "listener 1883\nallow_anonymous true\n" > /tmp/m.conf && exec mosquitto -c /tmp/m.conf'
+}
+# Single-node KRaft broker, advertised on 127.0.0.1:9092.
+kafka() { run r8r-bdd-kafka -p 127.0.0.1:9092:9092 apache/kafka:3.8.0; }
+
 if [ $# -eq 0 ]; then
-    set -- postgres redis mailpit mysql mongo ssh ftp mssql
+    set -- postgres redis mailpit mysql mongo ssh ftp mssql rabbitmq mqtt kafka
 fi
 for service in "$@"; do
     "$service"
