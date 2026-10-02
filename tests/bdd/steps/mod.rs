@@ -9,6 +9,7 @@ pub mod data_table;
 pub mod execution;
 pub mod expressions;
 pub mod http;
+pub mod kafka;
 pub mod legacy;
 pub mod mail;
 pub mod migrate;

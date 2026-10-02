@@ -19,6 +19,7 @@ mod github;
 mod html;
 mod http;
 mod jwt;
+mod kafka;
 mod merge;
 mod mongodb;
 mod mqtt;
@@ -88,6 +89,7 @@ impl Default for Registry {
         r.add(Box::new(redis::Redis));
         r.add(Box::new(rabbitmq::RabbitMq));
         r.add(Box::new(mqtt::Mqtt));
+        r.add(Box::new(kafka::Kafka));
         for n in transform::all() {
             r.add(n);
         }
