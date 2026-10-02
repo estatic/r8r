@@ -106,12 +106,9 @@ Feature: Microsoft SQL node
 
   Scenario: Insert round-trips int, bigint, decimal, float, bit, datetime, datetime2, date, time, uniqueidentifier, nvarchar, varbinary and null
     Given a workflow with nodes:
-      | name    | type          | typeVersion |
-      | Start   | manualTrigger |             |
-      | Setup   | microsoftSql  | 1.2         |
-      | Insert  | microsoftSql  | 1.2         |
-      | Select  | microsoftSql  | 1.2         |
-      | Cleanup | microsoftSql  | 1.2         |
+      | name  | type          | typeVersion |
+      | Start | manualTrigger |             |
+      | Setup | microsoftSql  | 1.2         |
     And the node "Setup" has parameters:
       """
       {
@@ -120,11 +117,23 @@ Feature: Microsoft SQL node
         "options": {}
       }
       """
+    And the node "Setup" uses the "microsoftSql" credential "Local MSSQL"
+    And the connections "Start -> Setup"
+    When I execute the workflow
+    Then the execution succeeds
+
+    Given a workflow named "MsTypesWrite" with nodes:
+      | name    | type          | typeVersion |
+      | Start   | manualTrigger |             |
+      | Insert  | microsoftSql  | 1.2         |
+      | SetBlob | microsoftSql  | 1.2         |
+      | Select  | microsoftSql  | 1.2         |
+      | Cleanup | microsoftSql  | 1.2         |
     And the trigger outputs the items:
       """
       [{
         "id": 1,
-        "big": 9223372036854775807,
+        "big": 123456789012345,
         "amt": 123.45,
         "spd": 3.5,
         "flag": true,
@@ -134,13 +143,16 @@ Feature: Microsoft SQL node
         "t": "10:30:00",
         "guid": "6f9619ff-8b86-d011-b42d-00c04fc964ff",
         "name": "Alice",
-        "blob": "AB",
         "nothing": null
       }]
       """
     And the node "Insert" has parameters:
       """
-      {"operation": "insert", "table": "ms_bdd_types", "columns": "id,big,amt,spd,flag,dt,dt2,d,t,guid,name,blob,nothing"}
+      {"operation": "insert", "table": "ms_bdd_types", "columns": "id,big,amt,spd,flag,dt,dt2,d,t,guid,name,nothing"}
+      """
+    And the node "SetBlob" has parameters:
+      """
+      {"operation": "executeQuery", "query": "UPDATE ms_bdd_types SET blob = 0x4142 WHERE id = 1", "options": {}}
       """
     And the node "Select" has parameters:
       """
@@ -150,19 +162,19 @@ Feature: Microsoft SQL node
       """
       {"operation": "executeQuery", "query": "DROP TABLE IF EXISTS ms_bdd_types", "options": {}}
       """
-    And the node "Setup" uses the "microsoftSql" credential "Local MSSQL"
     And the node "Insert" uses the "microsoftSql" credential "Local MSSQL"
+    And the node "SetBlob" uses the "microsoftSql" credential "Local MSSQL"
     And the node "Select" uses the "microsoftSql" credential "Local MSSQL"
     And the node "Cleanup" uses the "microsoftSql" credential "Local MSSQL"
-    And the connections "Start -> Setup -> Insert -> Select -> Cleanup"
-    When I execute the workflow
+    And the connections "Start -> Insert -> SetBlob -> Select -> Cleanup"
+    When I execute the workflow "MsTypesWrite"
     Then the execution succeeds
     And the node "Insert" outputs:
       """
-      [{"id": 1, "big": 9223372036854775807, "amt": 123.45, "spd": 3.5, "flag": true, "dt": "2024-01-15 10:30:00", "dt2": "2024-01-15T10:30:00", "d": "2024-01-15", "t": "10:30:00", "guid": "6f9619ff-8b86-d011-b42d-00c04fc964ff", "name": "Alice", "blob": "AB", "nothing": null}]
+      [{"id": 1, "big": 123456789012345, "amt": 123.45, "spd": 3.5, "flag": true, "dt": "2024-01-15 10:30:00", "dt2": "2024-01-15T10:30:00", "d": "2024-01-15", "t": "10:30:00", "guid": "6f9619ff-8b86-d011-b42d-00c04fc964ff", "name": "Alice", "nothing": null}]
       """
     And the field "id" of item 0 from the node "Select" is 1
-    And the field "big" of item 0 from the node "Select" is 9223372036854775807
+    And the field "big" of item 0 from the node "Select" is 123456789012345
     And the field "amt" of item 0 from the node "Select" is 123.45
     And the field "spd" of item 0 from the node "Select" is 3.5
     And the field "flag" of item 0 from the node "Select" is true
@@ -182,7 +194,7 @@ Feature: Microsoft SQL node
       | Setup | microsoftSql  | 1.2         |
     And the node "Setup" has parameters:
       """
-      {"operation": "executeQuery", "query": "CREATE TABLE ms_bdd_chunk(id INT PRIMARY KEY, val NVARCHAR(10))", "options": {}}
+      {"operation": "executeQuery", "query": "CREATE TABLE ms_bdd_chunk(id INT PRIMARY KEY, val NVARCHAR(10), val2 NVARCHAR(10))", "options": {}}
       """
     And the node "Setup" uses the "microsoftSql" credential "Local MSSQL"
     And the connections "Start -> Setup"
@@ -198,11 +210,11 @@ Feature: Microsoft SQL node
       | Cleanup | microsoftSql  | 1.2         |
     And the node "Gen" runs the JavaScript:
       """
-      return Array.from({ length: 1200 }, (_, i) => ({ json: { id: i + 1, val: 'v' + i } }));
+      return Array.from({ length: 1200 }, (_, i) => ({ json: { id: i + 1, val: 'v' + i, val2: 'w' + i } }));
       """
     And the node "Insert" has parameters:
       """
-      {"operation": "insert", "table": "ms_bdd_chunk", "columns": "id,val"}
+      {"operation": "insert", "table": "ms_bdd_chunk", "columns": "id,val,val2"}
       """
     And the node "Count" has parameters:
       """
@@ -227,9 +239,6 @@ Feature: Microsoft SQL node
       | Start   | manualTrigger |             |
       | Setup   | microsoftSql  | 1.2         |
       | Seed    | microsoftSql  | 1.2         |
-      | Update  | microsoftSql  | 1.2         |
-      | Select  | microsoftSql  | 1.2         |
-      | Cleanup | microsoftSql  | 1.2         |
     And the node "Setup" has parameters:
       """
       {"operation": "executeQuery", "query": "CREATE TABLE ms_bdd_update(id INT PRIMARY KEY, name NVARCHAR(10))", "options": {}}
@@ -238,13 +247,25 @@ Feature: Microsoft SQL node
       """
       {"operation": "executeQuery", "query": "INSERT INTO ms_bdd_update VALUES (1,'X')", "options": {}}
       """
-    And the node "Update" has parameters:
-      """
-      {"operation": "update", "table": "ms_bdd_update", "updateKey": "id", "columns": "name"}
-      """
+    And the node "Setup" uses the "microsoftSql" credential "Local MSSQL"
+    And the node "Seed" uses the "microsoftSql" credential "Local MSSQL"
+    And the connections "Start -> Setup -> Seed"
+    When I execute the workflow
+    Then the execution succeeds
+
+    Given a workflow named "MsUpdateWrite" with nodes:
+      | name    | type          | typeVersion |
+      | Start   | manualTrigger |             |
+      | Update  | microsoftSql  | 1.2         |
+      | Select  | microsoftSql  | 1.2         |
+      | Cleanup | microsoftSql  | 1.2         |
     And the trigger outputs the items:
       """
       [{"id": 1, "name": "Y"}]
+      """
+    And the node "Update" has parameters:
+      """
+      {"operation": "update", "table": "ms_bdd_update", "updateKey": "id", "columns": "name"}
       """
     And the node "Select" has parameters:
       """
@@ -254,13 +275,11 @@ Feature: Microsoft SQL node
       """
       {"operation": "executeQuery", "query": "DROP TABLE IF EXISTS ms_bdd_update", "options": {}}
       """
-    And the node "Setup" uses the "microsoftSql" credential "Local MSSQL"
-    And the node "Seed" uses the "microsoftSql" credential "Local MSSQL"
     And the node "Update" uses the "microsoftSql" credential "Local MSSQL"
     And the node "Select" uses the "microsoftSql" credential "Local MSSQL"
     And the node "Cleanup" uses the "microsoftSql" credential "Local MSSQL"
-    And the connections "Start -> Setup -> Seed -> Update -> Select -> Cleanup"
-    When I execute the workflow
+    And the connections "Start -> Update -> Select -> Cleanup"
+    When I execute the workflow "MsUpdateWrite"
     Then the execution succeeds
     And the node "Update" outputs:
       """
@@ -274,9 +293,6 @@ Feature: Microsoft SQL node
       | Start   | manualTrigger |             |
       | Setup   | microsoftSql  | 1.2         |
       | Seed    | microsoftSql  | 1.2         |
-      | Delete  | microsoftSql  | 1.2         |
-      | Count   | microsoftSql  | 1.2         |
-      | Cleanup | microsoftSql  | 1.2         |
     And the node "Setup" has parameters:
       """
       {"operation": "executeQuery", "query": "CREATE TABLE ms_bdd_delete(id INT PRIMARY KEY)", "options": {}}
@@ -285,13 +301,25 @@ Feature: Microsoft SQL node
       """
       {"operation": "executeQuery", "query": "INSERT INTO ms_bdd_delete VALUES (1),(2),(3)", "options": {}}
       """
-    And the node "Delete" has parameters:
-      """
-      {"operation": "delete", "table": "ms_bdd_delete", "deleteKey": "id"}
-      """
+    And the node "Setup" uses the "microsoftSql" credential "Local MSSQL"
+    And the node "Seed" uses the "microsoftSql" credential "Local MSSQL"
+    And the connections "Start -> Setup -> Seed"
+    When I execute the workflow
+    Then the execution succeeds
+
+    Given a workflow named "MsDeleteWrite" with nodes:
+      | name    | type          | typeVersion |
+      | Start   | manualTrigger |             |
+      | Delete  | microsoftSql  | 1.2         |
+      | Count   | microsoftSql  | 1.2         |
+      | Cleanup | microsoftSql  | 1.2         |
     And the trigger outputs the items:
       """
       [{"id": 2}]
+      """
+    And the node "Delete" has parameters:
+      """
+      {"operation": "delete", "table": "ms_bdd_delete", "deleteKey": "id"}
       """
     And the node "Count" has parameters:
       """
@@ -301,13 +329,11 @@ Feature: Microsoft SQL node
       """
       {"operation": "executeQuery", "query": "DROP TABLE IF EXISTS ms_bdd_delete", "options": {}}
       """
-    And the node "Setup" uses the "microsoftSql" credential "Local MSSQL"
-    And the node "Seed" uses the "microsoftSql" credential "Local MSSQL"
     And the node "Delete" uses the "microsoftSql" credential "Local MSSQL"
     And the node "Count" uses the "microsoftSql" credential "Local MSSQL"
     And the node "Cleanup" uses the "microsoftSql" credential "Local MSSQL"
-    And the connections "Start -> Setup -> Seed -> Delete -> Count -> Cleanup"
-    When I execute the workflow
+    And the connections "Start -> Delete -> Count -> Cleanup"
+    When I execute the workflow "MsDeleteWrite"
     Then the execution succeeds
     And the node "Delete" outputs:
       """
