@@ -84,6 +84,15 @@ pub enum Command {
         #[command(subcommand)]
         action: ConfigAction,
     },
+    /// Creates (or seeds rows into) a Data Table, for BDD setup: headless
+    /// `r8r execute` has no running server to call the REST API through.
+    /// `--input` is `{"name","columns":[{"name","type"}],"rows":[{...}]}`;
+    /// prints the created table's JSON (with its columns) on success.
+    #[command(name = "data-table")]
+    DataTable {
+        #[arg(long)]
+        input: PathBuf,
+    },
     /// Imports an n8n database (SQLite or PostgreSQL) into r8r's. The n8n
     /// database is only read. Use the n8n instance's N8N_ENCRYPTION_KEY.
     #[command(name = "migrate-from-n8n")]
@@ -222,6 +231,29 @@ async fn run_inner(command: Command) -> anyhow::Result<i32> {
             Ok(0)
         }
         Command::Execute { id, file, raw_output } => execute(id, file, raw_output).await,
+        Command::DataTable { input } => {
+            let (_, store) = open().await?;
+            let spec = read_json(&input)?;
+            let name = spec["name"].as_str().ok_or_else(|| anyhow::anyhow!("the data table spec needs a \"name\""))?;
+            let columns: Vec<(String, String)> = spec["columns"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|c| Some((c["name"].as_str()?.to_string(), c["type"].as_str()?.to_string())))
+                .collect();
+            let project_id = spec["projectId"].as_str();
+            let table = store.create_data_table(project_id, name, &columns).await.map_err(|e| anyhow::anyhow!(e.message))?;
+            let table_id = table["id"].as_str().unwrap().to_string();
+            if let Some(rows) = spec["rows"].as_array() {
+                let rows: Vec<Value> = rows.clone();
+                let rows: Vec<serde_json::Map<String, Value>> = rows.into_iter().filter_map(|r| r.as_object().cloned()).collect();
+                if !rows.is_empty() {
+                    store.insert_data_table_rows(&table_id, &rows, "count").await.map_err(|e| anyhow::anyhow!(e.message))?;
+                }
+            }
+            println!("{}", serde_json::to_string(&table)?);
+            Ok(0)
+        }
     }
 }
 
