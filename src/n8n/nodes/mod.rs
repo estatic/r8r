@@ -10,6 +10,7 @@ mod data_table;
 mod discord;
 mod email;
 mod files;
+mod ftp;
 mod gmail;
 mod google_auth;
 mod googledrive;
@@ -31,6 +32,8 @@ mod server_nodes;
 mod set;
 mod slack;
 mod sql_common;
+mod ssh;
+mod ssh_common;
 mod telegram;
 mod transform;
 mod utility;
@@ -119,6 +122,12 @@ impl Default for Registry {
             r.add(n);
         }
         for n in email::all() {
+            r.add(n);
+        }
+        for n in ssh::all() {
+            r.add(n);
+        }
+        for n in ftp::all() {
             r.add(n);
         }
         r
