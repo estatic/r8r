@@ -5,6 +5,7 @@ pub mod ai;
 pub mod api;
 pub mod cli;
 pub mod credentials;
+pub mod data_table;
 pub mod execution;
 pub mod expressions;
 pub mod http;

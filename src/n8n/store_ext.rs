@@ -412,6 +412,31 @@ impl Store {
         Ok(())
     }
 
+    /// The user's personal project (n8n gives every user one implicitly;
+    /// r8r creates it lazily, the first time a feature needs a real
+    /// project id for a personal scope -- Data Tables' REST routes, which
+    /// are always `/projects/:projectId/...`).
+    pub async fn personal_project(&self, user_id: &str) -> anyhow::Result<String> {
+        let row = sqlx::query(&self.sql("SELECT project_id FROM project_relation WHERE user_id = ? AND role = 'project:personalOwner'"))
+            .bind(user_id)
+            .fetch_optional(&self.pool)
+            .await?;
+        if let Some(r) = row {
+            return Ok(r.get("project_id"));
+        }
+        let id = new_id();
+        let now = now();
+        sqlx::query(&self.sql("INSERT INTO project (id, name, type, created_at, updated_at) VALUES (?, ?, 'personal', ?, ?)"))
+            .bind(&id)
+            .bind("Personal")
+            .bind(&now)
+            .bind(&now)
+            .execute(&self.writer)
+            .await?;
+        self.add_project_relation(&id, user_id, "project:personalOwner").await?;
+        Ok(id)
+    }
+
     /// The user's role in a project, if any.
     pub async fn project_role(&self, project_id: &str, user_id: &str) -> anyhow::Result<Option<String>> {
         let row = sqlx::query(&self.sql("SELECT role FROM project_relation WHERE project_id = ? AND user_id = ?"))

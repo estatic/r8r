@@ -67,6 +67,17 @@ const DESCRIPTIONS: &[Desc] = &[
     d("n8n-nodes-base.executeCommand", "Execute Command", "transform", &[1.0], "Executes a command on the host", 1, 1, &["executeOnce", "command"], &[]),
     d("n8n-nodes-base.compression", "Compression", "transform", &[1.0, 1.1], "Compress and decompress files", 1, 1, &["operation", "binaryPropertyName", "outputFormat", "fileName", "binaryPropertyOutput", "outputPrefix"], &[]),
     d(
+        "n8n-nodes-base.dataTable",
+        "Data table",
+        "input",
+        &[1.0, 1.1],
+        "Permanently save data across workflow executions in a table",
+        1,
+        1,
+        &["resource", "operation", "dataTableId", "columns", "filters", "matchType", "returnAll", "limit", "orderBy", "orderByColumn", "orderByDirection", "name", "options"],
+        &[],
+    ),
+    d(
         "n8n-nodes-base.redis",
         "Redis",
         "input",

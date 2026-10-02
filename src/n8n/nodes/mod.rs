@@ -6,6 +6,7 @@ mod code;
 mod compression;
 mod conditions;
 mod core;
+mod data_table;
 mod discord;
 mod email;
 mod files;
@@ -119,6 +120,7 @@ impl Default for Registry {
         r.add(Box::new(notion::Notion));
         r.add(Box::new(airtable::Airtable));
         r.add(Box::new(discord::Discord));
+        r.add(Box::new(data_table::DataTable));
         r.add(Box::new(openai::OpenAi));
         for n in files::all() {
             r.add(n);
