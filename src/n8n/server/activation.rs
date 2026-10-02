@@ -250,6 +250,35 @@ pub async fn activate_schedules_for_all(n8n: &Arc<N8n>) {
     tracing::info!("[multi-main] leader takeover: added schedules for {n} active workflow(s)");
 }
 
+/// Picks up webhook/form registrations made by *another* process sharing
+/// this database: used by `r8r webhook` (always) and, since multi-main
+/// setup means more than one `r8r start` main shares a database, by every
+/// main when `N8N_MULTI_MAIN_SETUP_ENABLED=true`. A workflow activated
+/// through main A's REST API is otherwise invisible to main B until this
+/// runs; schedules/pollers are unaffected here (they come from
+/// leader election, not from this poll -- `register` only starts them
+/// when this instance is already the leader).
+pub async fn sync_registrations(n8n: &Arc<N8n>) {
+    let Ok(rows) = n8n.store.workflow_rows().await else { return };
+    let mut active_ids = Vec::new();
+    for row in rows.into_iter().filter(|r| r.active) {
+        let id = row.data["id"].as_str().unwrap_or_default().to_string();
+        let mut current = row.data.clone();
+        current["active"] = json!(true);
+        let unchanged = n8n.active.read().unwrap().get(&id).is_some_and(|w| **w == current);
+        if !unchanged {
+            if let Err(e) = register(n8n, &row.data).await {
+                tracing::warn!(workflowId = %id, error = %e.1, "could not register workflow webhooks");
+            }
+        }
+        active_ids.push(id);
+    }
+    let stale: Vec<String> = n8n.active.read().unwrap().keys().filter(|k| !active_ids.contains(k)).cloned().collect();
+    for id in stale {
+        unregister(n8n, &id);
+    }
+}
+
 /// Multi-main stepdown (plan task 4.1): removes every schedule timer this
 /// instance was running, leaving webhooks/forms (served by every main)
 /// untouched. Mirrors n8n's `removeAllNonWebhookTriggerWorkflows`.

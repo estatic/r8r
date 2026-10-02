@@ -263,6 +263,20 @@ impl N8n {
                     }
                 }
             });
+            // Multi-main setup means this main shares its database with
+            // other mains: pick up activations/deactivations made through
+            // one of them (as `r8r webhook` already does), so webhooks and
+            // forms answer on every main, not just the one that received
+            // the REST call.
+            let me = Arc::downgrade(self);
+            tokio::spawn(async move {
+                let mut tick = tokio::time::interval(std::time::Duration::from_secs(2));
+                loop {
+                    tick.tick().await;
+                    let Some(n8n) = me.upgrade() else { return };
+                    activation::sync_registrations(&n8n).await;
+                }
+            });
         }
         // Timed waits resume when due; old executions are pruned.
         let me = Arc::downgrade(self);

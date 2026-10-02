@@ -118,7 +118,7 @@ pub async fn run_webhook_process() -> anyhow::Result<()> {
         let mut tick = tokio::time::interval(Duration::from_secs(2));
         loop {
             tick.tick().await;
-            sync_registrations(&me).await;
+            activation::sync_registrations(&me).await;
         }
     });
     let app = Router::new()
@@ -131,25 +131,4 @@ pub async fn run_webhook_process() -> anyhow::Result<()> {
     axum::serve(listener, app).with_graceful_shutdown(super::shutdown_signal()).await?;
     n8n.drain(grace()).await;
     Ok(())
-}
-
-async fn sync_registrations(n8n: &Arc<N8n>) {
-    let Ok(rows) = n8n.store.workflow_rows().await else { return };
-    let mut active_ids = Vec::new();
-    for row in rows.into_iter().filter(|r| r.active) {
-        let id = row.data["id"].as_str().unwrap_or_default().to_string();
-        let mut current = row.data.clone();
-        current["active"] = json!(true);
-        let unchanged = n8n.active.read().unwrap().get(&id).is_some_and(|w| **w == current);
-        if !unchanged {
-            if let Err(e) = activation::register(n8n, &row.data).await {
-                tracing::warn!(workflowId = %id, error = %e.1, "could not register workflow webhooks");
-            }
-        }
-        active_ids.push(id);
-    }
-    let stale: Vec<String> = n8n.active.read().unwrap().keys().filter(|k| !active_ids.contains(k)).cloned().collect();
-    for id in stale {
-        activation::unregister(n8n, &id);
-    }
 }
