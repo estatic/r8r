@@ -4,6 +4,7 @@
 
 pub mod activation;
 pub mod auth;
+pub mod data_tables;
 pub mod public_api;
 pub mod push;
 pub mod rest;
@@ -287,6 +288,7 @@ pub fn router(state: Arc<N8n>) -> Router {
         .merge(rest::router())
         .merge(public_api::router())
         .merge(webhooks::router())
+        .merge(data_tables::router())
         .with_state(state)
 }
 
