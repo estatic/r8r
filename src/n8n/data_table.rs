@@ -350,7 +350,7 @@ impl Store {
         }
         let ddl_cols: Vec<String> = col_metas.iter().map(|c| format!("{} {}", qi(&c.name), c.col_type.sql_type(self.postgres))).collect();
         let create = format!(
-            "CREATE TABLE {} (id {} PRIMARY KEY {}, {}createdAt TEXT NOT NULL, updatedAt TEXT NOT NULL)",
+            "CREATE TABLE {} (\"id\" {} PRIMARY KEY {}, {}\"createdAt\" TEXT NOT NULL, \"updatedAt\" TEXT NOT NULL)",
             qi(&table_name(&id)),
             if self.postgres { "SERIAL" } else { "INTEGER" },
             if self.postgres { "" } else { "AUTOINCREMENT" },
@@ -718,7 +718,7 @@ impl Store {
         }
         let now_s = now();
         let set_cols: Vec<String> = names.iter().map(|n| format!("{} = ?", qi(n))).collect();
-        let sql = format!("UPDATE {} SET updatedAt = ?{} {}", qi(&table_name(table_id)), if set_cols.is_empty() { String::new() } else { format!(", {}", set_cols.join(", ")) }, where_sql);
+        let sql = format!("UPDATE {} SET \"updatedAt\" = ?{} {}", qi(&table_name(table_id)), if set_cols.is_empty() { String::new() } else { format!(", {}", set_cols.join(", ")) }, where_sql);
         let sql_s = self.sql(&sql);
         let mut q = sqlx::query(&sql_s).bind(now_s);
         for b in &data_binds {
