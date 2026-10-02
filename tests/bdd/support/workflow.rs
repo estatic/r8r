@@ -44,6 +44,9 @@ pub fn default_type_version(node_type: &str) -> Value {
         "mongoDb" => json!(1.4),
         "microsoftSql" => json!(1.2),
         "discord" => json!(2),
+        "rabbitmq" => json!(1.2),
+        "kafka" => json!(1),
+        "mqtt" => json!(1),
         _ => json!(1),
     }
 }

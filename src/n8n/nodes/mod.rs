@@ -27,6 +27,7 @@ mod notion;
 mod openai;
 mod postgres;
 mod python;
+mod rabbitmq;
 mod redis;
 mod routing;
 mod server_nodes;
@@ -84,6 +85,7 @@ impl Default for Registry {
         }
         r.add(Box::new(compression::Compression));
         r.add(Box::new(redis::Redis));
+        r.add(Box::new(rabbitmq::RabbitMq));
         for n in transform::all() {
             r.add(n);
         }
