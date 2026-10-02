@@ -26,6 +26,7 @@ const OPT_IN_TAGS: &[&str] = &[
     "requires-postgres",
     "requires-mysql",
     "requires-mongodb",
+    "requires-mssql",
     "requires-python-runner",
     "requires-mailpit",
     "requires-ssh",

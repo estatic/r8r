@@ -137,6 +137,23 @@ pub fn all() -> Vec<CredentialType> {
             ],
         },
         CredentialType {
+            name: "microsoftSql",
+            display_name: "Microsoft SQL",
+            fields: vec![
+                f("server", "Server", false, false, json!("localhost")),
+                f("database", "Database", false, false, json!("master")),
+                f("user", "User", false, false, json!("sa")),
+                f("password", "Password", true, false, json!("")),
+                f_typed("port", "Port", false, false, json!(1433), "number"),
+                f("domain", "Domain", false, false, json!("")),
+                f_typed("tls", "TLS", false, false, json!(true), "boolean"),
+                f_typed("allowUnauthorizedCerts", "Ignore SSL Issues (Insecure)", false, false, json!(false), "boolean"),
+                f_typed("connectTimeout", "Connect Timeout", false, false, json!(15000), "number"),
+                f_typed("requestTimeout", "Request Timeout", false, false, json!(15000), "number"),
+                f("tdsVersion", "TDS Version", false, false, json!("7_4")),
+            ],
+        },
+        CredentialType {
             name: "mongoDb",
             display_name: "MongoDB",
             fields: vec![

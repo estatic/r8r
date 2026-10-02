@@ -64,6 +64,8 @@ russh-sftp = "3.0.1"
 suppaftp = { version = "12.1.1", default-features = false, features = ["tokio"] }
 mongodb = "3.9.1"
 futures-util = "0.3"
+tiberius = { version = "0.13.0", default-features = false, features = ["rustls", "chrono", "bigdecimal", "tds73"] }
+tokio-util = { version = "0.7.19", features = ["compat"] }
 
 [dev-dependencies]
 cucumber = "0.23"
