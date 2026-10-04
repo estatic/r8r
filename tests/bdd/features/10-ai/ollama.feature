@@ -55,6 +55,34 @@ Feature: Ollama chat model sub-node
     And the node "Model" has run data on the "ai_languageModel" connection
     And the node "Model" recorded a token usage of 15 in total
 
+  Scenario: A Basic LLM Chain returns Ollama's answer
+    Given a mock Ollama API that replies in order:
+      """
+      [{"role": "assistant", "content": "Paris"}]
+      """
+    And a workflow with nodes:
+      | name  | type            | parameters                                                                       |
+      | Start | manualTrigger   |                                                                                  |
+      | Chain | lc.chainLlm     | {"promptType": "define", "text": "=What is the capital of {{ $json.country }}?"} |
+      | Model | lc.lmChatOllama | {"model": "llama3.2", "options": {}}                                            |
+    And the node "Model" uses the "ollamaApi" credential "Mock Ollama"
+    And the connections:
+      """
+      Start -> Chain
+      Model -[ai_languageModel]-> Chain
+      """
+    And the trigger outputs the items:
+      """
+      [{"country": "France"}]
+      """
+    When I execute the workflow
+    Then the execution succeeds
+    And the node "Chain" outputs:
+      """
+      [{"text": "Paris"}]
+      """
+    And ollama chat request 1 contains a "user" message containing "capital of France"
+
   Scenario: An agent calls a tool through Ollama and answers with its result
     Given a mock Ollama API that replies in order:
       """
