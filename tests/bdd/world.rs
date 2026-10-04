@@ -9,6 +9,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// A message received by the test MQTT subscriber (`steps/mqtt.rs`):
+/// `(topic, payload)`.
+pub type MqttMessages = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Auth {
     None,
@@ -80,9 +84,7 @@ pub struct R8rWorld {
     pub mock: Option<wiremock::MockServer>,
     pub push_messages: Arc<Mutex<Vec<Value>>>,
     pub push_task: Option<tokio::task::JoinHandle<()>>,
-    /// Messages received by a test MQTT subscriber (`steps/mqtt.rs`):
-    /// `(topic, payload)`.
-    pub mqtt_messages: Arc<Mutex<Vec<(String, Vec<u8>)>>>,
+    pub mqtt_messages: MqttMessages,
     pub mqtt_task: Option<tokio::task::JoinHandle<()>>,
     pub expr: ExprState,
     pub load: Vec<(u16, Duration)>,
