@@ -4121,6 +4121,7 @@ dependencies = [
  "russh-sftp",
  "rust-embed",
  "rust_xlsxwriter",
+ "rustls 0.23.45",
  "scraper",
  "serde",
  "serde_json",

@@ -31,6 +31,7 @@ const OPT_IN_TAGS: &[&str] = &[
     "requires-mailpit",
     "requires-ssh",
     "requires-ftp",
+    "requires-imap",
 ];
 
 #[tokio::main]

@@ -106,7 +106,17 @@ const DESCRIPTIONS: &[Desc] = &[
     ),
     d("n8n-nodes-base.localFileTrigger", "Local File Trigger", "trigger", &[1.0], "Triggers a workflow on file system changes", 0, 1, &["triggerOn", "path", "events"], &[]),
     d("n8n-nodes-base.emailSend", "Send Email", "output", &[2.0, 2.1], "Sends an email using SMTP protocol", 1, 1, &["fromEmail", "toEmail", "subject", "emailFormat", "options"], &["smtp"]),
-    d("n8n-nodes-base.emailReadImap", "Email Trigger (IMAP)", "trigger", &[2.0], "Triggers the workflow when a new email is received", 0, 1, &["mailbox", "postProcessAction", "options"], &["imap"]),
+    d(
+        "n8n-nodes-base.emailReadImap",
+        "Email Trigger (IMAP)",
+        "trigger",
+        &[2.0, 2.1, 2.2],
+        "Triggers the workflow when a new email is received",
+        0,
+        1,
+        &["mailbox", "postProcessAction", "downloadAttachments", "format", "dataPropertyAttachmentsPrefixName", "options"],
+        &["imap"],
+    ),
     d(
         "n8n-nodes-base.ftp",
         "FTP",

@@ -495,172 +495,22 @@ fn decode_base64url(s: &str) -> NodeResult<Vec<u8>> {
         .map_err(|e| NodeError::new(format!("Could not decode the Gmail message: {e}")))
 }
 
-fn split_headers_body(s: &str) -> (&str, &str) {
-    if let Some(pos) = s.find("\r\n\r\n") {
-        (&s[..pos], &s[pos + 4..])
-    } else if let Some(pos) = s.find("\n\n") {
-        (&s[..pos], &s[pos + 2..])
-    } else {
-        (s, "")
-    }
-}
-
-fn parse_header_block(block: &str) -> Vec<(String, String)> {
-    let mut out: Vec<(String, String)> = Vec::new();
-    for raw_line in block.split('\n') {
-        let line = raw_line.trim_end_matches('\r');
-        if line.is_empty() {
-            continue;
-        }
-        if (line.starts_with(' ') || line.starts_with('\t')) && !out.is_empty() {
-            let last = out.last_mut().unwrap();
-            last.1.push(' ');
-            last.1.push_str(line.trim());
-        } else if let Some(idx) = line.find(':') {
-            out.push((line[..idx].trim().to_string(), line[idx + 1..].trim().to_string()));
-        }
-    }
-    out
-}
-
-fn header_value<'a>(headers: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    headers.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)).map(|(_, v)| v.as_str())
-}
-
-/// Reads `param="value"` or `param=value` out of a `Content-Type`/
-/// `Content-Disposition` header value.
-fn header_param(value: &str, param: &str) -> Option<String> {
-    for part in value.split(';').skip(1) {
-        let part = part.trim();
-        if let Some(rest) = part.strip_prefix(&format!("{param}=")) {
-            return Some(rest.trim_matches('"').to_string());
-        }
-    }
-    None
-}
-
-fn quoted_printable_decode(s: &str) -> Vec<u8> {
-    let bytes = s.as_bytes();
-    let mut out = Vec::new();
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'=' {
-            if i + 2 < bytes.len() && bytes[i + 1] == b'\r' && bytes[i + 2] == b'\n' {
-                i += 3;
-                continue;
-            }
-            if i + 1 < bytes.len() && bytes[i + 1] == b'\n' {
-                i += 2;
-                continue;
-            }
-            if i + 2 < bytes.len() {
-                if let Ok(h) = u8::from_str_radix(std::str::from_utf8(&bytes[i + 1..i + 3]).unwrap_or(""), 16) {
-                    out.push(h);
-                    i += 3;
-                    continue;
-                }
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    out
-}
-
-fn content_transfer_decode(encoding: &str, body: &str) -> Vec<u8> {
-    match encoding.to_ascii_lowercase().as_str() {
-        "base64" => {
-            let cleaned: String = body.chars().filter(|c| !c.is_whitespace()).collect();
-            base64::engine::general_purpose::STANDARD.decode(cleaned.as_bytes()).unwrap_or_default()
-        }
-        "quoted-printable" => quoted_printable_decode(body),
-        _ => body.as_bytes().to_vec(),
-    }
-}
-
-struct ParsedPart {
-    content_type: String,
-    filename: Option<String>,
-    is_attachment: bool,
-    body: Vec<u8>,
-}
-
-fn split_multipart<'a>(body: &'a str, delim: &str) -> Vec<&'a str> {
-    let mut segments = Vec::new();
-    let mut rest = body;
-    while let Some(pos) = rest.find(delim) {
-        let after = &rest[pos + delim.len()..];
-        if after.starts_with("--") {
-            break;
-        }
-        let after = after.strip_prefix("\r\n").or_else(|| after.strip_prefix('\n')).unwrap_or(after);
-        match after.find(delim) {
-            Some(next_pos) => {
-                segments.push(&after[..next_pos]);
-                rest = &after[next_pos..];
-            }
-            None => {
-                segments.push(after);
-                break;
-            }
-        }
-    }
-    segments
-}
-
-fn parse_parts(headers: &[(String, String)], body_str: &str, out: &mut Vec<ParsedPart>) {
-    let ctype_header = header_value(headers, "Content-Type").unwrap_or("text/plain").to_string();
-    let main_type = ctype_header.split(';').next().unwrap_or("text/plain").trim().to_ascii_lowercase();
-    if let Some(stripped) = main_type.strip_prefix("multipart/") {
-        let _ = stripped;
-        if let Some(boundary) = header_param(&ctype_header, "boundary") {
-            let delim = format!("--{boundary}");
-            for segment in split_multipart(body_str, &delim) {
-                let (seg_headers_block, seg_body) = split_headers_body(segment);
-                let seg_headers = parse_header_block(seg_headers_block);
-                parse_parts(&seg_headers, seg_body, out);
-            }
-        }
-        return;
-    }
-    let cte = header_value(headers, "Content-Transfer-Encoding").unwrap_or("7bit").to_string();
-    let decoded = content_transfer_decode(&cte, body_str);
-    let disposition = header_value(headers, "Content-Disposition").unwrap_or("").to_string();
-    let filename = header_param(&disposition, "filename").or_else(|| header_param(&ctype_header, "name"));
-    let is_attachment = disposition.to_ascii_lowercase().starts_with("attachment") || (filename.is_some() && !main_type.starts_with("text/"));
-    out.push(ParsedPart { content_type: main_type, filename, is_attachment, body: decoded });
-}
-
 /// n8n's `parseRawEmail`: decodes the base64url `raw` field, parses the
 /// MIME tree, and shapes it like `mailparser`'s `simpleParser` output
-/// (simplified; see the module doc comment).
+/// (simplified; see the module doc comment). The low-level MIME parsing is
+/// shared with the Email Trigger (IMAP) node via `super::mime`.
 fn parse_raw_email(message_data: &Value, download_attachments: bool, attachment_prefix: &str) -> NodeResult<Item> {
     let raw = message_data.get("raw").and_then(Value::as_str).unwrap_or("");
     let decoded = decode_base64url(raw)?;
     let text = String::from_utf8_lossy(&decoded).into_owned();
-    let (header_block, body) = split_headers_body(&text);
-    let headers = parse_header_block(header_block);
-    let mut parts = Vec::new();
-    parse_parts(&headers, body, &mut parts);
-
-    let mut text_body = String::new();
-    let mut html_body: Option<String> = None;
-    let mut attachments_parsed: Vec<ParsedPart> = Vec::new();
-    for p in parts {
-        if !p.is_attachment && p.content_type == "text/plain" && text_body.is_empty() {
-            text_body = String::from_utf8_lossy(&p.body).into_owned();
-        } else if !p.is_attachment && p.content_type == "text/html" && html_body.is_none() {
-            html_body = Some(String::from_utf8_lossy(&p.body).into_owned());
-        } else {
-            attachments_parsed.push(p);
-        }
-    }
+    let (headers, parts) = super::mime::parse_message(&text);
+    let (text_body, html_body, attachments_parsed) = super::mime::split_text_and_attachments(parts);
 
     let mut headers_map = Map::new();
     for (name, value) in &headers {
         headers_map.insert(name.to_ascii_lowercase(), json!(format!("{name}: {value}")));
     }
-    let lookup = |name: &str| header_value(&headers, name).map(str::to_string);
+    let lookup = |name: &str| super::mime::header_value(&headers, name).map(str::to_string);
 
     let mut json_out = Map::new();
     json_out.insert("id".into(), message_data.get("id").cloned().unwrap_or(Value::Null));

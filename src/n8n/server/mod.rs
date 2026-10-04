@@ -9,6 +9,7 @@ pub mod public_api;
 pub mod push;
 pub mod rest;
 pub mod runner;
+pub mod triggers;
 pub mod webhooks;
 pub mod worker;
 
@@ -44,6 +45,10 @@ pub struct N8n {
     pub test_webhooks: Mutex<Vec<webhooks::TestRegistration>>,
     /// Schedule tasks per active workflow.
     pub schedules: Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
+    /// Long-lived trigger listener tasks per active workflow (plan task
+    /// 1.15 / 4.1 follow-on: Email Trigger (IMAP), and future RabbitMQ/
+    /// Kafka/MQTT triggers). Leader-only, like `schedules`.
+    pub long_lived_triggers: Mutex<HashMap<String, Vec<tokio::task::JoinHandle<()>>>>,
     /// Running executions, for stopping them.
     pub running: Mutex<HashMap<i64, super::engine::ExecuteOptions>>,
     pub inflight: AtomicUsize,
@@ -201,6 +206,7 @@ impl N8n {
                 active: RwLock::new(HashMap::new()),
                 test_webhooks: Mutex::new(Vec::new()),
                 schedules: Mutex::new(HashMap::new()),
+                long_lived_triggers: Mutex::new(HashMap::new()),
                 running: Mutex::new(HashMap::new()),
                 inflight: AtomicUsize::new(0),
                 inflight_done: tokio::sync::Notify::new(),
@@ -258,8 +264,10 @@ impl N8n {
                     let Some(n8n) = me.upgrade() else { return };
                     if *changes.borrow() {
                         activation::activate_schedules_for_all(&n8n).await;
+                        triggers::activate_for_all(&n8n).await;
                     } else {
                         activation::deactivate_schedules_for_all(&n8n);
+                        triggers::deactivate_for_all(&n8n);
                     }
                 }
             });
