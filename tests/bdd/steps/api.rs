@@ -232,6 +232,28 @@ async fn eventually_count(w: &mut R8rWorld, secs: u64, count: usize) {
     }
 }
 
+/// Like [`eventually_count`], but for a workflow other than the most
+/// recently created one -- needed when a scenario has several workflows
+/// active at once (e.g. the multi-main "each broker trigger only fires on
+/// the leader" scenario).
+#[given(regex = r#"^within (\d+) seconds the workflow "([^"]*)" has at least (\d+) executions?$"#)]
+#[then(regex = r#"^within (\d+) seconds the workflow "([^"]*)" has at least (\d+) executions?$"#)]
+async fn eventually_count_named(w: &mut R8rWorld, secs: u64, name: String, count: usize) {
+    let id = workflow_id(w, &name).expect("workflow created");
+    let deadline = std::time::Instant::now() + Duration::from_secs(secs);
+    loop {
+        let list = list_executions(w, &id).await;
+        if list.len() >= count {
+            w.run = list.first().cloned();
+            return;
+        }
+        if std::time::Instant::now() > deadline {
+            panic!("only {} executions after {secs}s for workflow {name:?}\n{}", list.len(), w.server_log_tail());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
 #[when(expr = "I remember the executions count of the workflow")]
 async fn remember_count(w: &mut R8rWorld) {
     let name = w.wf().name.clone();
