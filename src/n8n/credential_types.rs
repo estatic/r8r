@@ -180,6 +180,21 @@ pub fn all() -> Vec<CredentialType> {
             ],
         },
         CredentialType {
+            name: "openRouterApi",
+            display_name: "OpenRouter",
+            fields: vec![f("apiKey", "API Key", true, true, json!("")), f("url", "Base URL", false, false, json!("https://openrouter.ai/api/v1"))],
+        },
+        CredentialType {
+            name: "groqApi",
+            display_name: "Groq",
+            fields: vec![f("apiKey", "API Key", true, true, json!("")), f("url", "Base URL", false, false, json!("https://api.groq.com/openai/v1"))],
+        },
+        CredentialType {
+            name: "mistralCloudApi",
+            display_name: "Mistral Cloud API",
+            fields: vec![f("apiKey", "API Key", true, true, json!("")), f("url", "Base URL", false, false, json!("https://api.mistral.ai/v1"))],
+        },
+        CredentialType {
             name: "postgres",
             display_name: "Postgres",
             fields: vec![
