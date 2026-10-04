@@ -6,10 +6,10 @@
 use crate::steps::{docstring, eventually};
 use crate::world::R8rWorld;
 use cucumber::gherkin::Step;
-use cucumber::{given, then};
-use lapin::options::{BasicGetOptions, ExchangeDeclareOptions, ExchangeDeleteOptions, QueueBindOptions, QueueDeclareOptions, QueueDeleteOptions};
-use lapin::types::FieldTable;
-use lapin::{Channel, Connection, ConnectionProperties, ExchangeKind};
+use cucumber::{given, then, when};
+use lapin::options::{BasicGetOptions, BasicPublishOptions, ExchangeDeclareOptions, ExchangeDeleteOptions, QueueBindOptions, QueueDeclareOptions, QueueDeleteOptions};
+use lapin::types::{FieldTable, ShortString};
+use lapin::{BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -61,6 +61,21 @@ async fn exchange_bound(_w: &mut R8rWorld, kind: String, exchange: String, queue
         .expect("declare exchange");
     let key = if kind == "topic" { "#" } else { "" };
     ch.queue_bind(queue.into(), exchange.into(), key.into(), QueueBindOptions::default(), FieldTable::default()).await.expect("bind queue");
+}
+
+/// Publishes directly to `queue` (the default exchange, routing key =
+/// queue name) for the RabbitMQ Trigger's `@requires-rabbitmq` scenarios --
+/// the trigger will have already declared/checked the queue on
+/// activation, so this step only needs to publish, not declare.
+#[when(expr = "I publish to the RabbitMQ queue {string}:")]
+async fn publish(w: &mut R8rWorld, queue: String, step: &Step) {
+    let body = w.expand(docstring(step));
+    let ch = channel().await;
+    ch.basic_publish(ShortString::from(""), ShortString::from(queue), BasicPublishOptions::default(), body.as_bytes(), BasicProperties::default())
+        .await
+        .expect("publish to the bdd rabbitmq instance")
+        .await
+        .expect("publish confirm");
 }
 
 fn field_table_to_json(table: &FieldTable) -> Value {
