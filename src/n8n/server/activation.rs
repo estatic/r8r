@@ -144,6 +144,7 @@ fn trigger_types() -> &'static [&'static str] {
         "n8n-nodes-base.scheduleTrigger",
         "n8n-nodes-base.errorTrigger",
         "n8n-nodes-base.executeWorkflowTrigger",
+        "n8n-nodes-base.emailReadImap",
     ]
 }
 
@@ -178,6 +179,16 @@ pub async fn register(n8n: &Arc<N8n>, workflow_json: &Value) -> Result<(), ApiEr
         // rejected on activation").
         schedule_rules(&node.parameters).map_err(ApiError::bad_request)?;
     }
+    for node in triggers.iter().copied() {
+        // Long-lived triggers (Email Trigger (IMAP), and future RabbitMQ/
+        // Kafka/MQTT) connect once now, on every main regardless of
+        // leadership, so a bad host/credentials fails activation the same
+        // way n8n's trigger() throwing during add() does, rather than only
+        // showing up later in the leader's logs.
+        if let Some(trigger) = super::triggers::for_node_type(&node.node_type) {
+            trigger.validate(n8n, node).await.map_err(ApiError::bad_request)?;
+        }
+    }
     unregister(n8n, &id);
     n8n.webhooks.write().unwrap().extend(registrations);
     let mut cached = workflow_json.clone();
@@ -185,6 +196,7 @@ pub async fn register(n8n: &Arc<N8n>, workflow_json: &Value) -> Result<(), ApiEr
     n8n.active.write().unwrap().insert(id.clone(), Arc::new(cached));
     if n8n.schedules_enabled.load(std::sync::atomic::Ordering::SeqCst) && n8n.leader.is_leader() {
         start_schedules(n8n, &id, &workflow);
+        super::triggers::start(n8n, &id, &workflow);
     }
     tracing::info!(workflowId = %id, "Activated workflow \"{}\"", workflow.name);
     Ok(())
@@ -226,6 +238,7 @@ pub fn unregister(n8n: &N8n, workflow_id: &str) {
     n8n.webhooks.write().unwrap().retain(|r| r.workflow_id != workflow_id);
     n8n.active.write().unwrap().remove(workflow_id);
     stop_schedules(n8n, workflow_id);
+    super::triggers::stop(n8n, workflow_id);
 }
 
 /// Multi-main takeover (plan task 4.1): adds schedule timers for every

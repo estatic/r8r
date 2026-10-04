@@ -73,6 +73,28 @@ Feature: Multi-main leader election
     When I send a POST request to "/webhook/shared" on the server named "b"
     Then the response status is 200
 
+  @requires-redis @requires-postgres @requires-imap
+  Scenario: Two mains share a mailbox and only the leader's listener processes it
+    Given queue mode backed by Redis and PostgreSQL
+    And the environment variable "N8N_MULTI_MAIN_SETUP_ENABLED" is "true"
+    And the environment variable "N8N_MULTI_MAIN_SETUP_KEY_TTL" is "2"
+    And the environment variable "N8N_MULTI_MAIN_SETUP_CHECK_INTERVAL" is "1"
+    And the credential "IMAP Shared" of type "imap" with the data:
+      """
+      {"user": "imap-multimain@r8r.test", "password": "testpass", "host": "127.0.0.1", "port": 3143, "secure": false}
+      """
+    And a running r8r server with an owner and an API key
+    And a running r8r server named "b" with the same configuration
+    And a running r8r worker named "w1"
+    And a workflow named "Shared mailbox" with nodes:
+      | name | type          | parameters                                                                       |
+      | Mail | emailReadImap | {"mailbox": "INBOX", "postProcessAction": "read", "format": "simple", "options": {}} |
+    And the node "Mail" uses the "imap" credential "IMAP Shared"
+    And the workflow is active
+    When I deliver a test email to "imap-multimain@r8r.test" with subject "Multi-main mail" and body "Only one main should pick this up"
+    Then within 10 seconds the workflow has at least 1 executions
+    And the workflow has 1 execution
+
   Scenario: Single-main (the default) still fires schedules
     Given a running r8r server with an owner and an API key
     And a workflow named "Solo schedule" with nodes:
