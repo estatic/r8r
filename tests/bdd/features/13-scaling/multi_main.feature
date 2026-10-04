@@ -97,12 +97,22 @@ Feature: Multi-main leader election
 
   @requires-redis @requires-postgres @requires-rabbitmq @requires-mqtt @requires-kafka
   Scenario: Two mains share RabbitMQ, Kafka and MQTT triggers and only the leader's listener processes each
+    # A longer TTL/check interval than the other scenarios here: activating
+    # three broker connections one after another is slower than a schedule
+    # or webhook, and the Kafka Trigger has no committed offset to resume
+    # from (documented deviation in kafka.rs -- rskafka has no
+    # consumer-group support) -- its in-memory cursor resets to "latest"
+    # every time its listener (re)starts, so a leadership flip between the
+    # publish and the leader processing it would miss the message
+    # entirely rather than just duplicate it. `fromBeginning: false` plus a
+    # pre-created topic (not a historical backlog from earlier test runs
+    # against this long-lived broker) keeps the scenario repeatable.
     Given queue mode backed by Redis and PostgreSQL
     And the environment variable "N8N_MULTI_MAIN_SETUP_ENABLED" is "true"
-    And the environment variable "N8N_MULTI_MAIN_SETUP_KEY_TTL" is "2"
-    And the environment variable "N8N_MULTI_MAIN_SETUP_CHECK_INTERVAL" is "1"
+    And the environment variable "N8N_MULTI_MAIN_SETUP_KEY_TTL" is "10"
+    And the environment variable "N8N_MULTI_MAIN_SETUP_CHECK_INTERVAL" is "2"
     And the RabbitMQ queue "bdd-multimain-queue" does not exist
-    And the Kafka topic "bdd-multimain-topic" exists
+    And the Kafka topic "bdd-multimain-topic-2" exists
     And the credential "RabbitMQ Shared" of type "rabbitmq" with the data:
       """
       {"hostname": "127.0.0.1", "port": 5672, "username": "guest", "password": "guest", "vhost": "/"}
@@ -125,7 +135,7 @@ Feature: Multi-main leader election
     And the workflow is active
     And a workflow named "Shared Kafka" with nodes:
       | name | type         | parameters                                                                             |
-      | Mail | kafkaTrigger | {"topic": "bdd-multimain-topic", "groupId": "bdd-multimain-group", "options": {}}      |
+      | Mail | kafkaTrigger | {"topic": "bdd-multimain-topic-2", "groupId": "bdd-multimain-group", "options": {"fromBeginning": false}} |
     And the node "Mail" uses the "kafka" credential "Kafka Shared"
     And the workflow is active
     And a workflow named "Shared MQTT" with nodes:
@@ -137,7 +147,7 @@ Feature: Multi-main leader election
       """
       one leader only
       """
-    And I publish to the Kafka topic "bdd-multimain-topic":
+    And I publish to the Kafka topic "bdd-multimain-topic-2":
       """
       one leader only
       """
