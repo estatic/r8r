@@ -6,7 +6,7 @@
 use crate::steps::{docstring, eventually};
 use crate::world::R8rWorld;
 use cucumber::gherkin::Step;
-use cucumber::{then, when};
+use cucumber::{given, then, when};
 use rskafka::client::partition::{Compression, OffsetAt, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
 use rskafka::record::Record;
@@ -21,6 +21,21 @@ fn brokers() -> Vec<String> {
 
 async fn client() -> Client {
     ClientBuilder::new(brokers()).build().await.expect("connect to the bdd kafka broker")
+}
+
+/// Creates `topic` via the broker's admin API (1 partition, replication
+/// factor 1) without producing any record to it -- so a Kafka Trigger
+/// scenario can activate against a topic that already exists (the
+/// trigger's own `validate()` only checks the topic exists, it does not
+/// create it) without an unrelated setup message also being picked up by
+/// a `fromBeginning: true` trigger.
+#[given(expr = "the Kafka topic {string} exists")]
+async fn topic_exists(_w: &mut R8rWorld, topic: String) {
+    let client = client().await;
+    let controller = client.controller_client().expect("kafka controller client");
+    // Idempotent: a `TopicAlreadyExists` from a previous scenario's run is
+    // not a failure here.
+    let _ = controller.create_topic(topic, 1, 1, 5_000).await;
 }
 
 /// Publishes directly to partition 0 of `topic` for the Kafka Trigger's

@@ -349,6 +349,9 @@ fn build_item(record: &RecordAndOffset, opts: &TriggerOptions) -> Item {
 #[async_trait::async_trait]
 impl LongLivedTrigger for KafkaTrigger {
     async fn validate(&self, n8n: &Arc<N8n>, node: &Node) -> Result<(), String> {
+        if node.parameters.get("useSchemaRegistry").and_then(Value::as_bool).unwrap_or(false) {
+            return Err("Kafka Trigger \"useSchemaRegistry\" is not supported natively yet".to_string());
+        }
         let cred = resolve_credential(n8n, node, "kafka").await?;
         let opts = trigger_options(node);
         if opts.topic.is_empty() {
