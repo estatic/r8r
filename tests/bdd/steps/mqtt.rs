@@ -7,8 +7,8 @@
 use crate::steps::{docstring, eventually};
 use crate::world::R8rWorld;
 use cucumber::gherkin::Step;
-use cucumber::{given, then};
-use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, QoS};
+use cucumber::{given, then, when};
+use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, Outgoing, QoS};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -50,6 +50,28 @@ async fn subscribe(w: &mut R8rWorld, topic: String) {
         }
     }));
     tokio::time::timeout(Duration::from_secs(5), ready_rx).await.expect("mqtt suback timeout").ok();
+}
+
+/// Publishes directly to `topic` (QoS 0, no retain) for the MQTT Trigger's
+/// `@requires-mqtt` scenarios. Waits for the publish to actually leave the
+/// socket before returning (mirrors `mqtt.rs`'s own node code).
+#[when(expr = "I publish to the MQTT topic {string}:")]
+async fn publish(w: &mut R8rWorld, topic: String, step: &Step) {
+    let body = w.expand(docstring(step).trim());
+    let (host, port) = mqtt_host_port();
+    let client_id = format!("bdd-pub-{}", uuid::Uuid::new_v4().simple());
+    let opts = MqttOptions::new(client_id, host, port);
+    let (client, mut eventloop) = AsyncClient::new(opts, 10);
+    client.publish(topic, QoS::AtMostOnce, false, body.into_bytes()).await.expect("publish to the bdd mqtt broker");
+    loop {
+        match tokio::time::timeout(Duration::from_secs(5), eventloop.poll()).await {
+            Ok(Ok(Event::Outgoing(Outgoing::Publish(_)))) => break,
+            Ok(Ok(_)) => continue,
+            Ok(Err(e)) => panic!("mqtt publish failed: {e}"),
+            Err(_) => panic!("timed out waiting for the mqtt publish to leave the socket"),
+        }
+    }
+    let _ = client.disconnect().await;
 }
 
 fn parse_body(payload: &[u8]) -> Value {

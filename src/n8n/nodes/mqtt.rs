@@ -21,9 +21,13 @@
 //! is plaintext/anonymous only.
 
 use crate::n8n::node::{ExecCtx, NodeError, NodeResult, NodeType};
+use crate::n8n::server::triggers::{fire, resolve_credential, LongLivedTrigger};
+use crate::n8n::server::N8n;
 use crate::n8n::types::{Item, NodeOutput};
-use rumqttc::{AsyncClient, Event, Incoming, MqttOptions, Outgoing, QoS, Transport};
-use serde_json::Value;
+use crate::n8n::workflow::Node;
+use rumqttc::{AsyncClient, Event, EventLoop, Incoming, MqttOptions, Outgoing, QoS, Transport};
+use serde_json::{json, Map, Value};
+use std::sync::Arc;
 use std::time::Duration;
 
 pub struct Mqtt;
@@ -184,4 +188,183 @@ async fn publish_all(cred: &Value, messages: Vec<(String, QoS, bool, Vec<u8>)>) 
     let _ = client.disconnect().await;
     poll_handle.abort();
     Ok(())
+}
+
+// ---- MQTT Trigger (plan task 1.13) -----------------------------------------------------
+//
+// Faithful to n8n's `MqttTrigger.node.js` (typeVersion 1) + `GenericFunctions.js`'s
+// `createClient`: subscribes to `topics` (comma-separated, each optionally
+// suffixed `:qos`, default QoS 0; an out-of-range QoS silently falls back
+// to 0, matching the reference's `if (qos<0||qos>2) qos = 0`) and emits
+// `{message, topic}` per message (`onlyMessage` emits just the message
+// value, via [`Item::from_value`] for a non-object value -- this
+// codebase's existing convention for that shape, also used by the Kafka
+// Trigger's `onlyMessage`).
+//
+// `parallelProcessing` (default `true`): when `false`, the reference waits
+// for the triggered execution to finish before processing the next MQTT
+// event (a `donePromise` it awaits inside the `on('message', ...)`
+// handler, which **blocks the client's own event loop task** while
+// waiting -- r8r instead awaits inline in the listener's own poll loop,
+// which has the same effect (no new message is read off the socket until
+// the previous execution's result comes back) without needing a
+// `Delivery`-style response hook.
+
+pub struct MqttTrigger;
+
+const MQTT_RECONNECT_BACKOFF: Duration = Duration::from_secs(5);
+const MQTT_CONNECT_TIMEOUT: Duration = Duration::from_secs(20);
+
+struct TopicQos {
+    topic: String,
+    qos: QoS,
+}
+
+fn qos_from_i64(n: i64) -> QoS {
+    match n {
+        1 => QoS::AtLeastOnce,
+        2 => QoS::ExactlyOnce,
+        _ => QoS::AtMostOnce,
+    }
+}
+
+/// n8n's `topics.split(',')` + per-entry `topic:qos` parsing.
+fn parse_topics(raw: &str) -> Result<Vec<TopicQos>, String> {
+    let topics: Vec<TopicQos> = raw
+        .split(',')
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(|part| {
+            let mut split = part.splitn(2, ':');
+            let topic = split.next().unwrap_or("").trim().to_string();
+            let qos = match split.next().map(str::trim) {
+                Some(s) if !s.is_empty() => s.parse::<i64>().map(qos_from_i64).unwrap_or(QoS::AtMostOnce),
+                _ => QoS::AtMostOnce,
+            };
+            TopicQos { topic, qos }
+        })
+        .collect();
+    if topics.is_empty() || topics.iter().any(|t| t.topic.is_empty()) {
+        return Err("Topics are mandatory!".to_string());
+    }
+    Ok(topics)
+}
+
+/// Drives `eventloop` until the broker's `ConnAck`, an error, or the
+/// timeout.
+async fn wait_connack(eventloop: &mut EventLoop) -> Result<(), String> {
+    tokio::time::timeout(MQTT_CONNECT_TIMEOUT, async {
+        loop {
+            match eventloop.poll().await {
+                Ok(Event::Incoming(Incoming::ConnAck(_))) => return Ok(()),
+                Ok(_) => continue,
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| Err("Timed out connecting to the MQTT broker".to_string()))
+}
+
+/// n8n's `parsePayload`: `jsonParseBody` (silently falls back to the raw
+/// string on a parse failure) then `onlyMessage`.
+fn build_item(topic: &str, payload: &[u8], json_parse_body: bool, only_message: bool) -> Item {
+    let raw = String::from_utf8_lossy(payload).into_owned();
+    let message: Value = if json_parse_body { serde_json::from_str(&raw).unwrap_or_else(|_| json!(raw)) } else { json!(raw) };
+    if only_message {
+        return Item::from_value(message);
+    }
+    let mut json = Map::new();
+    json.insert("message".into(), message);
+    json.insert("topic".into(), json!(topic));
+    Item::new(json)
+}
+
+#[async_trait::async_trait]
+impl LongLivedTrigger for MqttTrigger {
+    async fn validate(&self, n8n: &Arc<N8n>, node: &Node) -> Result<(), String> {
+        let cred = resolve_credential(n8n, node, "mqtt").await?;
+        let topics_raw = node.parameters.get("topics").and_then(Value::as_str).unwrap_or("").to_string();
+        parse_topics(&topics_raw)?;
+        let opts = mqtt_options(&cred).map_err(|e| e.message)?;
+        let (client, mut eventloop) = AsyncClient::new(opts, 10);
+        let res = wait_connack(&mut eventloop).await;
+        let _ = client.disconnect().await;
+        res
+    }
+
+    async fn run(&self, n8n: Arc<N8n>, workflow_id: String, node: Node) {
+        let topics_raw = node.parameters.get("topics").and_then(Value::as_str).unwrap_or("").to_string();
+        let topics = match parse_topics(&topics_raw) {
+            Ok(t) => t,
+            Err(e) => {
+                tracing::error!(workflowId = %workflow_id, node = %node.name, error = %e, "MQTT Trigger: invalid topics; the listener will not start");
+                return;
+            }
+        };
+        let options = node.parameters.get("options").cloned().unwrap_or(json!({}));
+        let json_parse_body = options.get("jsonParseBody").and_then(Value::as_bool).unwrap_or(false);
+        let only_message = options.get("onlyMessage").and_then(Value::as_bool).unwrap_or(false);
+        let parallel_processing = options.get("parallelProcessing").and_then(Value::as_bool).unwrap_or(true);
+
+        loop {
+            let cred = match resolve_credential(&n8n, &node, "mqtt").await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(workflowId = %workflow_id, node = %node.name, error = %e, "MQTT Trigger: could not read credentials; retrying");
+                    tokio::time::sleep(MQTT_RECONNECT_BACKOFF).await;
+                    continue;
+                }
+            };
+            let opts = match mqtt_options(&cred) {
+                Ok(o) => o,
+                Err(e) => {
+                    tracing::warn!(workflowId = %workflow_id, node = %node.name, error = %e.message, "MQTT Trigger: invalid credential; retrying");
+                    tokio::time::sleep(MQTT_RECONNECT_BACKOFF).await;
+                    continue;
+                }
+            };
+            let (client, mut eventloop) = AsyncClient::new(opts, 50);
+            if let Err(e) = wait_connack(&mut eventloop).await {
+                tracing::warn!(workflowId = %workflow_id, node = %node.name, error = %e, "MQTT Trigger: connection failed; retrying");
+                tokio::time::sleep(MQTT_RECONNECT_BACKOFF).await;
+                continue;
+            }
+            let mut subscribe_ok = true;
+            for t in &topics {
+                if let Err(e) = client.subscribe(t.topic.clone(), t.qos).await {
+                    tracing::warn!(workflowId = %workflow_id, node = %node.name, error = %e, "MQTT Trigger: could not subscribe; reconnecting");
+                    subscribe_ok = false;
+                    break;
+                }
+            }
+            if !subscribe_ok {
+                let _ = client.disconnect().await;
+                tokio::time::sleep(MQTT_RECONNECT_BACKOFF).await;
+                continue;
+            }
+
+            loop {
+                match eventloop.poll().await {
+                    Ok(Event::Incoming(Incoming::Publish(p))) => {
+                        let item = build_item(&p.topic, &p.payload, json_parse_body, only_message);
+                        if parallel_processing {
+                            let n8n = n8n.clone();
+                            let workflow_id = workflow_id.clone();
+                            let node_name = node.name.clone();
+                            tokio::spawn(async move { fire(&n8n, &workflow_id, &node_name, vec![item]).await });
+                        } else {
+                            fire(&n8n, &workflow_id, &node.name, vec![item]).await;
+                        }
+                    }
+                    Ok(_) => {}
+                    Err(e) => {
+                        tracing::warn!(workflowId = %workflow_id, node = %node.name, error = %e, "MQTT Trigger: connection error; reconnecting");
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(MQTT_RECONNECT_BACKOFF).await;
+        }
+    }
 }

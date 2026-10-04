@@ -145,6 +145,9 @@ fn trigger_types() -> &'static [&'static str] {
         "n8n-nodes-base.errorTrigger",
         "n8n-nodes-base.executeWorkflowTrigger",
         "n8n-nodes-base.emailReadImap",
+        "n8n-nodes-base.rabbitmqTrigger",
+        "n8n-nodes-base.kafkaTrigger",
+        "n8n-nodes-base.mqttTrigger",
     ]
 }
 

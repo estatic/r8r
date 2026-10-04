@@ -22,10 +22,13 @@
 //! error rather than silently skipping encoding.
 
 use crate::n8n::node::{ExecCtx, NodeError, NodeResult, NodeType};
+use crate::n8n::server::triggers::{fire, resolve_credential, LongLivedTrigger};
+use crate::n8n::server::N8n;
 use crate::n8n::types::{Item, NodeOutput};
+use crate::n8n::workflow::Node;
 use rskafka::client::partition::{Compression, OffsetAt, PartitionClient, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder, Credentials, SaslConfig};
-use rskafka::record::Record;
+use rskafka::record::{Record, RecordAndOffset};
 use serde_json::{json, Map, Value};
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -230,4 +233,202 @@ async fn produce_topic(partition_client: &PartitionClient, topic: &str, group: V
     m.insert("logAppendTime".into(), json!("-1"));
     m.insert("logStartOffset".into(), json!(log_start_offset.to_string()));
     Ok(Item::new(m))
+}
+
+// ---- Kafka Trigger (plan task 1.13) ----------------------------------------------------
+//
+// Faithful to n8n's `KafkaTriggerV1.node.js` (typeVersion 1.3 -- the
+// `KafkaTrigger` `VersionedNodeType`'s `defaultVersion`, i.e. what the
+// 2.35.7 editor creates for a brand-new node) for the options this build
+// implements; schema-registry support (`useSchemaRegistry`) is rejected at
+// activation, matching the Kafka action node.
+//
+// **Major documented deviation**: kafkajs (the reference's client) joins a
+// real consumer group, with the broker's group coordinator assigning
+// partitions and tracking committed offsets server-side. `rskafka` has no
+// group coordinator client at all -- there is no consumer-group protocol
+// implementation to join. This trigger instead:
+// - always consumes **partition 0 only** of the topic (same limitation as
+//   the Kafka action node's producer -- fine for the single-partition
+//   topics the BDD broker's `auto.create.topics.enable` creates, not a
+//   faithful multi-partition consumer-group reproduction);
+// - keeps the next offset to read in the listener task's own memory, keyed
+//   implicitly by (workflow, node) via the task itself -- not committed to
+//   the broker and not persisted to r8r's store, so a restart re-reads from
+//   `fromBeginning`'s starting point (earliest or latest at restart time),
+//   not from where a previous run left off. `groupId` is accepted as a
+//   required parameter (for schema fidelity / future multi-instance
+//   coordination) but otherwise unused;
+// - polls `fetch_records` with a `max_wait_ms` long-poll instead of
+//   receiving `eachBatch` callbacks, so there is no batching
+//   (`batchSize`/`eachBatchAutoResolve`), heartbeat, or rebalance concept to
+//   implement; `sessionTimeout`/`heartbeatInterval`/`rebalanceTimeout` are
+//   accepted but have no effect (no group to time out of).
+// - every message resolves its offset immediately after the triggered
+//   execution starts (closer to `resolveOffset: 'immediately'` than the
+//   default `onCompletion`): there is no broker-side commit to delay, only
+//   the in-memory cursor, and delaying *that* would mean redelivering on
+//   reconnect regardless of execution outcome -- redelivery on failure
+//   needs a real consumer group's negative-ack, which does not exist here.
+//
+// `allowAutoTopicCreation` maps to `UnknownTopicHandling::Retry` (wait for
+// the topic to exist, relying on the broker's own
+// `auto.create.topics.enable` to actually create it -- rskafka cannot
+// request creation itself) vs `UnknownTopicHandling::Error` (fail fast).
+
+pub struct KafkaTrigger;
+
+const KAFKA_RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+/// Long-poll wait passed to `fetch_records`: how long the broker may hold
+/// the request open waiting for new data before replying empty.
+const KAFKA_FETCH_WAIT_MS: i32 = 5_000;
+const KAFKA_FETCH_MAX_BYTES: i32 = 10_000_000;
+
+struct TriggerOptions {
+    topic: String,
+    group_id: String,
+    from_beginning: bool,
+    json_parse_message: bool,
+    only_message: bool,
+    return_headers: bool,
+    allow_auto_topic_creation: bool,
+}
+
+fn trigger_options(node: &Node) -> TriggerOptions {
+    let options = node.parameters.get("options").cloned().unwrap_or(json!({}));
+    TriggerOptions {
+        topic: node.parameters.get("topic").and_then(Value::as_str).unwrap_or("").to_string(),
+        group_id: node.parameters.get("groupId").and_then(Value::as_str).unwrap_or("").to_string(),
+        from_beginning: options.get("fromBeginning").and_then(Value::as_bool).unwrap_or(true),
+        json_parse_message: options.get("jsonParseMessage").and_then(Value::as_bool).unwrap_or(false),
+        only_message: options.get("onlyMessage").and_then(Value::as_bool).unwrap_or(false),
+        return_headers: options.get("returnHeaders").and_then(Value::as_bool).unwrap_or(false),
+        allow_auto_topic_creation: options.get("allowAutoTopicCreation").and_then(Value::as_bool).unwrap_or(false),
+    }
+}
+
+fn unknown_topic_handling(opts: &TriggerOptions) -> UnknownTopicHandling {
+    if opts.allow_auto_topic_creation {
+        UnknownTopicHandling::Retry
+    } else {
+        UnknownTopicHandling::Error
+    }
+}
+
+/// n8n's `configureMessageParser`: `jsonParseMessage` (falls back to the
+/// raw string on a parse failure), `returnHeaders`, then `onlyMessage`
+/// (returns just the message value as the item's `json` -- a non-object
+/// value when the message isn't valid JSON goes through
+/// [`Item::from_value`], this codebase's existing convention for that n8n
+/// quirk).
+fn build_item(record: &RecordAndOffset, opts: &TriggerOptions) -> Item {
+    let raw = record.record.value.clone().unwrap_or_default();
+    let value: Value = if opts.json_parse_message {
+        serde_json::from_slice(&raw).unwrap_or_else(|_| json!(String::from_utf8_lossy(&raw).into_owned()))
+    } else {
+        json!(String::from_utf8_lossy(&raw).into_owned())
+    };
+
+    if opts.only_message {
+        return Item::from_value(value);
+    }
+
+    let mut json = Map::new();
+    if opts.return_headers {
+        let mut headers = Map::new();
+        for (k, v) in &record.record.headers {
+            headers.insert(k.clone(), json!(String::from_utf8_lossy(v).into_owned()));
+        }
+        json.insert("headers".into(), Value::Object(headers));
+    }
+    json.insert("message".into(), value);
+    json.insert("topic".into(), json!(opts.topic));
+    Item::new(json)
+}
+
+#[async_trait::async_trait]
+impl LongLivedTrigger for KafkaTrigger {
+    async fn validate(&self, n8n: &Arc<N8n>, node: &Node) -> Result<(), String> {
+        if node.parameters.get("useSchemaRegistry").and_then(Value::as_bool).unwrap_or(false) {
+            return Err("Kafka Trigger \"useSchemaRegistry\" is not supported natively yet".to_string());
+        }
+        let cred = resolve_credential(n8n, node, "kafka").await?;
+        let opts = trigger_options(node);
+        if opts.topic.is_empty() {
+            return Err("Kafka Trigger: \"Topic\" is required".to_string());
+        }
+        if opts.group_id.is_empty() {
+            return Err("Kafka Trigger: \"Group ID\" is required".to_string());
+        }
+        let client = connect(&cred).await.map_err(|e| e.message)?;
+        client
+            .partition_client(opts.topic.clone(), 0, unknown_topic_handling(&opts))
+            .await
+            .map_err(|e| format!("Verify your Kafka configuration: {e}"))?;
+        Ok(())
+    }
+
+    async fn run(&self, n8n: Arc<N8n>, workflow_id: String, node: Node) {
+        let opts = trigger_options(&node);
+        let handling = unknown_topic_handling(&opts);
+        let mut offset: Option<i64> = None;
+
+        loop {
+            let cred = match resolve_credential(&n8n, &node, "kafka").await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(workflowId = %workflow_id, node = %node.name, error = %e, "Kafka Trigger: could not read credentials; retrying");
+                    tokio::time::sleep(KAFKA_RECONNECT_BACKOFF).await;
+                    continue;
+                }
+            };
+            let client = match connect(&cred).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(workflowId = %workflow_id, node = %node.name, error = %e.message, "Kafka Trigger: connection failed; retrying");
+                    tokio::time::sleep(KAFKA_RECONNECT_BACKOFF).await;
+                    continue;
+                }
+            };
+            let partition = match client.partition_client(opts.topic.clone(), 0, handling).await {
+                Ok(p) => p,
+                Err(e) => {
+                    tracing::warn!(workflowId = %workflow_id, node = %node.name, error = %e, "Kafka Trigger: could not open the partition client; retrying");
+                    tokio::time::sleep(KAFKA_RECONNECT_BACKOFF).await;
+                    continue;
+                }
+            };
+            if offset.is_none() {
+                let at = if opts.from_beginning { OffsetAt::Earliest } else { OffsetAt::Latest };
+                match partition.get_offset(at).await {
+                    Ok(o) => offset = Some(o),
+                    Err(e) => {
+                        tracing::warn!(workflowId = %workflow_id, node = %node.name, error = %e, "Kafka Trigger: could not resolve the starting offset; retrying");
+                        tokio::time::sleep(KAFKA_RECONNECT_BACKOFF).await;
+                        continue;
+                    }
+                }
+            }
+
+            loop {
+                let cur = offset.unwrap_or(0);
+                match partition.fetch_records(cur, 1..KAFKA_FETCH_MAX_BYTES, KAFKA_FETCH_WAIT_MS).await {
+                    Ok((records, _high_watermark)) => {
+                        let mut max_offset = cur;
+                        for record in &records {
+                            max_offset = max_offset.max(record.offset + 1);
+                            let item = build_item(record, &opts);
+                            fire(&n8n, &workflow_id, &node.name, vec![item]).await;
+                        }
+                        offset = Some(max_offset);
+                    }
+                    Err(e) => {
+                        tracing::warn!(workflowId = %workflow_id, node = %node.name, error = %e, "Kafka Trigger: error fetching records; reconnecting");
+                        break;
+                    }
+                }
+            }
+            tokio::time::sleep(KAFKA_RECONNECT_BACKOFF).await;
+        }
+    }
 }

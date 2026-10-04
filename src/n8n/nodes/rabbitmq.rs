@@ -17,11 +17,18 @@
 //! node options, never set by the action node's editor form).
 
 use crate::n8n::node::{ExecCtx, NodeError, NodeResult, NodeType};
+use crate::n8n::server::triggers::{fire, fire_and_wait, resolve_credential, LongLivedTrigger};
+use crate::n8n::server::N8n;
 use crate::n8n::types::{Item, NodeOutput};
-use lapin::options::{BasicPublishOptions, ExchangeDeclareOptions, QueueDeclareOptions};
+use crate::n8n::workflow::Node;
+use base64::Engine;
+use futures_util::StreamExt;
+use lapin::message::Delivery;
+use lapin::options::{BasicAckOptions, BasicConsumeOptions, BasicNackOptions, BasicPublishOptions, BasicQosOptions, ExchangeDeclareOptions, QueueBindOptions, QueueDeclareOptions};
 use lapin::types::{AMQPValue, FieldTable, LongString, ShortString};
 use lapin::{BasicProperties, Channel, Connection, ConnectionProperties, ExchangeKind};
-use serde_json::{Map, Value};
+use serde_json::{json, Map, Value};
+use std::sync::Arc;
 
 pub struct RabbitMq;
 
@@ -294,4 +301,281 @@ async fn publish_one(
     let mut json = Map::new();
     json.insert("success".into(), Value::Bool(true));
     Ok(Item::new(json).paired(i))
+}
+
+// ---- RabbitMQ Trigger (plan task 1.13) -------------------------------------------------
+//
+// Faithful to n8n's `RabbitMQTrigger.node.js` (typeVersion 1) +
+// `GenericFunctions.js`'s `handleMessage`/`rabbitmqConnectQueue`. Unlike the
+// action node (which only ever passively `checkQueue`s), the Trigger's own
+// `options` collection spreads in `rabbitDefaultOptions`
+// (`DefaultOptions.js`), whose `assertQueue` field defaults to `true`: a
+// freshly-activated Trigger node declares the queue (durable by default)
+// rather than merely checking it exists, so [`trigger_ensure_queue`] below
+// has the opposite default from [`ensure_queue`].
+//
+// `laterMessageNode` ("Specified Later in Workflow", acked by a later
+// RabbitMQ node's `deleteMessage` operation) needs a response hook plumbed
+// from a *later* node back to this trigger's delivery, which r8r's executor
+// has no path for; it is rejected at activation with a clear error instead
+// of silently behaving like `immediately`.
+//
+// Concurrency: `parallelMessages` becomes the channel's `prefetch`
+// (`basic_qos`); AMQP flow control (the broker won't push more unacked
+// deliveries than the prefetch count) is what bounds how many executions
+// run at once for `executionFinishes`/`executionFinishesSuccessfully` --
+// each delivery is handled in its own task that acks/nacks only once that
+// delivery's execution finishes, exactly mirroring the reference's
+// `parallelMessages` + prefetch semantics without needing a separate
+// semaphore.
+//
+// n8n's `MessageTracker`-based graceful close (give in-flight deliveries up
+// to 5 minutes to finish before closing the channel) is not implemented:
+// deactivation aborts the listener task immediately, like every other
+// long-lived trigger in r8r.
+
+pub struct RabbitMqTrigger;
+
+const RECONNECT_BACKOFF: std::time::Duration = std::time::Duration::from_secs(5);
+
+fn trigger_queue(node: &Node) -> String {
+    node.parameters.get("queue").and_then(Value::as_str).unwrap_or("").to_string()
+}
+
+fn trigger_options(node: &Node) -> Value {
+    node.parameters.get("options").cloned().unwrap_or_else(|| json!({}))
+}
+
+/// `channel.prefetch -1 (default: -1): no number, or 0, or < -1 -- rejects
+/// activation (n8n's `trigger()` throws a `NodeOperationError` for the same
+/// inputs).
+fn validate_parallel_messages(options: &Value) -> Result<(), String> {
+    let Some(v) = options.get("parallelMessages") else { return Ok(()) };
+    let n = v.as_f64().unwrap_or(f64::NAN);
+    if n.is_nan() || n == 0.0 || n < -1.0 {
+        return Err("Parallel message processing limit must be a number greater than zero (or -1 for no limit)".to_string());
+    }
+    Ok(())
+}
+
+/// n8n's `rabbitmqConnectQueue`: `assertQueue` (declare, default options
+/// durable/autoDelete/exclusive) when `options.assertQueue` is set --
+/// defaulting to `true` for the Trigger (see module doc) -- else
+/// `checkQueue` (passive). Bindings (`options.binding.bindings`) are
+/// applied either way.
+async fn trigger_ensure_queue(channel: &Channel, queue: &str, options: &Value) -> NodeResult<()> {
+    if !options.get("assertQueue").and_then(Value::as_bool).unwrap_or(true) {
+        let passive = QueueDeclareOptions { passive: true, ..Default::default() };
+        channel.queue_declare(ShortString::from(queue.to_string()), passive, FieldTable::default()).await.map_err(|e| NodeError::new(e.to_string()))?;
+    } else {
+        let durable = options.get("durable").and_then(Value::as_bool).unwrap_or(true);
+        let auto_delete = options.get("autoDelete").and_then(Value::as_bool).unwrap_or(false);
+        let exclusive = options.get("exclusive").and_then(Value::as_bool).unwrap_or(false);
+        let decl_options = QueueDeclareOptions { durable, auto_delete, exclusive, ..Default::default() };
+        channel.queue_declare(ShortString::from(queue.to_string()), decl_options, FieldTable::default()).await.map_err(|e| NodeError::new(e.to_string()))?;
+    }
+    if let Some(bindings) = options.pointer("/binding/bindings").and_then(Value::as_array) {
+        for binding in bindings {
+            let exchange = binding.get("exchange").and_then(Value::as_str).unwrap_or("");
+            if exchange.is_empty() {
+                continue;
+            }
+            let routing_key = binding.get("routingKey").and_then(Value::as_str).unwrap_or("");
+            channel
+                .queue_bind(ShortString::from(queue.to_string()), ShortString::from(exchange.to_string()), ShortString::from(routing_key.to_string()), QueueBindOptions::default(), FieldTable::default())
+                .await
+                .map_err(|e| NodeError::new(e.to_string()))?;
+        }
+    }
+    Ok(())
+}
+
+fn amqp_value_to_json(v: &AMQPValue) -> Value {
+    use AMQPValue::*;
+    match v {
+        LongString(s) => json!(s.to_string()),
+        ShortString(s) => json!(s.to_string()),
+        Boolean(b) => json!(*b),
+        LongInt(n) => json!(*n),
+        LongLongInt(n) => json!(*n),
+        ShortInt(n) => json!(*n),
+        ShortShortInt(n) => json!(*n),
+        LongUInt(n) => json!(*n),
+        ShortUInt(n) => json!(*n),
+        ShortShortUInt(n) => json!(*n),
+        Double(n) => json!(*n),
+        Float(n) => json!(*n),
+        Void => Value::Null,
+        other => json!(format!("{other:?}")),
+    }
+}
+
+fn field_table_to_json(table: &FieldTable) -> Value {
+    let mut map = Map::new();
+    for (k, v) in table.inner() {
+        map.insert(k.to_string(), amqp_value_to_json(v));
+    }
+    Value::Object(map)
+}
+
+/// n8n's `parseMessage`: `contentIsBinary` returns `{binary: {data}, json:
+/// message}` with `message.content` cleared; otherwise `message.content`
+/// becomes a string (optionally `JSON.parse`d), and `onlyContent` returns
+/// just that content as the item's `json` (a non-object value when the
+/// content isn't valid JSON -- mapped through [`Item::from_value`], this
+/// codebase's existing convention for that n8n quirk, same as the Kafka and
+/// MQTT triggers' `onlyMessage`).
+fn build_item(delivery: &Delivery, options: &Value) -> Item {
+    let mut fields = Map::new();
+    fields.insert("deliveryTag".into(), json!(delivery.delivery_tag));
+    fields.insert("redelivered".into(), json!(delivery.redelivered));
+    fields.insert("exchange".into(), json!(delivery.exchange.to_string()));
+    fields.insert("routingKey".into(), json!(delivery.routing_key.to_string()));
+
+    let mut properties = Map::new();
+    if let Some(headers) = delivery.properties.headers() {
+        properties.insert("headers".into(), field_table_to_json(headers));
+    }
+    if let Some(ct) = delivery.properties.content_type() {
+        properties.insert("contentType".into(), json!(ct.to_string()));
+    }
+
+    let content_is_binary = options.get("contentIsBinary").and_then(Value::as_bool).unwrap_or(false);
+    if content_is_binary {
+        let mut json = Map::new();
+        json.insert("fields".into(), Value::Object(fields));
+        json.insert("properties".into(), Value::Object(properties));
+        let mut binary = Map::new();
+        binary.insert("data".into(), json!({"data": base64::engine::general_purpose::STANDARD.encode(&delivery.data), "mimeType": "application/octet-stream", "fileName": ""}));
+        return Item { json, binary: Some(binary), paired_item: None };
+    }
+
+    let raw = String::from_utf8_lossy(&delivery.data).into_owned();
+    let json_parse_body = options.get("jsonParseBody").and_then(Value::as_bool).unwrap_or(false);
+    let content: Value = if json_parse_body { serde_json::from_str(&raw).unwrap_or_else(|_| json!(raw)) } else { json!(raw) };
+
+    let only_content = options.get("onlyContent").and_then(Value::as_bool).unwrap_or(false);
+    if only_content {
+        return Item::from_value(content);
+    }
+
+    let mut json = Map::new();
+    json.insert("content".into(), content);
+    json.insert("fields".into(), Value::Object(fields));
+    json.insert("properties".into(), Value::Object(properties));
+    Item::new(json)
+}
+
+async fn handle_delivery(n8n: Arc<N8n>, workflow_id: String, node_name: String, delivery: Delivery, acknowledge_mode: String, options: Value) {
+    let item = build_item(&delivery, &options);
+    if acknowledge_mode == "immediately" {
+        let _ = delivery.acker.ack(BasicAckOptions::default()).await;
+        fire(&n8n, &workflow_id, &node_name, vec![item]).await;
+        return;
+    }
+    let outcome = fire_and_wait(&n8n, &workflow_id, &node_name, vec![item]).await;
+    let failed = outcome.as_ref().is_some_and(|o| o.error().is_some());
+    if acknowledge_mode == "executionFinishesSuccessfully" && failed {
+        let _ = delivery.acker.nack(BasicNackOptions { requeue: true, ..Default::default() }).await;
+    } else {
+        let _ = delivery.acker.ack(BasicAckOptions::default()).await;
+    }
+}
+
+#[async_trait::async_trait]
+impl LongLivedTrigger for RabbitMqTrigger {
+    async fn validate(&self, n8n: &Arc<N8n>, node: &Node) -> Result<(), String> {
+        let cred = resolve_credential(n8n, node, "rabbitmq").await?;
+        let options = trigger_options(node);
+        if options.get("acknowledge").and_then(Value::as_str) == Some("laterMessageNode") {
+            return Err(
+                "RabbitMQ Trigger: the \"Specified Later in Workflow\" acknowledge mode is not supported natively yet -- use \"Immediately\", \"Execution Finishes\" or \"Execution Finishes Successfully\" instead".to_string(),
+            );
+        }
+        validate_parallel_messages(&options)?;
+        let queue = trigger_queue(node);
+        let (conn, channel) = connect(&cred).await.map_err(|e| e.message)?;
+        let res = trigger_ensure_queue(&channel, &queue, &options).await;
+        close(conn, channel).await;
+        res.map_err(|e| e.message)
+    }
+
+    async fn run(&self, n8n: Arc<N8n>, workflow_id: String, node: Node) {
+        let queue = trigger_queue(&node);
+        let options = trigger_options(&node);
+        let mut acknowledge_mode = options.get("acknowledge").and_then(Value::as_str).unwrap_or("immediately").to_string();
+        let parallel_messages = options.get("parallelMessages").and_then(Value::as_f64).unwrap_or(-1.0) as i64;
+        if parallel_messages != -1 && acknowledge_mode == "immediately" {
+            // Mirrors the reference: a prefetch limit with no explicit
+            // acknowledge mode forces "executionFinishes" since
+            // "immediately" would defeat the point of limiting in-flight
+            // executions.
+            acknowledge_mode = "executionFinishes".to_string();
+        }
+
+        loop {
+            let cred = match resolve_credential(&n8n, &node, "rabbitmq").await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(workflowId = %workflow_id, node = %node.name, error = %e, "RabbitMQ Trigger: could not read credentials; retrying");
+                    tokio::time::sleep(RECONNECT_BACKOFF).await;
+                    continue;
+                }
+            };
+            let (conn, channel) = match connect(&cred).await {
+                Ok(v) => v,
+                Err(e) => {
+                    tracing::warn!(workflowId = %workflow_id, node = %node.name, error = %e.message, "RabbitMQ Trigger: connection failed; retrying");
+                    tokio::time::sleep(RECONNECT_BACKOFF).await;
+                    continue;
+                }
+            };
+            if let Err(e) = trigger_ensure_queue(&channel, &queue, &options).await {
+                tracing::warn!(workflowId = %workflow_id, node = %node.name, error = %e.message, "RabbitMQ Trigger: could not declare/check the queue; retrying");
+                close(conn, channel).await;
+                tokio::time::sleep(RECONNECT_BACKOFF).await;
+                continue;
+            }
+            if parallel_messages != -1 {
+                if let Err(e) = channel.basic_qos(parallel_messages.clamp(1, u16::MAX as i64) as u16, BasicQosOptions::default()).await {
+                    tracing::warn!(workflowId = %workflow_id, node = %node.name, error = %e, "RabbitMQ Trigger: could not set prefetch; retrying");
+                    close(conn, channel).await;
+                    tokio::time::sleep(RECONNECT_BACKOFF).await;
+                    continue;
+                }
+            }
+            let mut consumer = match channel.basic_consume(ShortString::from(queue.clone()), ShortString::from(""), BasicConsumeOptions::default(), FieldTable::default()).await {
+                Ok(c) => c,
+                Err(e) => {
+                    tracing::warn!(workflowId = %workflow_id, node = %node.name, error = %e, "RabbitMQ Trigger: could not consume the queue; retrying");
+                    close(conn, channel).await;
+                    tokio::time::sleep(RECONNECT_BACKOFF).await;
+                    continue;
+                }
+            };
+
+            loop {
+                match consumer.next().await {
+                    Some(Ok(delivery)) => {
+                        let n8n = n8n.clone();
+                        let workflow_id = workflow_id.clone();
+                        let node_name = node.name.clone();
+                        let ack_mode = acknowledge_mode.clone();
+                        let options = options.clone();
+                        tokio::spawn(async move { handle_delivery(n8n, workflow_id, node_name, delivery, ack_mode, options).await });
+                    }
+                    Some(Err(e)) => {
+                        tracing::warn!(workflowId = %workflow_id, node = %node.name, error = %e, "RabbitMQ Trigger: consumer error; reconnecting");
+                        break;
+                    }
+                    None => {
+                        tracing::warn!(workflowId = %workflow_id, node = %node.name, "RabbitMQ Trigger: consumer was cancelled; reconnecting");
+                        break;
+                    }
+                }
+            }
+            close(conn, channel).await;
+            tokio::time::sleep(RECONNECT_BACKOFF).await;
+        }
+    }
 }

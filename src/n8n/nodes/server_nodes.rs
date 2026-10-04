@@ -12,6 +12,9 @@ pub fn all() -> Vec<Box<dyn NodeType>> {
         Box::new(Passthrough("n8n-nodes-base.formTrigger")),
         Box::new(Passthrough("n8n-nodes-base.scheduleTrigger")),
         Box::new(Passthrough("n8n-nodes-base.emailReadImap")),
+        Box::new(Passthrough("n8n-nodes-base.rabbitmqTrigger")),
+        Box::new(Passthrough("n8n-nodes-base.kafkaTrigger")),
+        Box::new(Passthrough("n8n-nodes-base.mqttTrigger")),
         Box::new(RespondToWebhook),
         Box::new(ExecuteWorkflow),
     ]

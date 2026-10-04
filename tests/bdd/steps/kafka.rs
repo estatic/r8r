@@ -6,9 +6,10 @@
 use crate::steps::{docstring, eventually};
 use crate::world::R8rWorld;
 use cucumber::gherkin::Step;
-use cucumber::then;
-use rskafka::client::partition::{OffsetAt, UnknownTopicHandling};
+use cucumber::{given, then, when};
+use rskafka::client::partition::{Compression, OffsetAt, UnknownTopicHandling};
 use rskafka::client::{Client, ClientBuilder};
+use rskafka::record::Record;
 use serde_json::Value;
 use std::time::Duration;
 
@@ -20,6 +21,37 @@ fn brokers() -> Vec<String> {
 
 async fn client() -> Client {
     ClientBuilder::new(brokers()).build().await.expect("connect to the bdd kafka broker")
+}
+
+/// Creates `topic` via the broker's admin API (1 partition, replication
+/// factor 1) without producing any record to it -- so a Kafka Trigger
+/// scenario can activate against a topic that already exists (the
+/// trigger's own `validate()` only checks the topic exists, it does not
+/// create it) without an unrelated setup message also being picked up by
+/// a `fromBeginning: true` trigger.
+#[given(expr = "the Kafka topic {string} exists")]
+async fn topic_exists(_w: &mut R8rWorld, topic: String) {
+    let client = client().await;
+    let controller = client.controller_client().expect("kafka controller client");
+    // Idempotent: a `TopicAlreadyExists` from a previous scenario's run is
+    // not a failure here.
+    let _ = controller.create_topic(topic, 1, 1, 5_000).await;
+}
+
+/// Publishes directly to partition 0 of `topic` for the Kafka Trigger's
+/// `@requires-kafka` scenarios -- relies on the broker's own
+/// `auto.create.topics.enable` to create the topic on first produce, same
+/// as the Kafka action node.
+#[when(expr = "I publish to the Kafka topic {string}:")]
+async fn publish(w: &mut R8rWorld, topic: String, step: &Step) {
+    let body = w.expand(docstring(step).trim());
+    let client = client().await;
+    let partition_client = client
+        .partition_client(topic.clone(), 0, UnknownTopicHandling::Retry)
+        .await
+        .unwrap_or_else(|e| panic!("cannot open partition client for Kafka topic {topic:?}: {e}"));
+    let record = Record { key: None, value: Some(body.into_bytes()), headers: Default::default(), timestamp: chrono::Utc::now() };
+    partition_client.produce(vec![record], Compression::NoCompression).await.unwrap_or_else(|e| panic!("could not produce to Kafka topic {topic:?}: {e}"));
 }
 
 fn body_matches(expected: &Value, value: &Option<Vec<u8>>) -> bool {
