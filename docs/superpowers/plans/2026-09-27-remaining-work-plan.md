@@ -96,7 +96,7 @@ PostgreSQL.
 
 | # | Task | Notes |
 | --- | --- | --- |
-| 2.1 | Ollama chat model | first: the user runs Ollama; OpenAI-compatible HTTP |
+| 2.1 ✅ | Ollama chat model | `lmChatOllama` sub-node + `ollamaApi` credential, plugged into the same `Provider` enum in `ai.rs` the OpenAI Chat Model uses (shared `chat`/`send`/`record`, provider-specific request/response mapping); Ollama's native `/api/chat` (non-streaming), options → `options:{...}` snake_case + top-level `keep_alive`/`format`, tool-call arguments normalized from Ollama's object shape to the OpenAI-style JSON string the agent loop expects; works with the AI Agent (incl. tools) and Basic LLM Chain (`chainLlm`, pre-existing) unchanged. Errors: unreachable connection and unknown-model (404) surfaced like n8n's generic `NodeApiError` wrap; API key optional (Bearer header), never leaks into execution data. |
 | 2.2 | Anthropic, OpenRouter, Groq, Mistral chat models | one task each; share the OpenAI-compatible client where possible |
 | 2.3 | Google, Azure OpenAI, Bedrock chat models | auth-specific |
 | 2.4 | Tools: HTTP Request Tool, Code Tool, Workflow Tool, `$fromAI` on any node | `$fromAI` touches `expr` + agent loop |

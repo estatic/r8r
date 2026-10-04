@@ -423,3 +423,55 @@ async fn openai_tool(w: &mut R8rWorld, n: usize, tool: String) {
     assert!(found, "tool {tool} not offered: {}", pretty(&body["tools"]));
 }
 
+// ---- Ollama native API (/api/chat) ---------------------------------------
+
+/// Doc string: a JSON array of assistant messages returned in order by
+/// `POST /api/chat` (the last one repeats). Each reply reports 10 prompt +
+/// 5 completion tokens, Ollama's `prompt_eval_count`/`eval_count`.
+#[given(expr = "a mock Ollama API that replies in order:")]
+async fn ollama(w: &mut R8rWorld, step: &Step) {
+    let replies = parse_strict(docstring(step), "assistant messages");
+    let replies = replies.as_array().expect("array of messages").clone();
+    let server = mock(w).await;
+    let count = replies.len();
+    for (i, message) in replies.into_iter().enumerate() {
+        let body = json!({
+            "model": "llama3.2",
+            "created_at": "2024-01-01T00:00:00Z",
+            "message": message,
+            "done": true,
+            "done_reason": "stop",
+            "prompt_eval_count": 10,
+            "eval_count": 5,
+        });
+        let m = Mock::given(method("POST")).and(path("/api/chat")).respond_with(ResponseTemplate::new(200).set_body_json(body));
+        let m = if i + 1 < count { m.up_to_n_times(1) } else { m };
+        m.with_priority((i + 1) as u8).mount(server).await;
+    }
+}
+
+#[then(regex = r#"^the mock Ollama API received (\d+) chat requests?$"#)]
+async fn ollama_count(w: &mut R8rWorld, n: usize) {
+    assert_eq!(requests_to(w, "/api/chat").await.len(), n);
+}
+
+#[then(expr = "ollama chat request {int} contains a {string} message containing {string}")]
+async fn ollama_message(w: &mut R8rWorld, n: usize, role: String, needle: String) {
+    let all = requests_to(w, "/api/chat").await;
+    let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} chat requests", all.len()));
+    let body: Value = serde_json::from_slice(&r.body).unwrap();
+    let found = body["messages"].as_array().into_iter().flatten().any(|m| {
+        m["role"] == role.as_str() && serde_json::to_string(&m["content"]).unwrap_or_default().contains(&needle)
+    });
+    assert!(found, "no {role} message containing {needle:?} in: {}", pretty(&body["messages"]));
+}
+
+#[then(expr = "ollama chat request {int} offers the tool {string}")]
+async fn ollama_tool(w: &mut R8rWorld, n: usize, tool: String) {
+    let all = requests_to(w, "/api/chat").await;
+    let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} chat requests", all.len()));
+    let body: Value = serde_json::from_slice(&r.body).unwrap();
+    let found = body["tools"].as_array().into_iter().flatten().any(|t| t["function"]["name"] == tool.as_str());
+    assert!(found, "tool {tool} not offered: {}", pretty(&body["tools"]));
+}
+
