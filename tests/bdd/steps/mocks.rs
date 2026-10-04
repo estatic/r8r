@@ -475,3 +475,64 @@ async fn ollama_tool(w: &mut R8rWorld, n: usize, tool: String) {
     assert!(found, "tool {tool} not offered: {}", pretty(&body["tools"]));
 }
 
+// ---- Anthropic Messages API (/v1/messages) --------------------------------
+
+/// Doc string: a JSON array of Anthropic-shaped replies (each with a
+/// `content` block array and optional `stop_reason`), returned in order by
+/// `POST /v1/messages` (the last one repeats). Each reply reports usage of
+/// 10 input + 5 output tokens.
+#[given(expr = "a mock Anthropic API that replies in order:")]
+async fn anthropic(w: &mut R8rWorld, step: &Step) {
+    let replies = parse_strict(docstring(step), "assistant messages");
+    let replies = replies.as_array().expect("array of messages").clone();
+    let server = mock(w).await;
+    let count = replies.len();
+    for (i, reply) in replies.into_iter().enumerate() {
+        let content = reply.get("content").cloned().unwrap_or(json!([]));
+        let stop_reason = reply.get("stop_reason").cloned().unwrap_or(json!("end_turn"));
+        let body = json!({
+            "id": format!("msg_{i}"),
+            "type": "message",
+            "role": "assistant",
+            "model": "claude-3-5-sonnet-20241022",
+            "content": content,
+            "stop_reason": stop_reason,
+            "usage": {"input_tokens": 10, "output_tokens": 5},
+        });
+        let m = Mock::given(method("POST")).and(path("/v1/messages")).respond_with(ResponseTemplate::new(200).set_body_json(body));
+        let m = if i + 1 < count { m.up_to_n_times(1) } else { m };
+        m.with_priority((i + 1) as u8).mount(server).await;
+    }
+}
+
+#[then(regex = r#"^the mock Anthropic API received (\d+) chat requests?$"#)]
+async fn anthropic_count(w: &mut R8rWorld, n: usize) {
+    assert_eq!(requests_to(w, "/v1/messages").await.len(), n);
+}
+
+#[then(expr = "anthropic chat request {int} contains a {string} message containing {string}")]
+async fn anthropic_message(w: &mut R8rWorld, n: usize, role: String, needle: String) {
+    let all = requests_to(w, "/v1/messages").await;
+    let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} chat requests", all.len()));
+    let body: Value = serde_json::from_slice(&r.body).unwrap();
+    let found = body["messages"].as_array().into_iter().flatten().any(|m| m["role"] == role.as_str() && serde_json::to_string(&m["content"]).unwrap_or_default().contains(&needle));
+    assert!(found, "no {role} message containing {needle:?} in: {}", pretty(&body["messages"]));
+}
+
+#[then(expr = "anthropic chat request {int} offers the tool {string}")]
+async fn anthropic_tool(w: &mut R8rWorld, n: usize, tool: String) {
+    let all = requests_to(w, "/v1/messages").await;
+    let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} chat requests", all.len()));
+    let body: Value = serde_json::from_slice(&r.body).unwrap();
+    let found = body["tools"].as_array().into_iter().flatten().any(|t| t["name"] == tool.as_str());
+    assert!(found, "tool {tool} not offered: {}", pretty(&body["tools"]));
+}
+
+#[then(expr = "anthropic chat request {int} has the system prompt {string}")]
+async fn anthropic_system(w: &mut R8rWorld, n: usize, needle: String) {
+    let all = requests_to(w, "/v1/messages").await;
+    let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} chat requests", all.len()));
+    let body: Value = serde_json::from_slice(&r.body).unwrap();
+    assert_eq!(body["system"].as_str().unwrap_or(""), needle, "body: {}", pretty(&body));
+}
+

@@ -19,6 +19,10 @@ pub fn all() -> Vec<Box<dyn NodeType>> {
         Box::new(ChainLlm),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatOpenAi")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatOllama")),
+        Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatAnthropic")),
+        Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatOpenRouter")),
+        Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatGroq")),
+        Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatMistralCloud")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.toolCalculator")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.memoryBufferWindow")),
     ]
@@ -69,8 +73,16 @@ fn record(ctx: &ExecCtx<'_>, sub: &str, kind: &str, input: Value, output: Result
 /// A provider with its own wire format (Anthropic, Ollama) adds its own
 /// request/response branch the way `Ollama` does here.
 enum Provider {
+    /// Shared by the OpenAI-compatible providers (OpenAI itself, OpenRouter,
+    /// Groq, Mistral): bearer auth, `POST {base_url}/chat/completions`, an
+    /// OpenAI-shaped request/response. `organization` is only ever set for
+    /// OpenAI (its `OpenAI-Organization` header).
     OpenAi { organization: Option<String> },
     Ollama,
+    /// Anthropic's own wire format: `POST {base_url}/v1/messages`, headers
+    /// `x-api-key` + `anthropic-version`, top-level `system`, required
+    /// `max_tokens`, content blocks (`tool_use`/`tool_result`).
+    Anthropic,
 }
 
 struct Model<'a> {
@@ -129,6 +141,78 @@ async fn load_model<'a>(ctx: &'a ExecCtx<'_>, item: usize) -> NodeResult<Model<'
             options,
             provider: Provider::Ollama,
         })
+    } else if node.node_type == format!("{LC}lmChatAnthropic") {
+        let (_, cred) = ctx.credentials_for(node, "anthropicApi").await?;
+        let base_url = options
+            .get("baseURL")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .or(cred["url"].as_str().filter(|s| !s.is_empty()))
+            .unwrap_or("https://api.anthropic.com")
+            .trim_end_matches('/')
+            .to_string();
+        Ok(Model {
+            node,
+            base_url,
+            api_key: cred["apiKey"].as_str().unwrap_or("").to_string(),
+            model: model_param(&params, "claude-3-5-sonnet-20241022"),
+            options,
+            provider: Provider::Anthropic,
+        })
+    } else if node.node_type == format!("{LC}lmChatOpenRouter") {
+        let (_, cred) = ctx.credentials_for(node, "openRouterApi").await?;
+        let base_url = options
+            .get("baseURL")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .or(cred["url"].as_str().filter(|s| !s.is_empty()))
+            .unwrap_or("https://openrouter.ai/api/v1")
+            .trim_end_matches('/')
+            .to_string();
+        Ok(Model {
+            node,
+            base_url,
+            api_key: cred["apiKey"].as_str().unwrap_or("").to_string(),
+            model: model_param(&params, "openai/gpt-4.1-mini"),
+            options,
+            provider: Provider::OpenAi { organization: None },
+        })
+    } else if node.node_type == format!("{LC}lmChatGroq") {
+        let (_, cred) = ctx.credentials_for(node, "groqApi").await?;
+        let base_url = options
+            .get("baseURL")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .or(cred["url"].as_str().filter(|s| !s.is_empty()))
+            .unwrap_or("https://api.groq.com/openai/v1")
+            .trim_end_matches('/')
+            .to_string();
+        Ok(Model {
+            node,
+            base_url,
+            api_key: cred["apiKey"].as_str().unwrap_or("").to_string(),
+            model: model_param(&params, "llama3-8b-8192"),
+            options,
+            provider: Provider::OpenAi { organization: None },
+        })
+    } else if node.node_type == format!("{LC}lmChatMistralCloud") {
+        let (_, cred) = ctx.credentials_for(node, "mistralCloudApi").await?;
+        let base_url = options
+            .get("baseURL")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .or(cred["url"].as_str().filter(|s| !s.is_empty()))
+            .unwrap_or("https://api.mistral.ai/v1")
+            .trim_end_matches('/')
+            .to_string();
+        Ok(Model {
+            node,
+            base_url,
+            api_key: cred["apiKey"].as_str().unwrap_or("").to_string(),
+            model: model_param(&params, "mistral-small"),
+            options,
+            provider: Provider::OpenAi { organization: None },
+        })
     } else {
         Err(NodeError::new(format!("The chat model \"{}\" ({}) is not supported natively yet", node.name, node.node_type)))
     }
@@ -143,6 +227,7 @@ impl Model<'_> {
         let body = match &self.provider {
             Provider::OpenAi { .. } => self.openai_body(messages, tools),
             Provider::Ollama => self.ollama_body(messages, tools),
+            Provider::Anthropic => self.anthropic_body(messages, tools),
         };
         let input = json!({"messages": messages, "options": {"model": self.model}});
         let result = self.send(ctx, &body).await;
@@ -151,6 +236,7 @@ impl Model<'_> {
                 let (message, usage) = match &self.provider {
                     Provider::OpenAi { .. } => self.openai_response(&resp),
                     Provider::Ollama => self.ollama_response(&resp),
+                    Provider::Anthropic => self.anthropic_response(&resp),
                 };
                 let out = json!({
                     "response": {"generations": [[{"text": message["content"].as_str().unwrap_or(""), "message": message}]]},
@@ -172,7 +258,9 @@ impl Model<'_> {
         if let Some(t) = opt("temperature") {
             body["temperature"] = t;
         }
-        if let Some(t) = opt("maxTokens").filter(|t| t.as_i64().unwrap_or(-1) > 0) {
+        // Groq's node calls this option "maxTokensToSample" (same as
+        // Anthropic's) rather than OpenAI's "maxTokens".
+        if let Some(t) = opt("maxTokens").or_else(|| opt("maxTokensToSample")).filter(|t| t.as_i64().unwrap_or(-1) > 0) {
             body["max_tokens"] = t;
         }
         if let Some(t) = opt("topP") {
@@ -186,6 +274,14 @@ impl Model<'_> {
         }
         if opt("responseFormat").and_then(|v| v.as_str().map(String::from)).as_deref() == Some("json_object") {
             body["response_format"] = json!({"type": "json_object"});
+        }
+        // Mistral-only options (harmless no-ops for the other OpenAI-shaped
+        // providers, whose node parameters never populate these keys).
+        if opt("safeMode").and_then(|v| v.as_bool()) == Some(true) {
+            body["safe_prompt"] = json!(true);
+        }
+        if let Some(t) = opt("randomSeed") {
+            body["random_seed"] = t;
         }
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools.to_vec());
@@ -285,10 +381,100 @@ impl Model<'_> {
         (message, usage)
     }
 
+    /// Converts the OpenAI-shaped messages the agent loop builds into
+    /// Anthropic's Messages API shape: `system` lifted to a top-level
+    /// field, assistant tool calls become `tool_use` content blocks, and
+    /// `tool` role replies become a user turn with a `tool_result` block.
+    fn anthropic_body(&self, messages: &[Value], tools: &[Value]) -> Value {
+        let mut system = String::new();
+        let mut out = Vec::new();
+        for m in messages {
+            match m["role"].as_str() {
+                Some("system") => {
+                    if !system.is_empty() {
+                        system.push('\n');
+                    }
+                    system.push_str(m["content"].as_str().unwrap_or(""));
+                }
+                Some("user") => out.push(json!({"role": "user", "content": m["content"].as_str().unwrap_or("")})),
+                Some("assistant") => {
+                    let mut content = Vec::new();
+                    if let Some(text) = m["content"].as_str().filter(|s| !s.is_empty()) {
+                        content.push(json!({"type": "text", "text": text}));
+                    }
+                    for call in m["tool_calls"].as_array().into_iter().flatten() {
+                        let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
+                        let args = call.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("{}");
+                        let input: Value = serde_json::from_str(args).unwrap_or(json!({}));
+                        content.push(json!({"type": "tool_use", "id": call["id"], "name": name, "input": input}));
+                    }
+                    out.push(json!({"role": "assistant", "content": content}));
+                }
+                Some("tool") => out.push(json!({
+                    "role": "user",
+                    "content": [{"type": "tool_result", "tool_use_id": m["tool_call_id"], "content": m["content"].as_str().unwrap_or("")}],
+                })),
+                _ => {}
+            }
+        }
+        let opt = |k: &str| self.options.get(k).cloned();
+        let max_tokens = opt("maxTokensToSample").and_then(|v| v.as_i64()).filter(|v| *v > 0).unwrap_or(4096);
+        let mut body = json!({"model": self.model, "max_tokens": max_tokens, "messages": out});
+        if !system.is_empty() {
+            body["system"] = json!(system);
+        }
+        if let Some(t) = opt("temperature") {
+            body["temperature"] = t;
+        }
+        if let Some(t) = opt("topK") {
+            body["top_k"] = t;
+        }
+        if let Some(t) = opt("topP") {
+            body["top_p"] = t;
+        }
+        if !tools.is_empty() {
+            let schemas: Vec<Value> = tools
+                .iter()
+                .map(|t| json!({"name": t["function"]["name"], "description": t["function"]["description"], "input_schema": t["function"]["parameters"]}))
+                .collect();
+            body["tools"] = Value::Array(schemas);
+        }
+        body
+    }
+
+    /// Normalises Anthropic's content blocks into the OpenAI-shaped
+    /// message the agent loop expects: concatenated `text` blocks as
+    /// `content`, `tool_use` blocks as `tool_calls` with stringified
+    /// arguments.
+    fn anthropic_response(&self, resp: &Value) -> (Value, Value) {
+        let mut text = String::new();
+        let mut tool_calls = Vec::new();
+        for (i, block) in resp["content"].as_array().into_iter().flatten().enumerate() {
+            match block["type"].as_str() {
+                Some("text") => text.push_str(block["text"].as_str().unwrap_or("")),
+                Some("tool_use") => {
+                    let id = block["id"].as_str().map(String::from).unwrap_or_else(|| format!("call_{i}"));
+                    let arguments = serde_json::to_string(&block["input"]).unwrap_or_else(|_| "{}".to_string());
+                    tool_calls.push(json!({"id": id, "type": "function", "function": {"name": block["name"], "arguments": arguments}}));
+                }
+                _ => {}
+            }
+        }
+        let mut message = json!({"role": "assistant", "content": text});
+        if !tool_calls.is_empty() {
+            message["tool_calls"] = Value::Array(tool_calls);
+        }
+        let input = resp["usage"]["input_tokens"].as_i64().unwrap_or(0);
+        let output = resp["usage"]["output_tokens"].as_i64().unwrap_or(0);
+        let usage = json!({"completionTokens": output, "promptTokens": input, "totalTokens": input + output});
+        (message, usage)
+    }
+
     fn endpoint(&self) -> String {
         match self.provider {
             Provider::OpenAi { .. } => format!("{}/chat/completions", self.base_url),
             Provider::Ollama => format!("{}/api/chat", self.base_url),
+            Provider::Anthropic => format!("{}/v1/messages", self.base_url),
         }
     }
 
@@ -296,14 +482,14 @@ impl Model<'_> {
     /// `NodeApiError` wrap of the underlying fetch failure.
     fn unreachable_message(&self, err: reqwest::Error) -> String {
         match self.provider {
-            Provider::OpenAi { .. } => format!("The model provider could not be reached: {}", err.without_url()),
+            Provider::OpenAi { .. } | Provider::Anthropic => format!("The model provider could not be reached: {}", err.without_url()),
             Provider::Ollama => format!("Ollama could not be reached at {}: {}", self.base_url, err.without_url()),
         }
     }
 
     fn error_message(&self, status: reqwest::StatusCode, json: &Value) -> String {
         match self.provider {
-            Provider::OpenAi { .. } => json.pointer("/error/message").and_then(Value::as_str).map(String::from).unwrap_or_else(|| format!("The model provider answered {status}")),
+            Provider::OpenAi { .. } | Provider::Anthropic => json.pointer("/error/message").and_then(Value::as_str).map(String::from).unwrap_or_else(|| format!("The model provider answered {status}")),
             Provider::Ollama => json["error"].as_str().map(String::from).unwrap_or_else(|| format!("Ollama answered {status}")),
         }
     }
@@ -321,6 +507,9 @@ impl Model<'_> {
                 if !self.api_key.is_empty() {
                     req = req.bearer_auth(&self.api_key);
                 }
+            }
+            Provider::Anthropic => {
+                req = req.header("x-api-key", &self.api_key).header("anthropic-version", "2023-06-01");
             }
         }
         req = req.json(body);

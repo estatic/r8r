@@ -383,6 +383,10 @@ const DESCRIPTIONS: &[Desc] = &[
     d("@n8n/n8n-nodes-langchain.memoryBufferWindow", "Simple Memory", "transform", &[1.0, 1.3], "Stores in n8n memory, so no credentials required", 0, 1, &["sessionIdType", "sessionKey", "contextWindowLength"], &[]),
     d("@n8n/n8n-nodes-langchain.lmChatOpenAi", "OpenAI Chat Model", "transform", &[1.0, 1.2], "For advanced usage with an AI chain", 0, 1, &["model", "options"], &["openAiApi"]),
     d("@n8n/n8n-nodes-langchain.lmChatOllama", "Ollama Chat Model", "transform", &[1.0], "Language Model Ollama", 0, 1, &["model", "options"], &["ollamaApi"]),
+    d("@n8n/n8n-nodes-langchain.lmChatAnthropic", "Anthropic Chat Model", "transform", &[1.0, 1.1, 1.2, 1.3, 1.4, 1.5], "Language Model Anthropic", 0, 1, &["model", "options"], &["anthropicApi"]),
+    d("@n8n/n8n-nodes-langchain.lmChatOpenRouter", "OpenRouter Chat Model", "transform", &[1.0], "For advanced usage with an AI chain", 0, 1, &["model", "options"], &["openRouterApi"]),
+    d("@n8n/n8n-nodes-langchain.lmChatGroq", "Groq Chat Model", "transform", &[1.0], "Language Model Groq", 0, 1, &["model", "options"], &["groqApi"]),
+    d("@n8n/n8n-nodes-langchain.lmChatMistralCloud", "Mistral Cloud Chat Model", "transform", &[1.0], "For advanced usage with an AI chain", 0, 1, &["model", "options"], &["mistralCloudApi"]),
 ];
 
 fn describe(desc: &Desc) -> Value {
