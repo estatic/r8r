@@ -9,16 +9,12 @@
 //! are out of scope here, so it surfaces a clear "not supported" error
 //! instead of silently doing nothing.
 //!
-//! Deviation from the reference: the real action node always calls
-//! `channel.checkQueue`/`checkExchange` and never `assertQueue`/
-//! `assertExchange` (those options exist only on the Trigger node's
-//! `options`, so `options.assertQueue` is always `undefined` here) -- so
-//! `durable`/`exclusive`/`autoDelete` are silently inert in the upstream
-//! action node; a queue/exchange that does not already exist makes the
-//! whole node fail with a NOT_FOUND channel error. r8r instead *declares*
-//! (asserts) the queue/exchange with those options, which is what they are
-//! documented to do and is the only way to make them observable/testable.
-//! Documented here and in the task's final report.
+//! Queues and exchanges: like the reference action node, r8r only checks
+//! that they exist (`checkQueue`/`checkExchange`, a passive declare), so a
+//! missing one fails the node with NOT_FOUND and an existing one is used as
+//! declared, whatever its arguments. `durable`/`exclusive`/`autoDelete`
+//! take effect only with `options.assertQueue`/`assertExchange` (Trigger
+//! node options, never set by the action node's editor form).
 
 use crate::n8n::node::{ExecCtx, NodeError, NodeResult, NodeType};
 use crate::n8n::types::{Item, NodeOutput};
@@ -144,7 +140,16 @@ fn apply_arguments(mut props: BasicProperties, options: &Value) -> BasicProperti
 
 // ---- declare helpers -----------------------------------------------------------
 
+/// n8n's `rabbitmqConnectQueue`: `assertQueue` (declare with the options)
+/// only when `options.assertQueue` is set -- the action node has no such
+/// option, so it always runs `checkQueue`, a passive declare that fails if
+/// the queue is missing and never conflicts with how it was declared.
 async fn ensure_queue(channel: &Channel, queue: &str, options: &Value) -> NodeResult<()> {
+    if !options.get("assertQueue").and_then(Value::as_bool).unwrap_or(false) {
+        let passive = QueueDeclareOptions { passive: true, ..Default::default() };
+        channel.queue_declare(ShortString::from(queue.to_string()), passive, FieldTable::default()).await.map_err(|e| NodeError::new(e.to_string()))?;
+        return Ok(());
+    }
     let durable = options.get("durable").and_then(Value::as_bool).unwrap_or(true);
     let auto_delete = options.get("autoDelete").and_then(Value::as_bool).unwrap_or(false);
     let exclusive = options.get("exclusive").and_then(Value::as_bool).unwrap_or(false);
@@ -153,7 +158,17 @@ async fn ensure_queue(channel: &Channel, queue: &str, options: &Value) -> NodeRe
     Ok(())
 }
 
+/// n8n's `rabbitmqConnectExchange`: like [`ensure_queue`], `checkExchange`
+/// unless `options.assertExchange` is set.
 async fn ensure_exchange(channel: &Channel, exchange: &str, exchange_type: &str, options: &Value) -> NodeResult<()> {
+    if !options.get("assertExchange").and_then(Value::as_bool).unwrap_or(false) {
+        let passive = ExchangeDeclareOptions { passive: true, ..Default::default() };
+        channel
+            .exchange_declare(ShortString::from(exchange.to_string()), ExchangeKind::Direct, passive, FieldTable::default())
+            .await
+            .map_err(|e| NodeError::new(e.to_string()))?;
+        return Ok(());
+    }
     let kind = match exchange_type {
         "direct" => ExchangeKind::Direct,
         "topic" => ExchangeKind::Topic,

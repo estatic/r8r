@@ -62,6 +62,7 @@ Feature: RabbitMQ node
 
   Scenario: Send to a fanout exchange with a routing key
     Given the RabbitMQ queue "bdd-rabbitmq-queue-3" is empty
+    And the RabbitMQ fanout exchange "bdd-rabbitmq-exchange-1" routes to the queue "bdd-rabbitmq-queue-3"
     And a workflow with nodes:
       | name  | type          |
       | Start | manualTrigger |
@@ -75,7 +76,7 @@ Feature: RabbitMQ node
         "exchangeType": "fanout",
         "routingKey": "",
         "sendInputData": true,
-        "options": {"durable": false, "autoDelete": true}
+        "options": {}
       }
       """
     And the node "Send" uses the "rabbitmq" credential "Test RabbitMQ"
@@ -85,6 +86,45 @@ Feature: RabbitMQ node
     And the node "Send" outputs:
       """
       [{"success": true}]
+      """
+    And the RabbitMQ queue "bdd-rabbitmq-queue-3" receives a message matching:
+      """
+      {"body": {}}
+      """
+
+  Scenario: Sending to a queue that does not exist fails, like n8n's checkQueue
+    Given the RabbitMQ queue "bdd-rabbitmq-missing" does not exist
+    And a workflow with nodes:
+      | name  | type          |
+      | Start | manualTrigger |
+      | Send  | rabbitmq      |
+    And the node "Send" has parameters:
+      """
+      {"operation": "sendMessage", "mode": "queue", "queue": "bdd-rabbitmq-missing", "sendInputData": true, "options": {}}
+      """
+    And the node "Send" uses the "rabbitmq" credential "Test RabbitMQ"
+    And the connections "Start -> Send"
+    When I execute the workflow
+    Then the execution fails
+    And the node "Send" failed with an error containing "NOT_FOUND"
+
+  Scenario: With assertQueue the node declares a missing queue with its options
+    Given the RabbitMQ queue "bdd-rabbitmq-asserted" does not exist
+    And a workflow with nodes:
+      | name  | type          |
+      | Start | manualTrigger |
+      | Send  | rabbitmq      |
+    And the node "Send" has parameters:
+      """
+      {"operation": "sendMessage", "mode": "queue", "queue": "bdd-rabbitmq-asserted", "sendInputData": true, "options": {"assertQueue": true, "durable": false, "autoDelete": false}}
+      """
+    And the node "Send" uses the "rabbitmq" credential "Test RabbitMQ"
+    And the connections "Start -> Send"
+    When I execute the workflow
+    Then the execution succeeds
+    And the RabbitMQ queue "bdd-rabbitmq-asserted" receives a message matching:
+      """
+      {"body": {}}
       """
 
   Scenario: Delete From Queue is not supported outside a trigger

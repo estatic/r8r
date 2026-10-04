@@ -7,9 +7,9 @@ use crate::steps::{docstring, eventually};
 use crate::world::R8rWorld;
 use cucumber::gherkin::Step;
 use cucumber::{given, then};
-use lapin::options::{BasicGetOptions, QueueDeleteOptions};
+use lapin::options::{BasicGetOptions, ExchangeDeclareOptions, ExchangeDeleteOptions, QueueBindOptions, QueueDeclareOptions, QueueDeleteOptions};
 use lapin::types::FieldTable;
-use lapin::{Channel, Connection, ConnectionProperties};
+use lapin::{Channel, Connection, ConnectionProperties, ExchangeKind};
 use serde_json::Value;
 use std::time::Duration;
 
@@ -24,15 +24,43 @@ async fn channel() -> Channel {
     conn.create_channel().await.expect("create channel")
 }
 
-/// Deletes the queue if it exists, so the node's own `queue_declare`
-/// (durable by default) creates it fresh instead of hitting a
-/// PRECONDITION_FAILED mismatch against whatever arguments a previous
-/// scenario run left behind.
+/// Recreates the queue empty, durable and with a non-default argument, as a
+/// deployment would have declared it: the node only checks that it exists
+/// (n8n's `checkQueue`), so it must work against whatever arguments the
+/// queue was declared with.
 #[given(expr = "the RabbitMQ queue {string} is empty")]
 #[then(expr = "the RabbitMQ queue {string} is empty")]
 async fn queue_empty(_w: &mut R8rWorld, queue: String) {
     let ch = channel().await;
+    let _ = ch.queue_delete(queue.clone().into(), QueueDeleteOptions::default()).await;
+    let mut args = FieldTable::default();
+    args.insert("x-max-length".into(), lapin::types::AMQPValue::LongInt(1000));
+    ch.queue_declare(queue.into(), QueueDeclareOptions { durable: true, ..Default::default() }, args).await.expect("declare queue");
+}
+
+#[given(expr = "the RabbitMQ queue {string} does not exist")]
+async fn queue_absent(_w: &mut R8rWorld, queue: String) {
+    let ch = channel().await;
     let _ = ch.queue_delete(queue.into(), QueueDeleteOptions::default()).await;
+}
+
+/// A `type` exchange with `queue` bound to it (routing key `#` for topic
+/// exchanges, empty otherwise).
+#[given(expr = "the RabbitMQ {word} exchange {string} routes to the queue {string}")]
+async fn exchange_bound(_w: &mut R8rWorld, kind: String, exchange: String, queue: String) {
+    let ch = channel().await;
+    let exchange_kind = match kind.as_str() {
+        "direct" => ExchangeKind::Direct,
+        "topic" => ExchangeKind::Topic,
+        "headers" => ExchangeKind::Headers,
+        _ => ExchangeKind::Fanout,
+    };
+    let _ = ch.exchange_delete(exchange.clone().into(), ExchangeDeleteOptions::default()).await;
+    ch.exchange_declare(exchange.clone().into(), exchange_kind, ExchangeDeclareOptions::default(), FieldTable::default())
+        .await
+        .expect("declare exchange");
+    let key = if kind == "topic" { "#" } else { "" };
+    ch.queue_bind(queue.into(), exchange.into(), key.into(), QueueBindOptions::default(), FieldTable::default()).await.expect("bind queue");
 }
 
 fn field_table_to_json(table: &FieldTable) -> Value {
