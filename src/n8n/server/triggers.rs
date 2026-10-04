@@ -51,6 +51,9 @@ pub trait LongLivedTrigger: Send + Sync {
 pub fn for_node_type(node_type: &str) -> Option<Arc<dyn LongLivedTrigger>> {
     match node_type {
         "n8n-nodes-base.emailReadImap" => Some(Arc::new(crate::n8n::nodes::email_imap::ImapTrigger) as Arc<dyn LongLivedTrigger>),
+        "n8n-nodes-base.rabbitmqTrigger" => Some(Arc::new(crate::n8n::nodes::rabbitmq::RabbitMqTrigger) as Arc<dyn LongLivedTrigger>),
+        "n8n-nodes-base.kafkaTrigger" => Some(Arc::new(crate::n8n::nodes::kafka::KafkaTrigger) as Arc<dyn LongLivedTrigger>),
+        "n8n-nodes-base.mqttTrigger" => Some(Arc::new(crate::n8n::nodes::mqtt::MqttTrigger) as Arc<dyn LongLivedTrigger>),
         _ => None,
     }
 }
@@ -58,17 +61,32 @@ pub fn for_node_type(node_type: &str) -> Option<Arc<dyn LongLivedTrigger>> {
 /// Starts an execution with `items` as the given node's output -- a
 /// long-lived trigger's analogue of a schedule tick or a webhook call
 /// (spec: "each received message starts an execution with the trigger's
-/// output items, like n8n's `emit`").
+/// output items, like n8n's `emit`"). Fire-and-forget: callers that need
+/// the finished execution's outcome (e.g. a RabbitMQ Trigger's
+/// `executionFinishes`/`executionFinishesSuccessfully` ack modes, which
+/// must ack/nack based on whether the run errored) should call
+/// [`fire_and_wait`] instead.
 pub async fn fire(n8n: &Arc<N8n>, workflow_id: &str, node: &str, items: Vec<Item>) {
-    let Ok(Some(row)) = n8n.store.workflow_row(workflow_id).await else { return };
+    fire_and_wait(n8n, workflow_id, node, items).await;
+}
+
+/// Like [`fire`], but waits for the execution to finish and returns its
+/// outcome (`None` if the workflow was deactivated/not found before the
+/// run could start, or if the run could not be started at all).
+pub async fn fire_and_wait(n8n: &Arc<N8n>, workflow_id: &str, node: &str, items: Vec<Item>) -> Option<Arc<runner::RunOutcome>> {
+    let Ok(Some(row)) = n8n.store.workflow_row(workflow_id).await else { return None };
     if !row.active {
-        return;
+        return None;
     }
     let mut req = RunRequest::new(row.data.clone(), Mode::Trigger);
     req.start_node = Some(node.to_string());
     req.start_items = Some(items);
-    if let Err(e) = runner::start(n8n, req).await {
-        tracing::error!(workflowId = workflow_id, error = %e, "long-lived trigger execution could not start");
+    match runner::start(n8n, req).await {
+        Ok(handle) => handle.done.await.ok(),
+        Err(e) => {
+            tracing::error!(workflowId = workflow_id, error = %e, "long-lived trigger execution could not start");
+            None
+        }
     }
 }
 
