@@ -382,6 +382,7 @@ const DESCRIPTIONS: &[Desc] = &[
     d("@n8n/n8n-nodes-langchain.toolCalculator", "Calculator", "transform", &[1.0], "Make it easier for AI agents to perform arithmetic", 0, 1, &[], &[]),
     d("@n8n/n8n-nodes-langchain.memoryBufferWindow", "Simple Memory", "transform", &[1.0, 1.3], "Stores in n8n memory, so no credentials required", 0, 1, &["sessionIdType", "sessionKey", "contextWindowLength"], &[]),
     d("@n8n/n8n-nodes-langchain.lmChatOpenAi", "OpenAI Chat Model", "transform", &[1.0, 1.2], "For advanced usage with an AI chain", 0, 1, &["model", "options"], &["openAiApi"]),
+    d("@n8n/n8n-nodes-langchain.lmChatOllama", "Ollama Chat Model", "transform", &[1.0], "Language Model Ollama", 0, 1, &["model", "options"], &["ollamaApi"]),
 ];
 
 fn describe(desc: &Desc) -> Value {

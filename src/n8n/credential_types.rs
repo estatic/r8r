@@ -172,6 +172,14 @@ pub fn all() -> Vec<CredentialType> {
             fields: vec![f("apiKey", "API Key", true, true, json!("")), f("url", "Base URL", false, false, json!("https://api.anthropic.com"))],
         },
         CredentialType {
+            name: "ollamaApi",
+            display_name: "Ollama",
+            fields: vec![
+                f("baseUrl", "Base URL", false, true, json!("http://localhost:11434")),
+                f("apiKey", "API Key", true, false, json!("")),
+            ],
+        },
+        CredentialType {
             name: "postgres",
             display_name: "Postgres",
             fields: vec![
