@@ -18,6 +18,7 @@ pub fn all() -> Vec<Box<dyn NodeType>> {
         Box::new(Agent),
         Box::new(ChainLlm),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatOpenAi")),
+        Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatOllama")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.toolCalculator")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.memoryBufferWindow")),
     ]
@@ -61,13 +62,32 @@ fn record(ctx: &ExecCtx<'_>, sub: &str, kind: &str, input: Value, output: Result
 
 // ---- chat model ------------------------------------------------------------------
 
+/// Which chat-model provider a sub-node talks to. Adding a new
+/// OpenAI-compatible provider (Groq, Mistral, OpenRouter) only needs a new
+/// variant plus its credential/base-URL lookup in `load_model`; `chat`/
+/// `send` below already carry the OpenAI-shaped request for `OpenAi`.
+/// A provider with its own wire format (Anthropic, Ollama) adds its own
+/// request/response branch the way `Ollama` does here.
+enum Provider {
+    OpenAi { organization: Option<String> },
+    Ollama,
+}
+
 struct Model<'a> {
     node: &'a Node,
     base_url: String,
     api_key: String,
-    organization: Option<String>,
     model: String,
     options: Map<String, Value>,
+    provider: Provider,
+}
+
+fn model_param(params: &Value, default: &str) -> String {
+    match &params["model"] {
+        Value::Object(o) => o.get("value").and_then(Value::as_str).unwrap_or(default).to_string(),
+        Value::String(s) => s.clone(),
+        _ => default.into(),
+    }
 }
 
 async fn load_model<'a>(ctx: &'a ExecCtx<'_>, item: usize) -> NodeResult<Model<'a>> {
@@ -78,39 +98,75 @@ async fn load_model<'a>(ctx: &'a ExecCtx<'_>, item: usize) -> NodeResult<Model<'
         .next()
         .ok_or_else(|| NodeError::new("A Chat Model sub-node must be connected and enabled"))?;
     let node = ctx.workflow.node(&name).expect("connected nodes exist");
-    if node.node_type != format!("{LC}lmChatOpenAi") {
-        return Err(NodeError::new(format!("The chat model \"{}\" ({}) is not supported natively yet", node.name, node.node_type)));
-    }
     let params = ctx.resolve_value(&node.parameters, item)?;
-    let model = match &params["model"] {
-        Value::Object(o) => o.get("value").and_then(Value::as_str).unwrap_or("gpt-4o-mini").to_string(),
-        Value::String(s) => s.clone(),
-        _ => "gpt-4o-mini".into(),
-    };
-    let (_, cred) = ctx.credentials_for(node, "openAiApi").await?;
     let options = params["options"].as_object().cloned().unwrap_or_default();
-    let base_url = options
-        .get("baseURL")
-        .and_then(Value::as_str)
-        .filter(|s| !s.is_empty())
-        .or(cred["url"].as_str().filter(|s| !s.is_empty()))
-        .unwrap_or("https://api.openai.com/v1")
-        .trim_end_matches('/')
-        .to_string();
-    Ok(Model {
-        node,
-        base_url,
-        api_key: cred["apiKey"].as_str().unwrap_or("").to_string(),
-        organization: cred["organizationId"].as_str().filter(|s| !s.is_empty()).map(String::from),
-        model,
-        options,
-    })
+    if node.node_type == format!("{LC}lmChatOpenAi") {
+        let (_, cred) = ctx.credentials_for(node, "openAiApi").await?;
+        let base_url = options
+            .get("baseURL")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .or(cred["url"].as_str().filter(|s| !s.is_empty()))
+            .unwrap_or("https://api.openai.com/v1")
+            .trim_end_matches('/')
+            .to_string();
+        Ok(Model {
+            node,
+            base_url,
+            api_key: cred["apiKey"].as_str().unwrap_or("").to_string(),
+            model: model_param(&params, "gpt-4o-mini"),
+            options,
+            provider: Provider::OpenAi { organization: cred["organizationId"].as_str().filter(|s| !s.is_empty()).map(String::from) },
+        })
+    } else if node.node_type == format!("{LC}lmChatOllama") {
+        let (_, cred) = ctx.credentials_for(node, "ollamaApi").await?;
+        let base_url = cred["baseUrl"].as_str().filter(|s| !s.is_empty()).unwrap_or("http://localhost:11434").trim_end_matches('/').to_string();
+        Ok(Model {
+            node,
+            base_url,
+            api_key: cred["apiKey"].as_str().unwrap_or("").to_string(),
+            model: model_param(&params, "llama3.2"),
+            options,
+            provider: Provider::Ollama,
+        })
+    } else {
+        Err(NodeError::new(format!("The chat model \"{}\" ({}) is not supported natively yet", node.name, node.node_type)))
+    }
 }
 
 impl Model<'_> {
-    /// One chat completion; returns the assistant message.
+    /// One chat completion; returns the assistant message (OpenAI-shaped:
+    /// `role`/`content`/`tool_calls` with stringified arguments, whatever
+    /// the provider's wire format).
     async fn chat(&self, ctx: &ExecCtx<'_>, messages: &[Value], tools: &[Value]) -> NodeResult<Value> {
         let started = now_ms();
+        let body = match &self.provider {
+            Provider::OpenAi { .. } => self.openai_body(messages, tools),
+            Provider::Ollama => self.ollama_body(messages, tools),
+        };
+        let input = json!({"messages": messages, "options": {"model": self.model}});
+        let result = self.send(ctx, &body).await;
+        match result {
+            Ok(resp) => {
+                let (message, usage) = match &self.provider {
+                    Provider::OpenAi { .. } => self.openai_response(&resp),
+                    Provider::Ollama => self.ollama_response(&resp),
+                };
+                let out = json!({
+                    "response": {"generations": [[{"text": message["content"].as_str().unwrap_or(""), "message": message}]]},
+                    "tokenUsage": usage,
+                });
+                record(ctx, &self.node.name, "ai_languageModel", input, Ok(out), started);
+                Ok(message)
+            }
+            Err(e) => {
+                record(ctx, &self.node.name, "ai_languageModel", input, Err(&e), started);
+                Err(e)
+            }
+        }
+    }
+
+    fn openai_body(&self, messages: &[Value], tools: &[Value]) -> Value {
         let mut body = json!({"model": self.model, "messages": messages});
         let opt = |k: &str| self.options.get(k).cloned();
         if let Some(t) = opt("temperature") {
@@ -134,46 +190,147 @@ impl Model<'_> {
         if !tools.is_empty() {
             body["tools"] = Value::Array(tools.to_vec());
         }
-        let input = json!({"messages": messages, "options": {"model": self.model}});
-        let result = self.send(ctx, &body).await;
-        match result {
-            Ok(resp) => {
-                let message = resp.pointer("/choices/0/message").cloned().unwrap_or(json!({"role": "assistant", "content": ""}));
-                let usage = &resp["usage"];
-                let out = json!({
-                    "response": {"generations": [[{"text": message["content"].as_str().unwrap_or(""), "message": message}]]},
-                    "tokenUsage": {
-                        "completionTokens": usage["completion_tokens"].as_i64().unwrap_or(0),
-                        "promptTokens": usage["prompt_tokens"].as_i64().unwrap_or(0),
-                        "totalTokens": usage["total_tokens"].as_i64().unwrap_or(0),
-                    },
-                });
-                record(ctx, &self.node.name, "ai_languageModel", input, Ok(out), started);
-                Ok(message)
+        body
+    }
+
+    fn openai_response(&self, resp: &Value) -> (Value, Value) {
+        let message = resp.pointer("/choices/0/message").cloned().unwrap_or(json!({"role": "assistant", "content": ""}));
+        let usage = &resp["usage"];
+        let usage = json!({
+            "completionTokens": usage["completion_tokens"].as_i64().unwrap_or(0),
+            "promptTokens": usage["prompt_tokens"].as_i64().unwrap_or(0),
+            "totalTokens": usage["total_tokens"].as_i64().unwrap_or(0),
+        });
+        (message, usage)
+    }
+
+    /// Ollama's native `/api/chat` (non-streaming): LangChain-style camelCase
+    /// node options map onto Ollama's snake_case `options` object, plus the
+    /// top-level `keep_alive`/`format` and `stream: false`.
+    fn ollama_body(&self, messages: &[Value], tools: &[Value]) -> Value {
+        let mut body = json!({"model": self.model, "messages": messages, "stream": false});
+        let opt = |k: &str| self.options.get(k).cloned();
+        let mut options = Map::new();
+        let map = [
+            ("temperature", "temperature"),
+            ("topK", "top_k"),
+            ("topP", "top_p"),
+            ("frequencyPenalty", "frequency_penalty"),
+            ("presencePenalty", "presence_penalty"),
+            ("repeatPenalty", "repeat_penalty"),
+            ("numCtx", "num_ctx"),
+            ("numPredict", "num_predict"),
+            ("lowVram", "low_vram"),
+            ("mainGpu", "main_gpu"),
+            ("numBatch", "num_batch"),
+            ("numGpu", "num_gpu"),
+            ("numThread", "num_thread"),
+            ("penalizeNewline", "penalize_newline"),
+            ("useMLock", "use_mlock"),
+            ("useMMap", "use_mmap"),
+            ("vocabOnly", "vocab_only"),
+        ];
+        for (n8n_key, ollama_key) in map {
+            if let Some(v) = opt(n8n_key) {
+                options.insert(ollama_key.to_string(), v);
             }
-            Err(e) => {
-                record(ctx, &self.node.name, "ai_languageModel", input, Err(&e), started);
-                Err(e)
-            }
+        }
+        if !options.is_empty() {
+            body["options"] = Value::Object(options);
+        }
+        if let Some(v) = opt("keepAlive") {
+            body["keep_alive"] = v;
+        }
+        if opt("format").and_then(|v| v.as_str().map(String::from)).as_deref() == Some("json") {
+            body["format"] = json!("json");
+        }
+        if !tools.is_empty() {
+            body["tools"] = Value::Array(tools.to_vec());
+        }
+        body
+    }
+
+    /// Normalises Ollama's response into the OpenAI-shaped message the
+    /// agent loop expects: `tool_calls[].function.arguments` as a JSON
+    /// string (Ollama sends an object), with a synthetic call id so the
+    /// loop's `tool_call_id` round-trip has something to echo.
+    fn ollama_response(&self, resp: &Value) -> (Value, Value) {
+        let mut message = resp["message"].clone();
+        if message.is_null() {
+            message = json!({"role": "assistant", "content": ""});
+        }
+        if let Some(calls) = message.get("tool_calls").and_then(Value::as_array).cloned() {
+            let calls: Vec<Value> = calls
+                .into_iter()
+                .enumerate()
+                .map(|(i, mut call)| {
+                    let args = call.pointer("/function/arguments").cloned().unwrap_or(json!({}));
+                    let args_str = if args.is_string() { args.as_str().unwrap().to_string() } else { args.to_string() };
+                    call["function"]["arguments"] = json!(args_str);
+                    if call.get("id").is_none() {
+                        call["id"] = json!(format!("call_{i}"));
+                    }
+                    call
+                })
+                .collect();
+            message["tool_calls"] = Value::Array(calls);
+        }
+        let prompt = resp["prompt_eval_count"].as_i64().unwrap_or(0);
+        let completion = resp["eval_count"].as_i64().unwrap_or(0);
+        let usage = json!({
+            "completionTokens": completion,
+            "promptTokens": prompt,
+            "totalTokens": prompt + completion,
+        });
+        (message, usage)
+    }
+
+    fn endpoint(&self) -> String {
+        match self.provider {
+            Provider::OpenAi { .. } => format!("{}/chat/completions", self.base_url),
+            Provider::Ollama => format!("{}/api/chat", self.base_url),
+        }
+    }
+
+    /// Message for an unreachable provider, mirroring n8n's generic
+    /// `NodeApiError` wrap of the underlying fetch failure.
+    fn unreachable_message(&self, err: reqwest::Error) -> String {
+        match self.provider {
+            Provider::OpenAi { .. } => format!("The model provider could not be reached: {}", err.without_url()),
+            Provider::Ollama => format!("Ollama could not be reached at {}: {}", self.base_url, err.without_url()),
+        }
+    }
+
+    fn error_message(&self, status: reqwest::StatusCode, json: &Value) -> String {
+        match self.provider {
+            Provider::OpenAi { .. } => json.pointer("/error/message").and_then(Value::as_str).map(String::from).unwrap_or_else(|| format!("The model provider answered {status}")),
+            Provider::Ollama => json["error"].as_str().map(String::from).unwrap_or_else(|| format!("Ollama answered {status}")),
         }
     }
 
     async fn send(&self, ctx: &ExecCtx<'_>, body: &Value) -> NodeResult<Value> {
-        let mut req = ctx.services.http.post(format!("{}/chat/completions", self.base_url)).bearer_auth(&self.api_key).json(body);
-        if let Some(org) = &self.organization {
-            req = req.header("OpenAI-Organization", org);
+        let mut req = ctx.services.http.post(self.endpoint());
+        match &self.provider {
+            Provider::OpenAi { organization } => {
+                req = req.bearer_auth(&self.api_key);
+                if let Some(org) = organization {
+                    req = req.header("OpenAI-Organization", org);
+                }
+            }
+            Provider::Ollama => {
+                if !self.api_key.is_empty() {
+                    req = req.bearer_auth(&self.api_key);
+                }
+            }
         }
+        req = req.json(body);
         let timeout = self.options.get("timeout").and_then(Value::as_u64).unwrap_or(60_000);
-        let resp = req
-            .timeout(std::time::Duration::from_millis(timeout))
-            .send()
-            .await
-            .map_err(|e| NodeError::new(format!("The model provider could not be reached: {}", e.without_url())))?;
+        let resp = req.timeout(std::time::Duration::from_millis(timeout)).send().await.map_err(|e| NodeError::new(self.unreachable_message(e)))?;
         let status = resp.status();
         let text = resp.text().await.unwrap_or_default();
         let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
         if !status.is_success() {
-            let message = json.pointer("/error/message").and_then(Value::as_str).map(String::from).unwrap_or_else(|| format!("The model provider answered {status}"));
+            let message = self.error_message(status, &json);
             return Err(NodeError::api(redact(&message, &self.api_key), Some(status.as_u16()), None));
         }
         if json.is_null() {
