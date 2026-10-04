@@ -128,7 +128,8 @@ Feature: RabbitMQ Trigger
       will fail and requeue
       """
     Then within 10 seconds the workflow has at least 1 executions
-    And the RabbitMQ queue "bdd-trigger-queue-6" receives a message matching:
+    When I deactivate the workflow
+    Then the RabbitMQ queue "bdd-trigger-queue-6" receives a message matching:
       """
       {"body": "will fail and requeue"}
       """

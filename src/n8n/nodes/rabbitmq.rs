@@ -446,7 +446,7 @@ fn build_item(delivery: &Delivery, options: &Value) -> Item {
         json.insert("fields".into(), Value::Object(fields));
         json.insert("properties".into(), Value::Object(properties));
         let mut binary = Map::new();
-        binary.insert("data".into(), json!({"data": base64::engine::general_purpose::STANDARD.encode(&delivery.data), "mimeType": "application/octet-stream"}));
+        binary.insert("data".into(), json!({"data": base64::engine::general_purpose::STANDARD.encode(&delivery.data), "mimeType": "application/octet-stream", "fileName": ""}));
         return Item { json, binary: Some(binary), paired_item: None };
     }
 

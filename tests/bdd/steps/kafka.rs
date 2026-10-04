@@ -29,7 +29,7 @@ async fn client() -> Client {
 /// as the Kafka action node.
 #[when(expr = "I publish to the Kafka topic {string}:")]
 async fn publish(w: &mut R8rWorld, topic: String, step: &Step) {
-    let body = w.expand(docstring(step));
+    let body = w.expand(docstring(step).trim());
     let client = client().await;
     let partition_client = client
         .partition_client(topic.clone(), 0, UnknownTopicHandling::Retry)

@@ -57,7 +57,7 @@ async fn subscribe(w: &mut R8rWorld, topic: String) {
 /// socket before returning (mirrors `mqtt.rs`'s own node code).
 #[when(expr = "I publish to the MQTT topic {string}:")]
 async fn publish(w: &mut R8rWorld, topic: String, step: &Step) {
-    let body = w.expand(docstring(step));
+    let body = w.expand(docstring(step).trim());
     let (host, port) = mqtt_host_port();
     let client_id = format!("bdd-pub-{}", uuid::Uuid::new_v4().simple());
     let opts = MqttOptions::new(client_id, host, port);

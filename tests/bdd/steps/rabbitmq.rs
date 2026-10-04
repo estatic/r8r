@@ -69,7 +69,7 @@ async fn exchange_bound(_w: &mut R8rWorld, kind: String, exchange: String, queue
 /// activation, so this step only needs to publish, not declare.
 #[when(expr = "I publish to the RabbitMQ queue {string}:")]
 async fn publish(w: &mut R8rWorld, queue: String, step: &Step) {
-    let body = w.expand(docstring(step));
+    let body = w.expand(docstring(step).trim());
     let ch = channel().await;
     ch.basic_publish(ShortString::from(""), ShortString::from(queue), BasicPublishOptions::default(), body.as_bytes(), BasicProperties::default())
         .await
