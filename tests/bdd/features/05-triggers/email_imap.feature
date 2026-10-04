@@ -19,6 +19,9 @@ Feature: Email Trigger (IMAP)
   rejected this login" from "the server could not be reached" until it
   tries to connect, and both surface the same way -- an activation error.
 
+  Background:
+    Given a running r8r server with an owner and an API key
+
   Scenario: An unseen mail triggers one execution with simple format fields
     Given the credential "IMAP Simple" of type "imap" with the data:
       """
@@ -52,7 +55,7 @@ Feature: Email Trigger (IMAP)
     And the workflow is active
     When I deliver a test email to "imap-read@r8r.test" with subject "Read once" and body "Should fire once"
     Then within 10 seconds the workflow has at least 1 executions
-    And I remember the executions count of the workflow
+    When I remember the executions count of the workflow
     Then after 6 seconds the workflow has no new executions
 
   Scenario: postProcessAction "nothing" relies on UID tracking to avoid firing twice
@@ -67,7 +70,7 @@ Feature: Email Trigger (IMAP)
     And the workflow is active
     When I deliver a test email to "imap-nothing@r8r.test" with subject "Still unseen" and body "Tracked by UID instead"
     Then within 10 seconds the workflow has at least 1 executions
-    And I remember the executions count of the workflow
+    When I remember the executions count of the workflow
     Then after 6 seconds the workflow has no new executions
 
   Scenario: The "resolved" format returns the full parsed email
