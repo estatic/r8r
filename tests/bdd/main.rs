@@ -32,6 +32,9 @@ const OPT_IN_TAGS: &[&str] = &[
     "requires-ssh",
     "requires-ftp",
     "requires-imap",
+    "requires-rabbitmq",
+    "requires-mqtt",
+    "requires-kafka",
 ];
 
 #[tokio::main]
