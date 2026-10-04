@@ -133,7 +133,9 @@ pub async fn refresh_oauth2(ctx: &ExecCtx<'_>, auth: &mut GoogleAuth) -> NodeRes
         .ok_or_else(|| NodeError::api("Could not refresh the Google OAuth2 access token", Some(status), Some(body.to_string())))?
         .to_string();
     auth.bearer = token;
-    cred_data["oauthTokenData"] = body;
+    // Merged, not replaced, like n8n: Google's refresh response carries no
+    // `refresh_token`, and dropping it would break the next refresh.
+    merge_token_data(cred_data, body);
     if let Some(store) = &ctx.services.store {
         let _ = store.update_credential_data(cred_id, cred_data).await;
     }
@@ -229,5 +231,43 @@ pub async fn api_request_raw(
             return Err(map_err(status, &value));
         }
         return Ok(bytes);
+    }
+}
+
+/// Merges a token endpoint response into `oauthTokenData`, keeping fields the
+/// response omits (notably `refresh_token`).
+pub(crate) fn merge_token_data(cred_data: &mut Value, response: Value) {
+    if !cred_data["oauthTokenData"].is_object() {
+        cred_data["oauthTokenData"] = Value::Object(Default::default());
+    }
+    if let (Some(existing), Value::Object(fresh)) = (cred_data["oauthTokenData"].as_object_mut(), response) {
+        existing.extend(fresh);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn a_refresh_response_without_refresh_token_keeps_the_stored_one() {
+        let mut cred = json!({"oauthTokenData": {"access_token": "old", "refresh_token": "r-1", "scope": "s"}});
+        merge_token_data(&mut cred, json!({"access_token": "new", "expires_in": 3599}));
+        assert_eq!(cred["oauthTokenData"], json!({"access_token": "new", "refresh_token": "r-1", "scope": "s", "expires_in": 3599}));
+    }
+
+    #[test]
+    fn a_rotated_refresh_token_replaces_the_stored_one() {
+        let mut cred = json!({"oauthTokenData": {"access_token": "old", "refresh_token": "r-1"}});
+        merge_token_data(&mut cred, json!({"access_token": "new", "refresh_token": "r-2"}));
+        assert_eq!(cred["oauthTokenData"]["refresh_token"], "r-2");
+    }
+
+    #[test]
+    fn token_data_is_created_when_missing() {
+        let mut cred = json!({});
+        merge_token_data(&mut cred, json!({"access_token": "a"}));
+        assert_eq!(cred["oauthTokenData"], json!({"access_token": "a"}));
     }
 }

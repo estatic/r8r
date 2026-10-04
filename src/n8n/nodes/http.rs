@@ -145,7 +145,7 @@ impl HttpRequest {
             NodeError::api("Could not get an OAuth2 access token", Some(status), Some(body.to_string()))
         })?;
         let token = token.to_string();
-        auth.data["oauthTokenData"] = body;
+        crate::n8n::nodes::google_auth::merge_token_data(&mut auth.data, body);
         if let Some(store) = &ctx.services.store {
             let _ = store.update_credential_data(&auth.cred_id, &auth.data).await;
         }
