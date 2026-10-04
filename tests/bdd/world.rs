@@ -9,6 +9,10 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+/// A message received by the test MQTT subscriber (`steps/mqtt.rs`):
+/// `(topic, payload)`.
+pub type MqttMessages = Arc<Mutex<Vec<(String, Vec<u8>)>>>;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Auth {
     None,
@@ -80,6 +84,8 @@ pub struct R8rWorld {
     pub mock: Option<wiremock::MockServer>,
     pub push_messages: Arc<Mutex<Vec<Value>>>,
     pub push_task: Option<tokio::task::JoinHandle<()>>,
+    pub mqtt_messages: MqttMessages,
+    pub mqtt_task: Option<tokio::task::JoinHandle<()>>,
     pub expr: ExprState,
     pub load: Vec<(u16, Duration)>,
     /// Headers added to the next request only.
@@ -102,6 +108,9 @@ impl std::fmt::Debug for R8rWorld {
 impl Drop for R8rWorld {
     fn drop(&mut self) {
         if let Some(task) = self.push_task.take() {
+            task.abort();
+        }
+        if let Some(task) = self.mqtt_task.take() {
             task.abort();
         }
         // wiremock's MockServer blocks on an async verify() in its Drop; on
@@ -138,6 +147,8 @@ impl R8rWorld {
             mock: None,
             push_messages: Arc::new(Mutex::new(Vec::new())),
             push_task: None,
+            mqtt_messages: Arc::new(Mutex::new(Vec::new())),
+            mqtt_task: None,
             expr: ExprState::default(),
             load: Vec::new(),
             next_headers: Vec::new(),
