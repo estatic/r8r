@@ -11,7 +11,7 @@ use crate::n8n::workflow::Node;
 use serde_json::{json, Map, Value};
 
 pub fn all() -> Vec<Box<dyn NodeType>> {
-    vec![Box::new(SentimentAnalysis)]
+    vec![Box::new(SentimentAnalysis), Box::new(TextClassifier)]
 }
 
 // ---- structured output (LangChain StructuredOutputParser) ---------------------
@@ -93,21 +93,39 @@ fn fix_prompt(instructions: &str, completion: &str, error: &str) -> String {
     format!("Instructions:\n--------------\n{instructions}\n--------------\nCompletion:\n--------------\n{completion}\n--------------\n\nAbove, the Completion did not satisfy the constraints given in the Instructions.\nError:\n--------------\n{error}\n--------------\n\nPlease try again. Please only respond with an answer that satisfies the constraints laid out in the Instructions:")
 }
 
+/// Why a structured call failed: the model call itself, or an answer that
+/// doesn't fit the schema (LangChain's `OutputParserException`).
+enum StructuredError {
+    Model(NodeError),
+    Parse,
+}
+
+impl StructuredError {
+    /// n8n's `wrapLangChainParserError`: parse failures get one generic
+    /// message, other errors stay as they are.
+    fn wrapped(self) -> NodeError {
+        match self {
+            StructuredError::Model(e) => e,
+            StructuredError::Parse => NodeError::new("Model output doesn't fit required format").describe("To continue the execution when this happens, change the 'On Error' parameter in the root node's settings"),
+        }
+    }
+}
+
 /// Runs `messages` through the model and parses the answer against
 /// `schema`; with `auto_fix`, one more model call asks it to fix an answer
 /// that doesn't parse (`OutputFixingParser`).
-async fn structured_call(ctx: &ExecCtx<'_>, item: usize, messages: &[Value], schema: &Value, auto_fix: bool) -> NodeResult<Value> {
-    let model = load_model(ctx, item).await?;
-    let reply = model.chat(ctx, messages, &[]).await?;
+async fn structured_call(ctx: &ExecCtx<'_>, item: usize, messages: &[Value], schema: &Value, auto_fix: bool) -> Result<Value, StructuredError> {
+    let model = load_model(ctx, item).await.map_err(StructuredError::Model)?;
+    let reply = model.chat(ctx, messages, &[]).await.map_err(StructuredError::Model)?;
     let text = reply["content"].as_str().unwrap_or("").to_string();
     match parse_structured(&text, schema) {
         Ok(v) => Ok(v),
         Err(e) if auto_fix => {
             let prompt = fix_prompt(&format_instructions(schema), &text, &format!("OutputParserException: {e}"));
-            let fixed = model.chat(ctx, &[json!({"role": "user", "content": prompt})], &[]).await?;
-            parse_structured(fixed["content"].as_str().unwrap_or(""), schema).map_err(NodeError::new)
+            let fixed = model.chat(ctx, &[json!({"role": "user", "content": prompt})], &[]).await.map_err(StructuredError::Model)?;
+            parse_structured(fixed["content"].as_str().unwrap_or(""), schema).map_err(|_| StructuredError::Parse)
         }
-        Err(e) => Err(NodeError::new(e)),
+        Err(_) => Err(StructuredError::Parse),
     }
 }
 
@@ -178,7 +196,7 @@ async fn sentiment(ctx: &ExecCtx<'_>, i: usize) -> NodeResult<(usize, Item)> {
     let auto_fix = ctx.param_bool("options.enableAutoFixing", i, false)?;
     let output = structured_call(ctx, i, &messages, &schema, auto_fix)
         .await
-        .map_err(|_| NodeError::new("Error during parsing of LLM output, please check your LLM model and configuration"))?;
+        .map_err(|_: StructuredError| NodeError::new("Error during parsing of LLM output, please check your LLM model and configuration"))?;
     let found = output["sentiment"].as_str().unwrap_or("");
     let index = cats.iter().position(|c| c.eq_ignore_ascii_case(found)).ok_or_else(|| NodeError::new("Error during parsing of LLM output, please check your LLM model and configuration"))?;
     let mut analysis = Map::from_iter([("category".to_string(), json!(found))]);
@@ -205,5 +223,85 @@ mod tests {
         assert!(parse_structured("{\"n\": 0.5}", &schema).is_err());
         assert!(parse_structured("{\"a\": \"x\", \"n\": 2}", &schema).is_err());
         assert!(parse_structured("not json", &schema).is_err());
+    }
+}
+
+// ---- Text Classifier -------------------------------------------------------------
+
+const CLASSIFIER_SYSTEM: &str = "Please classify the text provided by the user into one of the following categories: {categories}, and use the provided formatting instructions below. Don't explain, and only output the json.";
+
+struct TextClassifier;
+
+/// `(category, description)` pairs from the node's raw parameters.
+fn classifier_categories(p: &Value) -> Vec<(String, String)> {
+    p.pointer("/categories/categories")
+        .and_then(Value::as_array)
+        .into_iter()
+        .flatten()
+        .map(|c| (c["category"].as_str().unwrap_or("").to_string(), c["description"].as_str().unwrap_or("").to_string()))
+        .collect()
+}
+
+#[async_trait::async_trait]
+impl NodeType for TextClassifier {
+    fn type_name(&self) -> &'static str {
+        "@n8n/n8n-nodes-langchain.textClassifier"
+    }
+
+    fn outputs(&self, node: &Node) -> usize {
+        let other = node.parameters.pointer("/options/fallback").and_then(Value::as_str) == Some("other");
+        (classifier_categories(&node.parameters).len() + usize::from(other)).max(1)
+    }
+
+    async fn execute(&self, ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
+        let cats = classifier_categories(&json!({"categories": ctx.param("categories", 0)?}));
+        if cats.is_empty() {
+            return Err(NodeError::new("At least one category must be defined"));
+        }
+        let multi = ctx.param_bool("options.multiClass", 0, false)?;
+        let fallback = ctx.param_str("options.fallback", 0, "discard")?;
+        let auto_fix = ctx.param_bool("options.enableAutoFixing", 0, false)?;
+        let mut props = Map::new();
+        for (cat, description) in &cats {
+            props.insert(cat.clone(), json!({"type": "boolean", "description": format!("Should be true if the input has category \"{cat}\" (description: {description})")}));
+        }
+        if fallback == "other" {
+            props.insert("fallback".into(), json!({"type": "boolean", "description": "Should be true if none of the other categories apply"}));
+        }
+        let required: Vec<&String> = props.keys().collect();
+        let schema = json!({"type": "object", "properties": props, "required": required, "additionalProperties": false});
+        let multi_prompt = if multi { "Categories are not mutually exclusive, and multiple can be true" } else { "Categories are mutually exclusive, and only one can be true" };
+        let fallback_prompt = if fallback == "other" { "If no categories apply, select the \"fallback\" option." } else { "If there is not a very fitting category, select none of the categories." };
+        let names = cats.iter().map(|(c, _)| c.as_str()).collect::<Vec<_>>().join(", ");
+        let mut out: NodeOutput = vec![Vec::new(); cats.len() + usize::from(fallback == "other")];
+        for i in 0..ctx.input().len() {
+            let result = async {
+                let input = ctx.param_str("inputText", i, "")?;
+                if input.is_empty() {
+                    return Err(NodeError::new(format!("Text to classify for item {i} is not defined")));
+                }
+                let template = ctx.param_str("options.systemPromptTemplate", i, CLASSIFIER_SYSTEM)?;
+                let system = format!("{}\n\t{}\n\t{multi_prompt}\n\t{fallback_prompt}", template.replace("{categories}", &names), format_instructions(&schema));
+                let messages = [json!({"role": "system", "content": system}), json!({"role": "user", "content": input})];
+                structured_call(ctx, i, &messages, &schema, auto_fix).await.map_err(StructuredError::wrapped)
+            }
+            .await;
+            match result {
+                Ok(answer) => {
+                    let item = ctx.input()[i].clone().paired(i);
+                    for (idx, (cat, _)) in cats.iter().enumerate() {
+                        if answer[cat.as_str()].as_bool() == Some(true) {
+                            out[idx].push(item.clone());
+                        }
+                    }
+                    if fallback == "other" && answer["fallback"].as_bool() == Some(true) {
+                        out.last_mut().expect("has the fallback output").push(item);
+                    }
+                }
+                Err(e) if ctx.continue_on_fail() => out[0].push(Item::new(Map::from_iter([("error".to_string(), json!(e.message))])).paired(i)),
+                Err(e) => return Err(e.at(i)),
+            }
+        }
+        Ok(out)
     }
 }

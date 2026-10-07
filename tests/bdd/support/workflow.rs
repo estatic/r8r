@@ -34,6 +34,7 @@ pub fn default_type_version(node_type: &str) -> Value {
         "openAi" => json!(2.3),
         "chainLlm" => json!(1.5),
         "sentimentAnalysis" => json!(1.1),
+        "textClassifier" => json!(1.1),
         "toolCode" => json!(1.3),
         "toolWorkflow" => json!(2.2),
         "memoryBufferWindow" => json!(1.3),
