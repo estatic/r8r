@@ -11,7 +11,7 @@ use crate::n8n::workflow::Node;
 use serde_json::{json, Map, Value};
 
 pub fn all() -> Vec<Box<dyn NodeType>> {
-    vec![Box::new(SentimentAnalysis), Box::new(TextClassifier), Box::new(InformationExtractor)]
+    vec![Box::new(SentimentAnalysis), Box::new(TextClassifier), Box::new(InformationExtractor), Box::new(ChainSummarization)]
 }
 
 // ---- structured output (LangChain StructuredOutputParser) ---------------------
@@ -399,5 +399,153 @@ impl NodeType for InformationExtractor {
             }
         }
         Ok(vec![out])
+    }
+}
+
+// ---- Summarization Chain ---------------------------------------------------------
+
+/// LangChain's summarization `DEFAULT_PROMPT` (also n8n's default).
+const SUMMARY_PROMPT: &str = "Write a concise summary of the following:\n\n\n\"{text}\"\n\n\nCONCISE SUMMARY:";
+/// LangChain's `REFINE_PROMPT`.
+const REFINE_PROMPT: &str = "Your job is to produce a final summary\nWe have provided an existing summary up to a certain point: \"{existing_answer}\"\nWe have the opportunity to refine the existing summary\n(only if needed) with some more context below.\n------------\n\"{text}\"\n------------\n\nGiven the new context, refine the original summary\nIf the context isn't useful, return the original summary.\n\nREFINED SUMMARY:";
+/// `MapReduceDocumentsChain.maxTokens`: below this the documents go
+/// straight into the combine prompt.
+const MAP_REDUCE_MAX_TOKENS: usize = 3000;
+
+/// `PromptTemplate.format` for f-string templates: `{name}` is replaced,
+/// `{{`/`}}` are literal braces.
+fn fill(template: &str, vars: &[(&str, &str)]) -> String {
+    let mut out = String::new();
+    let mut rest = template;
+    while let Some(i) = rest.find(['{', '}']) {
+        out.push_str(&rest[..i]);
+        let tail = &rest[i..];
+        if tail.starts_with("{{") || tail.starts_with("}}") {
+            out.push_str(&tail[..1]);
+            rest = &tail[2..];
+        } else if let (true, Some(end)) = (tail.starts_with('{'), tail.find('}')) {
+            let name = &tail[1..end];
+            match vars.iter().find(|(k, _)| *k == name) {
+                Some((_, v)) => out.push_str(v),
+                None => out.push_str(&tail[..=end]),
+            }
+            rest = &tail[end + 1..];
+        } else {
+            out.push_str(&tail[..1]);
+            rest = &tail[1..];
+        }
+    }
+    out.push_str(rest);
+    out
+}
+
+/// LangChain's fallback token estimate (`getNumTokens` without a
+/// tokenizer): a quarter of the UTF-16 length, rounded up.
+fn approx_tokens(text: &str) -> usize {
+    text.encode_utf16().count().div_ceil(4)
+}
+
+struct ChainSummarization;
+
+/// Runs one prompt through the model as a single user message (an
+/// `LLMChain` over a chat model) and returns the answer text.
+async fn complete(ctx: &ExecCtx<'_>, item: usize, prompt: String) -> NodeResult<String> {
+    let model = load_model(ctx, item).await?;
+    let reply = model.chat(ctx, &[json!({"role": "user", "content": prompt})], &[]).await?;
+    Ok(reply["content"].as_str().unwrap_or("").to_string())
+}
+
+/// `loadSummarizationChain` with n8n's prompt options, over one item's
+/// documents; the chain's output object (`{text}`, or `{output_text}` for
+/// refine).
+async fn summarize(ctx: &ExecCtx<'_>, i: usize, docs: Vec<String>) -> NodeResult<Value> {
+    let opt = |k: &str| ctx.param_str(&format!("options.summarizationMethodAndPrompts.values.{k}"), i, "");
+    let method = opt("summarizationMethod")?;
+    let method = if method.is_empty() { "map_reduce".to_string() } else { method };
+    let or_default = |v: String, d: &str| if v.is_empty() { d.to_string() } else { v };
+    match method.as_str() {
+        "stuff" => {
+            let prompt = or_default(opt("prompt")?, SUMMARY_PROMPT);
+            let text = complete(ctx, i, fill(&prompt, &[("text", &docs.join("\n\n"))])).await?;
+            Ok(json!({"text": text}))
+        }
+        "refine" => {
+            let question = or_default(opt("refineQuestionPrompt")?, SUMMARY_PROMPT);
+            let refine = or_default(opt("refinePrompt")?, REFINE_PROMPT);
+            let first = docs.first().cloned().unwrap_or_default();
+            let mut res = complete(ctx, i, fill(&question, &[("text", &first)])).await?;
+            for d in docs.iter().skip(1) {
+                res = complete(ctx, i, fill(&refine, &[("existing_answer", &res), ("text", d)])).await?;
+            }
+            Ok(json!({"output_text": res}))
+        }
+        "map_reduce" => {
+            let map_prompt = or_default(opt("combineMapPrompt")?, SUMMARY_PROMPT);
+            let combine_prompt = or_default(opt("prompt")?, SUMMARY_PROMPT);
+            let mut current = docs;
+            for _ in 0..10 {
+                if approx_tokens(&fill(&combine_prompt, &[("text", &current.join("\n\n"))])) < MAP_REDUCE_MAX_TOKENS {
+                    break;
+                }
+                let mut mapped = Vec::with_capacity(current.len());
+                for d in &current {
+                    mapped.push(complete(ctx, i, fill(&map_prompt, &[("text", d)])).await?);
+                }
+                current = mapped;
+            }
+            let text = complete(ctx, i, fill(&combine_prompt, &[("text", &current.join("\n\n"))])).await?;
+            Ok(json!({"text": text}))
+        }
+        other => Err(NodeError::new(format!("Invalid _type: {other}"))),
+    }
+}
+
+#[async_trait::async_trait]
+impl NodeType for ChainSummarization {
+    fn type_name(&self) -> &'static str {
+        "@n8n/n8n-nodes-langchain.chainSummarization"
+    }
+
+    async fn execute(&self, ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
+        if ctx.node.type_version < 2.0 {
+            return Err(NodeError::new("Summarization Chain v1 is not supported natively; use v2 or later"));
+        }
+        let mode = ctx.param_str("operationMode", 0, "nodeInputJson")?;
+        let chunking = ctx.param_str("chunkingMode", 0, "simple")?;
+        if mode != "nodeInputJson" || chunking != "simple" {
+            return Err(NodeError::new(format!("The Summarization Chain's \"{mode}\" input with \"{chunking}\" chunking is not supported natively yet")));
+        }
+        // v2.1 runs items in batches and names the field `output`; the
+        // sequential path (v2.0, or batches of one) names it `response`.
+        let key = if ctx.node.type_version >= 2.1 && ctx.param_f64("options.batching.batchSize", 0, 5.0)? > 1.0 { "output" } else { "response" };
+        let mut out = Vec::new();
+        for i in 0..ctx.input().len() {
+            let result = async {
+                let size = ctx.param_f64("chunkSize", i, 1000.0)? as usize;
+                let overlap = ctx.param_f64("chunkOverlap", i, 200.0)? as usize;
+                let splitter = super::text_split::Splitter::recursive(size, overlap).map_err(NodeError::new)?;
+                let pointers = ctx.param_str("options.pointers", i, "")?;
+                let docs = super::doc_loader::n8n_json_loader(&ctx.input()[i].json, "allInputData", &Value::Null, &pointers, Some(&splitter)).map_err(NodeError::new)?;
+                summarize(ctx, i, docs.into_iter().map(|d| d.page_content).collect()).await
+            }
+            .await;
+            match result {
+                Ok(v) => out.push(Item::new(Map::from_iter([(key.to_string(), v)])).paired(i)),
+                Err(e) if ctx.continue_on_fail() => out.push(Item::new(Map::from_iter([("error".to_string(), json!(e.message))])).paired(i)),
+                Err(e) => return Err(e.at(i)),
+            }
+        }
+        Ok(vec![out])
+    }
+}
+
+#[cfg(test)]
+mod summary_tests {
+    use super::*;
+
+    #[test]
+    fn f_string_templates() {
+        assert_eq!(fill("a {text} b {{x}} {missing}", &[("text", "T")]), "a T b {x} {missing}");
+        assert_eq!(approx_tokens("abcde"), 2);
     }
 }

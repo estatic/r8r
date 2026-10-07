@@ -36,3 +36,5 @@ Operations:
 ## [2026-10-07] query | Postgres and Redis chat memory (plan 2.5) in n8n's LangChain storage format, captured from n8n 2.35.7; chat_memory 4/4 on r8r and n8n; full suite 958/958
 
 ## [2026-10-07] query | AI chain root nodes (plan 2.6 part): Sentiment Analysis, Text Classifier, Information Extractor with LangChain structured output; prompts captured from n8n 2.35.7; 10-ai 69/69
+
+## [2026-10-07] query | Summarization Chain v2 with ported LangChain text splitters and n8n's JSON document loader (fixtures from the real packages); summarization 4/4 on r8r and n8n; full suite 974/974
