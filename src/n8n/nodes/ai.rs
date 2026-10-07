@@ -50,7 +50,7 @@ impl NodeType for SubNode {
 
 // ---- run data for sub-nodes ----------------------------------------------------
 
-fn record(ctx: &ExecCtx<'_>, sub: &str, kind: &str, input: Value, output: Result<Value, &NodeError>, started: i64) {
+pub(super) fn record(ctx: &ExecCtx<'_>, sub: &str, kind: &str, input: Value, output: Result<Value, &NodeError>, started: i64) {
     record_items(ctx, sub, kind, input, output.map(|o| vec![o]), started);
 }
 
@@ -115,7 +115,7 @@ enum Provider {
     Bedrock { region: String, access_key_id: String, session_token: Option<String> },
 }
 
-struct Model<'a> {
+pub(super) struct Model<'a> {
     node: &'a Node,
     base_url: String,
     api_key: String,
@@ -132,7 +132,7 @@ fn model_param(params: &Value, default: &str) -> String {
     }
 }
 
-async fn load_model<'a>(ctx: &'a ExecCtx<'_>, item: usize) -> NodeResult<Model<'a>> {
+pub(super) async fn load_model<'a>(ctx: &'a ExecCtx<'_>, item: usize) -> NodeResult<Model<'a>> {
     let name = ctx
         .workflow
         .sub_nodes(&ctx.node.name, "ai_languageModel")
@@ -322,7 +322,7 @@ impl Model<'_> {
     /// One chat completion; returns the assistant message (OpenAI-shaped:
     /// `role`/`content`/`tool_calls` with stringified arguments, whatever
     /// the provider's wire format).
-    async fn chat(&self, ctx: &ExecCtx<'_>, messages: &[Value], tools: &[Value]) -> NodeResult<Value> {
+    pub(super) async fn chat(&self, ctx: &ExecCtx<'_>, messages: &[Value], tools: &[Value]) -> NodeResult<Value> {
         let started = now_ms();
         let body = match &self.provider {
             Provider::OpenAi { .. } | Provider::AzureOpenAi { .. } => self.openai_body(messages, tools),

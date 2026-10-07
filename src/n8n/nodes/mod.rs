@@ -1,6 +1,7 @@
 //! Native node implementations (spec §6.6), keyed by n8n type name.
 
 mod ai;
+mod ai_chains;
 mod aws_sigv4;
 mod airtable;
 mod code;
@@ -103,6 +104,9 @@ impl Default for Registry {
             r.add(n);
         }
         for n in ai::all() {
+            r.add(n);
+        }
+        for n in ai_chains::all() {
             r.add(n);
         }
         for n in postgres::all() {

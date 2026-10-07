@@ -474,6 +474,18 @@ async fn openai_message_exact(w: &mut R8rWorld, n: usize, role: String, content:
     assert!(found, "no {role} message with content {content:?} in: {}", pretty(&body["messages"]));
 }
 
+/// Exact text of the request's first message with `role`. The doc string
+/// is a JSON string literal, so prompts with tabs and newlines stay exact.
+#[then(expr = "chat request {int} has a {string} message with the text:")]
+async fn openai_message_text(w: &mut R8rWorld, n: usize, role: String, step: &Step) {
+    let all = requests_to(w, "/v1/chat/completions").await;
+    let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} chat requests", all.len()));
+    let body: Value = serde_json::from_slice(&r.body).unwrap();
+    let expected: String = serde_json::from_str(docstring(step).trim()).expect("a JSON string literal");
+    let got = body["messages"].as_array().into_iter().flatten().find(|m| m["role"] == role.as_str()).and_then(|m| m["content"].as_str()).unwrap_or("<none>").to_string();
+    assert_eq!(got, expected, "{role} message, as JSON: {}", serde_json::to_string(&got).unwrap());
+}
+
 /// The tool's whole OpenAI function definition, matched as a subset.
 #[then(expr = "chat request {int} offers the tool {string} as:")]
 async fn openai_tool_as(w: &mut R8rWorld, n: usize, tool: String, step: &Step) {
