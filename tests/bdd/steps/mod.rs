@@ -3,6 +3,7 @@
 
 pub mod ai;
 pub mod api;
+pub mod chat_memory;
 pub mod cli;
 pub mod credentials;
 pub mod data_table;

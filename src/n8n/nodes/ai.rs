@@ -30,6 +30,8 @@ pub fn all() -> Vec<Box<dyn NodeType>> {
         Box::new(SubNode("@n8n/n8n-nodes-langchain.toolCode")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.toolWorkflow")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.memoryBufferWindow")),
+        Box::new(SubNode("@n8n/n8n-nodes-langchain.memoryPostgresChat")),
+        Box::new(SubNode("@n8n/n8n-nodes-langchain.memoryRedisChat")),
     ]
 }
 
@@ -1571,10 +1573,42 @@ fn sessions() -> &'static Mutex<HashMap<String, Vec<Value>>> {
     S.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// Where a memory sub-node keeps the conversation.
+enum MemoryStore {
+    /// In-process, scoped to the workflow and node (n8n's Simple Memory).
+    Simple { key: String },
+    /// LangChain's `PostgresChatMessageHistory`: rows `(id, session_id,
+    /// message JSONB)`, the message being `{type, content, ...}`.
+    Postgres { cred: Value, table: String, session: String },
+    /// LangChain's `RedisChatMessageHistory`: a list at the session key,
+    /// newest first (LPUSH), entries `{type, data: {content, ...}}`.
+    Redis { cred: Value, session: String, ttl: i64 },
+}
+
 struct Memory<'a> {
     node: &'a Node,
-    key: String,
-    window: usize,
+    store: MemoryStore,
+    /// Exchanges sent to the model (`None`: all, LangChain's `BufferMemory`
+    /// in early node versions).
+    window: Option<usize>,
+}
+
+/// n8n's `getSessionId`: the input's `sessionId` or the node's key.
+fn session_id(ctx: &ExecCtx<'_>, params: &Value, item: usize) -> NodeResult<String> {
+    let session = if params["sessionIdType"].as_str().unwrap_or("fromInput") == "fromInput" {
+        let s = ctx.input().get(item).and_then(|i| i.json.get("sessionId")).and_then(Value::as_str).unwrap_or("").to_string();
+        if s.is_empty() {
+            return Err(NodeError::new("No session ID found").describe("Expected to find the session ID in an input field called 'sessionId' (this is what the chat trigger node outputs). To use something else, change the 'Session ID' parameter").at(item));
+        }
+        s
+    } else {
+        let s = params["sessionKey"].as_str().map(String::from).unwrap_or_else(|| params["sessionKey"].to_string().trim_matches('"').to_string());
+        if s.is_empty() || params["sessionKey"].is_null() {
+            return Err(NodeError::new("Key parameter is empty").describe("Provide a key to use as session ID in the 'Key' parameter or use the 'Connected Chat Trigger Node' option to use the session ID from your Chat Trigger").at(item));
+        }
+        s
+    };
+    Ok(session)
 }
 
 fn load_memory<'a>(ctx: &'a ExecCtx<'_>, item: usize) -> NodeResult<Option<Memory<'a>>> {
@@ -1583,43 +1617,177 @@ fn load_memory<'a>(ctx: &'a ExecCtx<'_>, item: usize) -> NodeResult<Option<Memor
     if node.disabled {
         return Ok(None);
     }
-    if node.node_type != format!("{LC}memoryBufferWindow") {
-        return Err(NodeError::new(format!("The memory \"{}\" ({}) is not supported natively yet", node.name, node.node_type)));
-    }
     let params = ctx.resolve_value(&node.parameters, item)?;
-    let session = if params["sessionIdType"].as_str() == Some("customKey") {
-        params["sessionKey"].as_str().map(String::from).unwrap_or_default()
+    let k = params["contextWindowLength"].as_u64().unwrap_or(5).max(1) as usize;
+    let v = node.type_version;
+    let (store, window) = if node.node_type == format!("{LC}memoryBufferWindow") {
+        let workflow = ctx.workflow.id.clone().unwrap_or_default();
+        (MemoryStore::Simple { key: format!("{workflow}:{}:{}", node.name, session_id(ctx, &params, item)?) }, Some(k))
+    } else if node.node_type == format!("{LC}memoryPostgresChat") {
+        let table = params["tableName"].as_str().filter(|t| !t.is_empty()).unwrap_or("n8n_chat_histories").to_string();
+        // n8n puts the name into the SQL as is; r8r only takes plain
+        // identifiers (optionally schema-qualified) so it can't inject SQL.
+        if !regex::Regex::new(r"^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)?$").unwrap().is_match(&table) {
+            return Err(NodeError::new(format!("Invalid table name \"{table}\"")).describe("Use letters, digits and underscores, optionally as schema.table"));
+        }
+        (MemoryStore::Postgres { cred: Value::Null, table, session: session_id(ctx, &params, item)? }, (v >= 1.1).then_some(k))
+    } else if node.node_type == format!("{LC}memoryRedisChat") {
+        let session = if v >= 1.2 { session_id(ctx, &params, item)? } else { params["sessionKey"].as_str().unwrap_or("").to_string() };
+        (MemoryStore::Redis { cred: Value::Null, session, ttl: params["sessionTTL"].as_i64().unwrap_or(0) }, (v >= 1.3).then_some(k))
     } else {
-        ctx.input().get(item).and_then(|i| i.json.get("sessionId")).and_then(Value::as_str).map(String::from).unwrap_or_default()
+        return Err(NodeError::new(format!("The memory \"{}\" ({}) is not supported natively yet", node.name, node.node_type)));
     };
-    if session.is_empty() {
-        return Err(NodeError::new("No session ID found").describe("Set a session key on the memory node, or pass sessionId in the input"));
+    Ok(Some(Memory { node, store, window }))
+}
+
+/// A LangChain stored message (`toDict()` data) as an OpenAI-shaped chat
+/// message; `None` for kinds the agent doesn't replay (tool messages).
+fn from_stored(kind: &str, data: &Value) -> Option<Value> {
+    let role = match kind {
+        "human" => "user",
+        "ai" => "assistant",
+        "system" => "system",
+        _ => return None,
+    };
+    let content = match &data["content"] {
+        Value::String(s) => s.clone(),
+        Value::Array(parts) => parts.iter().filter_map(|p| p["text"].as_str().or(p.as_str())).collect::<Vec<_>>().join(""),
+        _ => String::new(),
+    };
+    Some(json!({"role": role, "content": content}))
+}
+
+/// What LangChain's `toDict()` writes for a human or AI message.
+fn to_stored(kind: &str, content: &str) -> Value {
+    if kind == "ai" {
+        json!({"content": content, "tool_calls": [], "invalid_tool_calls": [], "additional_kwargs": {}, "response_metadata": {}})
+    } else {
+        json!({"content": content, "additional_kwargs": {}, "response_metadata": {}})
     }
-    let workflow = ctx.workflow.id.clone().unwrap_or_default();
-    let window = params["contextWindowLength"].as_u64().unwrap_or(5).max(1) as usize;
-    Ok(Some(Memory { node, key: format!("{workflow}:{}:{session}", node.name), window }))
 }
 
 impl Memory<'_> {
-    fn load(&self, ctx: &ExecCtx<'_>) -> Vec<Value> {
-        let started = now_ms();
-        let all = sessions().lock().unwrap().get(&self.key).cloned().unwrap_or_default();
-        let keep = self.window * 2;
-        let history: Vec<Value> = all[all.len().saturating_sub(keep)..].to_vec();
-        record(ctx, &self.node.name, "ai_memory", json!({"action": "loadMemoryVariables"}), Ok(json!({"action": "loadMemoryVariables", "chatHistory": history})), started);
-        history
+    /// Fills in the credentials (resolved per run, as n8n's `supplyData`).
+    async fn connect(mut self, ctx: &ExecCtx<'_>) -> NodeResult<Self> {
+        match &mut self.store {
+            MemoryStore::Postgres { cred, .. } => *cred = ctx.credentials_for(self.node, "postgres").await?.1,
+            MemoryStore::Redis { cred, .. } => *cred = ctx.credentials_for(self.node, "redis").await?.1,
+            MemoryStore::Simple { .. } => {}
+        }
+        Ok(self)
     }
 
-    fn save(&self, ctx: &ExecCtx<'_>, user: &str, assistant: &str) {
+    async fn stored(&self) -> NodeResult<Vec<Value>> {
+        match &self.store {
+            MemoryStore::Simple { key } => Ok(sessions().lock().unwrap().get(key).cloned().unwrap_or_default()),
+            MemoryStore::Postgres { cred, table, session } => {
+                let (cred, table, session) = (cred.clone(), table.clone(), session.clone());
+                tokio::spawn(async move {
+                    let pool = super::postgres::connect(&cred, 30).await?;
+                    let pg = |e: sqlx::Error| NodeError::new(e.to_string());
+                    sqlx::query(&format!("CREATE TABLE IF NOT EXISTS {table} (id SERIAL PRIMARY KEY, session_id VARCHAR(255) NOT NULL, message JSONB NOT NULL)")).execute(&pool).await.map_err(pg)?;
+                    let rows = sqlx::query(&format!("SELECT message::text AS m FROM {table} WHERE session_id = $1 ORDER BY id")).bind(&session).fetch_all(&pool).await.map_err(pg)?;
+                    pool.close().await;
+                    Ok(rows
+                        .iter()
+                        .filter_map(|r| serde_json::from_str::<Value>(&sqlx::Row::get::<String, _>(r, "m")).ok())
+                        .filter_map(|m| from_stored(m["type"].as_str().unwrap_or(""), &m))
+                        .collect())
+                })
+                .await
+                .map_err(|e| NodeError::new(e.to_string()))?
+            }
+            MemoryStore::Redis { cred, session, .. } => {
+                let mut conn = super::redis::connect(&super::redis::read_creds(cred)).await?;
+                let raw: Vec<String> = redis::cmd("LRANGE").arg(session).arg(0).arg(-1).query_async(&mut conn).await.map_err(|e| NodeError::new(format!("Redis Error: {e}")))?;
+                Ok(raw
+                    .iter()
+                    .rev()
+                    .filter_map(|s| serde_json::from_str::<Value>(s).ok())
+                    .filter_map(|m| from_stored(m["type"].as_str().unwrap_or(""), &m["data"]))
+                    .collect())
+            }
+        }
+    }
+
+    async fn load(&self, ctx: &ExecCtx<'_>) -> NodeResult<Vec<Value>> {
         let started = now_ms();
-        let pair = [json!({"role": "user", "content": user}), json!({"role": "assistant", "content": assistant})];
-        let mut s = sessions().lock().unwrap();
-        let list = s.entry(self.key.clone()).or_default();
-        list.extend(pair.iter().cloned());
-        let excess = list.len().saturating_sub(self.window * 2);
-        list.drain(..excess);
-        drop(s);
-        record(ctx, &self.node.name, "ai_memory", json!({"action": "saveContext", "input": user, "output": assistant}), Ok(json!({"action": "saveContext"})), started);
+        let all = match self.stored().await {
+            Ok(all) => all,
+            Err(e) => {
+                record(ctx, &self.node.name, "ai_memory", json!({"action": "loadMemoryVariables"}), Err(&e), started);
+                return Err(e);
+            }
+        };
+        let history: Vec<Value> = match self.window {
+            Some(k) => all[all.len().saturating_sub(k * 2)..].to_vec(),
+            None => all,
+        };
+        record(ctx, &self.node.name, "ai_memory", json!({"action": "loadMemoryVariables"}), Ok(json!({"action": "loadMemoryVariables", "chatHistory": history})), started);
+        Ok(history)
+    }
+
+    async fn append(&self, user: &str, assistant: &str) -> NodeResult<()> {
+        match &self.store {
+            MemoryStore::Simple { key } => {
+                let mut s = sessions().lock().unwrap();
+                let list = s.entry(key.clone()).or_default();
+                list.extend([json!({"role": "user", "content": user}), json!({"role": "assistant", "content": assistant})]);
+                let excess = list.len().saturating_sub(self.window.unwrap_or(usize::MAX / 2) * 2);
+                list.drain(..excess);
+                Ok(())
+            }
+            MemoryStore::Postgres { cred, table, session } => {
+                let (cred, table, session) = (cred.clone(), table.clone(), session.clone());
+                let rows: Vec<String> = [("human", user), ("ai", assistant)]
+                    .iter()
+                    .map(|(kind, content)| {
+                        let mut m = to_stored(kind, content);
+                        m["type"] = json!(kind);
+                        m.to_string()
+                    })
+                    .collect();
+                tokio::spawn(async move {
+                    let pool = super::postgres::connect(&cred, 30).await?;
+                    let pg = |e: sqlx::Error| NodeError::new(e.to_string());
+                    sqlx::query(&format!("CREATE TABLE IF NOT EXISTS {table} (id SERIAL PRIMARY KEY, session_id VARCHAR(255) NOT NULL, message JSONB NOT NULL)")).execute(&pool).await.map_err(pg)?;
+                    for row in rows {
+                        sqlx::query(&format!("INSERT INTO {table} (session_id, message) VALUES ($1, $2::jsonb)")).bind(&session).bind(row).execute(&pool).await.map_err(pg)?;
+                    }
+                    pool.close().await;
+                    Ok(())
+                })
+                .await
+                .map_err(|e| NodeError::new(e.to_string()))?
+            }
+            MemoryStore::Redis { cred, session, ttl } => {
+                let mut conn = super::redis::connect(&super::redis::read_creds(cred)).await?;
+                let redis_err = |e: redis::RedisError| NodeError::new(format!("Redis Error: {e}"));
+                for (kind, content) in [("human", user), ("ai", assistant)] {
+                    let entry = json!({"type": kind, "data": to_stored(kind, content)});
+                    let _: i64 = redis::cmd("LPUSH").arg(session).arg(entry.to_string()).query_async(&mut conn).await.map_err(redis_err)?;
+                    if *ttl > 0 {
+                        let _: i64 = redis::cmd("EXPIRE").arg(session).arg(*ttl).query_async(&mut conn).await.map_err(redis_err)?;
+                    }
+                }
+                Ok(())
+            }
+        }
+    }
+
+    async fn save(&self, ctx: &ExecCtx<'_>, user: &str, assistant: &str) -> NodeResult<()> {
+        let started = now_ms();
+        let input = json!({"action": "saveContext", "input": user, "output": assistant});
+        match self.append(user, assistant).await {
+            Ok(()) => {
+                record(ctx, &self.node.name, "ai_memory", input, Ok(json!({"action": "saveContext"})), started);
+                Ok(())
+            }
+            Err(e) => {
+                record(ctx, &self.node.name, "ai_memory", input, Err(&e), started);
+                Err(e)
+            }
+        }
     }
 }
 
@@ -1664,12 +1832,15 @@ async fn run_agent(ctx: &ExecCtx<'_>, item: usize) -> NodeResult<String> {
     let user = prompt(ctx, item)?;
     let model = load_model(ctx, item).await?;
     let tools = load_tools(ctx, item)?;
-    let memory = load_memory(ctx, item)?;
+    let memory = match load_memory(ctx, item)? {
+        Some(m) => Some(m.connect(ctx).await?),
+        None => None,
+    };
     let system = ctx.param_str("options.systemMessage", item, "You are a helpful assistant")?;
     let max_iterations = ctx.param_f64("options.maxIterations", item, 10.0)?.max(1.0) as usize;
     let mut messages = vec![json!({"role": "system", "content": system})];
     if let Some(m) = &memory {
-        messages.extend(m.load(ctx));
+        messages.extend(m.load(ctx).await?);
     }
     messages.push(json!({"role": "user", "content": user}));
     let schemas: Vec<Value> = tools.iter().map(Tool::schema).collect();
@@ -1694,7 +1865,7 @@ async fn run_agent(ctx: &ExecCtx<'_>, item: usize) -> NodeResult<String> {
     }
     let answer = answer.unwrap_or_else(|| "Agent stopped due to max iterations.".to_string());
     if let Some(m) = &memory {
-        m.save(ctx, &user, &answer);
+        m.save(ctx, &user, &answer).await?;
     }
     Ok(answer)
 }

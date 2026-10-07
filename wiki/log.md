@@ -32,3 +32,5 @@ Operations:
 ## [2026-10-07] query | Google Gemini, Azure OpenAI and AWS Bedrock chat models (plan 2.3); 10-ai BDD 46/46 on r8r; new features green on n8n 2.35.7
 
 ## [2026-10-07] query | AI tools (plan 2.4): $fromAI, native nodes as tools, Code Tool, Workflow Tool; NODES_EXCLUDE covers tool variants; full suite 958/958; new features green on n8n 2.35.7
+
+## [2026-10-07] query | Postgres and Redis chat memory (plan 2.5) in n8n's LangChain storage format, captured from n8n 2.35.7; chat_memory 4/4 on r8r and n8n; full suite 958/958

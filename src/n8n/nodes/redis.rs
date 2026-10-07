@@ -34,7 +34,7 @@ pub struct Redis;
 
 // ---- connection ------------------------------------------------------------------
 
-struct Creds {
+pub(super) struct Creds {
     host: String,
     port: u16,
     database: i64,
@@ -43,7 +43,7 @@ struct Creds {
     ssl: bool,
 }
 
-fn read_creds(cred: &Value) -> Creds {
+pub(super) fn read_creds(cred: &Value) -> Creds {
     Creds {
         host: cred["host"].as_str().filter(|s| !s.is_empty()).unwrap_or("localhost").to_string(),
         port: cred["port"].as_u64().unwrap_or(6379) as u16,
@@ -60,7 +60,7 @@ fn read_creds(cred: &Value) -> Creds {
 /// interpolated into a connection URL (a struct is passed straight to the
 /// client) and `redis::RedisError`'s own message never carries connection
 /// info.
-async fn connect(creds: &Creds) -> NodeResult<MultiplexedConnection> {
+pub(super) async fn connect(creds: &Creds) -> NodeResult<MultiplexedConnection> {
     if creds.ssl {
         return Err(NodeError::new("SSL/TLS Redis connections are not supported in this build"));
     }

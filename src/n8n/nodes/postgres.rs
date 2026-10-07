@@ -325,7 +325,7 @@ fn cred_bool(cred: &Value, key: &str, default: bool) -> bool {
     cred.get(key).and_then(|v| v.as_bool().or_else(|| v.as_str().map(|s| s == "true"))).unwrap_or(default)
 }
 
-async fn connect(cred: &Value, connect_timeout_secs: u64) -> NodeResult<PgPool> {
+pub(super) async fn connect(cred: &Value, connect_timeout_secs: u64) -> NodeResult<PgPool> {
     let host = cred_str(cred, "host", "localhost");
     let port = cred_u64(cred, "port", 5432) as u16;
     let database = cred_str(cred, "database", "postgres");

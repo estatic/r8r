@@ -36,6 +36,8 @@ pub fn default_type_version(node_type: &str) -> Value {
         "toolCode" => json!(1.3),
         "toolWorkflow" => json!(2.2),
         "memoryBufferWindow" => json!(1.3),
+        "memoryPostgresChat" => json!(1.4),
+        "memoryRedisChat" => json!(1.6),
         "emailSend" => json!(2.1),
         "slack" => json!(2.2),
         "googleSheets" => json!(4.5),

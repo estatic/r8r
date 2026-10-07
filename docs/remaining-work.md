@@ -172,7 +172,9 @@ Missing:
   Tool) with `$fromAI`, the JavaScript Code Tool and the Workflow Tool v2
   (plan 2.4); missing: Python Code Tool, Workflow Tool v1 / inline
   workflow source, the legacy `toolHttpRequest` node.
-- Memory backed by Postgres/Redis (current memory is in-process only).
+- Memory backed by Postgres/Redis: done (plan 2.5), in n8n's storage
+  format so histories move between n8n and r8r; other memories (MongoDB,
+  Zep, Motorhead, Xata) are not native.
 - MCP Client Tool and MCP Server Trigger (spec suggests the `rmcp` crate).
 
 Code: `src/n8n/nodes/ai.rs` (sub-node calls are recorded in run data via

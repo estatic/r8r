@@ -5,7 +5,7 @@ use crate::support::json::{parse_loose, parse_strict};
 use crate::support::workflow::{set_node_parameters, WorkflowSpec};
 use crate::world::R8rWorld;
 use cucumber::gherkin::Step;
-use cucumber::given;
+use cucumber::{given, when};
 use serde_json::{json, Value};
 
 fn remember_webhook_ids(w: &mut R8rWorld) {
@@ -176,6 +176,7 @@ async fn pin_items(w: &mut R8rWorld, node: String, step: &Step) {
 
 /// Pins the first node (the trigger), which is how scenarios feed input.
 #[given(expr = "the trigger outputs the items:")]
+#[when(expr = "the trigger outputs the items:")]
 async fn trigger_items(w: &mut R8rWorld, step: &Step) {
     let items = parse_strict(docstring(step), "trigger items");
     let first = w.wf().first_node_name();
