@@ -37,6 +37,7 @@ pub fn default_type_version(node_type: &str) -> Value {
         "textClassifier" => json!(1.1),
         "informationExtractor" => json!(1.2),
         "chainSummarization" => json!(2.1),
+        "outputParserStructured" => json!(1.3),
         "toolCode" => json!(1.3),
         "toolWorkflow" => json!(2.2),
         "memoryBufferWindow" => json!(1.3),

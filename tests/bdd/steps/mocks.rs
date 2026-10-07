@@ -486,6 +486,26 @@ async fn openai_message_text(w: &mut R8rWorld, n: usize, role: String, step: &St
     assert_eq!(got, expected, "{role} message, as JSON: {}", serde_json::to_string(&got).unwrap());
 }
 
+#[then(expr = "chat request {int} has no {string} message")]
+async fn openai_no_message(w: &mut R8rWorld, n: usize, role: String) {
+    let all = requests_to(w, "/v1/chat/completions").await;
+    let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} chat requests", all.len()));
+    let body: Value = serde_json::from_slice(&r.body).unwrap();
+    let found = body["messages"].as_array().into_iter().flatten().any(|m| m["role"] == role.as_str());
+    assert!(!found, "unexpected {role} message in: {}", pretty(&body["messages"]));
+}
+
+/// The whole function definition of a tool, as JSON (exact match).
+#[then(expr = "chat request {int} offers exactly the tool {string}:")]
+async fn openai_tool_exact(w: &mut R8rWorld, n: usize, tool: String, step: &Step) {
+    let all = requests_to(w, "/v1/chat/completions").await;
+    let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} chat requests", all.len()));
+    let body: Value = serde_json::from_slice(&r.body).unwrap();
+    let found = body["tools"].as_array().into_iter().flatten().find(|t| t["function"]["name"] == tool.as_str()).cloned().unwrap_or(Value::Null);
+    let expected: Value = serde_json::from_str(docstring(step)).unwrap_or(Value::Null);
+    assert_eq!(found, expected, "tool, as JSON: {}", serde_json::to_string(&found).unwrap());
+}
+
 /// The tool's whole OpenAI function definition, matched as a subset.
 #[then(expr = "chat request {int} offers the tool {string} as:")]
 async fn openai_tool_as(w: &mut R8rWorld, n: usize, tool: String, step: &Step) {

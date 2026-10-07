@@ -38,3 +38,5 @@ Operations:
 ## [2026-10-07] query | AI chain root nodes (plan 2.6 part): Sentiment Analysis, Text Classifier, Information Extractor with LangChain structured output; prompts captured from n8n 2.35.7; 10-ai 69/69
 
 ## [2026-10-07] query | Summarization Chain v2 with ported LangChain text splitters and n8n's JSON document loader (fixtures from the real packages); summarization 4/4 on r8r and n8n; full suite 974/974
+
+## [2026-10-07] query | AI Agent structured output (Structured Output Parser via format_final_json_response) and n8n's no-default-system-message behaviour; full suite 978/978

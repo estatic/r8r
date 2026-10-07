@@ -4,7 +4,7 @@
 //! instructions and parsing follow n8n 2.35.7 / LangChain exactly, checked
 //! against captured n8n requests (`10-ai/*.feature`).
 
-use super::ai::load_model;
+use super::ai::{load_model, record};
 use crate::n8n::node::{ExecCtx, NodeError, NodeResult, NodeType};
 use crate::n8n::types::{Item, NodeOutput};
 use crate::n8n::workflow::Node;
@@ -44,7 +44,7 @@ fn parse_structured(text: &str, schema: &Value) -> Result<Value, String> {
 }
 
 /// The zod checks n8n's schemas use: types, enums, bounds, required keys.
-fn validate(v: &Value, schema: &Value, path: &str) -> Result<Value, String> {
+pub(super) fn validate(v: &Value, schema: &Value, path: &str) -> Result<Value, String> {
     let at = if path.is_empty() { "the value".to_string() } else { format!("\"{path}\"") };
     if let Some(options) = schema["enum"].as_array() {
         if !options.contains(v) {
@@ -547,5 +547,123 @@ mod summary_tests {
     fn f_string_templates() {
         assert_eq!(fill("a {text} b {{x}} {missing}", &[("text", "T")]), "a T b {x} {missing}");
         assert_eq!(approx_tokens("abcde"), 2);
+    }
+}
+
+// ---- Structured Output Parser (sub-node) ------------------------------------------
+
+/// The `ai_outputParser` sub-node of a root node, if it requires one
+/// (`hasOutputParser`): n8n's `N8nStructuredOutputParser`, whose schema
+/// wraps the user's as `{output: ...}` (optional before v1.3).
+pub(super) struct OutputParser<'a> {
+    pub node: &'a Node,
+    pub schema: Value,
+}
+
+pub(super) const FORMAT_TOOL: &str = "format_final_json_response";
+
+pub(super) fn load_output_parser<'a>(ctx: &'a ExecCtx<'_>, item: usize) -> NodeResult<Option<OutputParser<'a>>> {
+    if ctx.param_bool("hasOutputParser", item, false)? != true {
+        return Ok(None);
+    }
+    let Some(name) = ctx.workflow.sub_nodes(&ctx.node.name, "ai_outputParser").into_iter().next() else {
+        return Err(NodeError::new("A Output Parser sub-node must be connected and enabled"));
+    };
+    let node = ctx.workflow.node(&name).expect("connected nodes exist");
+    if node.node_type != "@n8n/n8n-nodes-langchain.outputParserStructured" {
+        return Err(NodeError::new(format!("The output parser \"{}\" ({}) is not supported natively yet", node.name, node.node_type)));
+    }
+    let v = node.type_version;
+    if v < 1.1 {
+        return Err(NodeError::new("Structured Output Parser v1 is not supported natively; use v1.1 or later"));
+    }
+    let p = ctx.resolve_value(&node.parameters, item)?;
+    if p["autoFix"].as_bool() == Some(true) {
+        return Err(NodeError::new("The Structured Output Parser's auto-fixing is not supported natively yet"));
+    }
+    let bad = || NodeError::new("Error during parsing of JSON Schema. Please check the schema and try again.");
+    let mut user = if p["schemaType"].as_str().unwrap_or("fromJson") == "fromJson" {
+        let example: Value = serde_json::from_str(p["jsonSchemaExample"].as_str().unwrap_or("")).map_err(|_| bad())?;
+        super::ai::schema_from_example(&example, v >= 1.3)
+    } else {
+        let key = if v <= 1.1 { "jsonSchema" } else { "inputSchema" };
+        let mut s: Value = serde_json::from_str(p[key].as_str().unwrap_or("")).map_err(|_| bad())?;
+        if let Some(o) = s.as_object_mut() {
+            o.remove("$schema");
+        }
+        s
+    };
+    super::ai::close_objects(&mut user);
+    let mut schema = json!({"type": "object", "properties": {"output": user}});
+    if v >= 1.3 {
+        schema["required"] = json!(["output"]);
+    }
+    schema["additionalProperties"] = json!(false);
+    Ok(Some(OutputParser { node, schema }))
+}
+
+impl OutputParser<'_> {
+    /// The `format_final_json_response` tool the Tools Agent offers.
+    pub fn tool(&self) -> Value {
+        let mut parameters = self.schema.clone();
+        parameters["$schema"] = json!("http://json-schema.org/draft-07/schema#");
+        json!({"type": "function", "function": {
+            "name": FORMAT_TOOL,
+            "description": "Use this tool to format your final response to the user in a structured JSON format. This tool validates your output against a schema to ensure it meets the required format. ONLY use this tool when you have completed all necessary reasoning and are ready to provide your final answer. Do not use this tool for intermediate steps or for asking questions. The output from this tool will be directly returned to the user.",
+            "parameters": parameters,
+            "strict": false,
+        }})
+    }
+
+    /// `N8nStructuredOutputParser.parse`: the JSON (inside a ``` fence
+    /// on lines of their own, if any), checked against the schema, with
+    /// n8n's errors; recorded under the parser node.
+    pub fn parse(&self, ctx: &ExecCtx<'_>, text: &str) -> NodeResult<Value> {
+        let started = crate::n8n::types::now_ms();
+        let input = json!({"action": "parse", "text": text});
+        let trimmed = text.trim();
+        let lines: Vec<&str> = trimmed.split('\n').collect();
+        let fence = regex::Regex::new(r"^```(?:json)?$").unwrap();
+        let start = lines.iter().position(|l| fence.is_match(l.trim()));
+        let end = start.and_then(|s| lines.iter().skip(s + 1).position(|l| l.trim() == "```").map(|e| s + 1 + e));
+        let json_text = match (start, end) {
+            (Some(s), Some(e)) => lines[s + 1..e].join("\n"),
+            _ => trimmed.to_string(),
+        };
+        let parsed: Result<Value, ()> = serde_json::from_str::<Value>(json_text.trim()).map_err(|_| ());
+        let checked = parsed.clone().and_then(|j| validate(&j, &self.schema, "").map_err(|_| ()));
+        match checked {
+            Ok(mut result) => {
+                // n8n's `unwrapNestedOutput`: {output: {output: x}} -> {output: x}.
+                if let Some(inner) = result.get("output").filter(|o| o.as_object().is_some_and(|m| m.len() == 1 && m.contains_key("output"))).cloned() {
+                    if result.as_object().is_some_and(|m| m.len() == 1) {
+                        result = inner;
+                    }
+                }
+                record(ctx, &self.node.name, "ai_outputParser", input, Ok(json!({"action": "parse", "response": result})), started);
+                Ok(result)
+            }
+            Err(()) => {
+                let empty = trimmed == "{}" || parsed.as_ref().is_ok_and(|j| j.is_object() && j.get("output").is_none());
+                let e = if empty {
+                    NodeError::new("The AI model returned an empty response to the Structured Output Parser").describe("This usually happens when the model runs out of tokens before it can generate the structured output. Try reducing the prompt length, increasing the model's max output tokens, or simplifying the output schema. To continue the execution when this happens, change the 'On Error' parameter in the root node's settings.")
+                } else {
+                    StructuredError::Parse.wrapped()
+                };
+                record(ctx, &self.node.name, "ai_outputParser", input, Err(&e), started);
+                Err(e)
+            }
+        }
+    }
+
+    /// The Tools Agent's final-answer path without the format tool: a JSON
+    /// text is wrapped as `{output: ...}` unless it already is that.
+    pub fn parse_final_text(&self, ctx: &ExecCtx<'_>, text: &str) -> NodeResult<Value> {
+        let input = match serde_json::from_str::<Value>(text) {
+            Ok(Value::Object(o)) if o.len() == 1 && o.contains_key("output") => Value::Object(o).to_string(),
+            Ok(other) => json!({"output": other}).to_string(),
+            Err(_) => text.to_string(),
+        };
+        self.parse(ctx, &input)
     }
 }

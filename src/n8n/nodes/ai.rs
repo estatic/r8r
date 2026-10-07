@@ -29,6 +29,7 @@ pub fn all() -> Vec<Box<dyn NodeType>> {
         Box::new(SubNode("@n8n/n8n-nodes-langchain.toolCalculator")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.toolCode")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.toolWorkflow")),
+        Box::new(SubNode("@n8n/n8n-nodes-langchain.outputParserStructured")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.memoryBufferWindow")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.memoryPostgresChat")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.memoryRedisChat")),
@@ -1816,7 +1817,8 @@ impl NodeType for Agent {
         let mut out = Vec::new();
         for i in 0..ctx.input().len() {
             match run_agent(ctx, i).await {
-                Ok(answer) => out.push(Item::new(Map::from_iter([("output".to_string(), json!(answer))])).paired(i)),
+                Ok(Value::Object(json)) => out.push(Item::new(json).paired(i)),
+                Ok(other) => out.push(Item::new(Map::from_iter([("output".to_string(), other)])).paired(i)),
                 Err(e) if ctx.continue_on_fail() => {
                     let e = e.at(i);
                     ctx.push_error_item(&e, i);
@@ -1828,7 +1830,11 @@ impl NodeType for Agent {
     }
 }
 
-async fn run_agent(ctx: &ExecCtx<'_>, item: usize) -> NodeResult<String> {
+/// The formatting instructions the Tools Agent adds with an output parser.
+const FORMATTING_INSTRUCTIONS: &str = "IMPORTANT: For your response to user, you MUST use the `format_final_json_response` tool with your complete answer formatted according to the required schema. Do not attempt to format the JSON manually - always use this tool. Your response will be rejected if it is not properly formatted through this tool. Only use this tool once you are ready to provide your final answer.";
+
+/// One agent run; the item's JSON (`{output: ...}`).
+async fn run_agent(ctx: &ExecCtx<'_>, item: usize) -> NodeResult<Value> {
     let user = prompt(ctx, item)?;
     let model = load_model(ctx, item).await?;
     let tools = load_tools(ctx, item)?;
@@ -1836,20 +1842,47 @@ async fn run_agent(ctx: &ExecCtx<'_>, item: usize) -> NodeResult<String> {
         Some(m) => Some(m.connect(ctx).await?),
         None => None,
     };
-    let system = ctx.param_str("options.systemMessage", item, "You are a helpful assistant")?;
+    let parser = super::ai_chains::load_output_parser(ctx, item)?;
+    // n8n's `prepareMessages`: from v1.9 a system message only when one is
+    // set (before, "You are a helpful assistant" by default), followed by
+    // the formatting instructions when an output parser is connected.
+    let system = match ctx.param("options.systemMessage", item) {
+        Ok(Value::String(s)) => Some(s).filter(|s| !s.is_empty()),
+        _ if ctx.node.type_version < 1.9 => Some("You are a helpful assistant".to_string()),
+        _ => None,
+    };
+    let system = match (system, &parser) {
+        (Some(s), Some(_)) => Some(format!("{s}\n\n{FORMATTING_INSTRUCTIONS}")),
+        (None, Some(_)) => Some(FORMATTING_INSTRUCTIONS.to_string()),
+        (s, None) => s,
+    };
     let max_iterations = ctx.param_f64("options.maxIterations", item, 10.0)?.max(1.0) as usize;
-    let mut messages = vec![json!({"role": "system", "content": system})];
+    let mut messages: Vec<Value> = system.into_iter().map(|s| json!({"role": "system", "content": s})).collect();
     if let Some(m) = &memory {
         messages.extend(m.load(ctx).await?);
     }
     messages.push(json!({"role": "user", "content": user}));
-    let schemas: Vec<Value> = tools.iter().map(Tool::schema).collect();
+    let mut schemas: Vec<Value> = tools.iter().map(Tool::schema).collect();
+    if let Some(p) = &parser {
+        schemas.push(p.tool());
+    }
     let mut answer = None;
     for _ in 0..max_iterations {
         let reply = model.chat(ctx, &messages, &schemas).await?;
         let calls = reply["tool_calls"].as_array().cloned().unwrap_or_default();
+        // The format tool ends the run with its (parsed) arguments.
+        if let (Some(p), Some(call)) = (&parser, calls.iter().find(|c| c.pointer("/function/name").and_then(Value::as_str) == Some(super::ai_chains::FORMAT_TOOL))) {
+            let args = call.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("{}");
+            let parsed = p.parse(ctx, args)?;
+            return finish_structured(ctx, &memory, &user, parsed).await;
+        }
         if calls.is_empty() {
-            answer = Some(reply["content"].as_str().unwrap_or("").to_string());
+            let text = reply["content"].as_str().unwrap_or("").to_string();
+            if let Some(p) = &parser {
+                let parsed = p.parse_final_text(ctx, &text)?;
+                return finish_structured(ctx, &memory, &user, parsed).await;
+            }
+            answer = Some(json!(text));
             break;
         }
         messages.push(json!({"role": "assistant", "content": reply["content"], "tool_calls": calls}));
@@ -1863,11 +1896,21 @@ async fn run_agent(ctx: &ExecCtx<'_>, item: usize) -> NodeResult<String> {
             messages.push(json!({"role": "tool", "tool_call_id": call["id"], "content": result}));
         }
     }
-    let answer = answer.unwrap_or_else(|| "Agent stopped due to max iterations.".to_string());
+    let answer = answer.and_then(|a| a.as_str().map(String::from)).unwrap_or_else(|| "Agent stopped due to max iterations.".to_string());
     if let Some(m) = &memory {
         m.save(ctx, &user, &answer).await?;
     }
-    Ok(answer)
+    Ok(json!({"output": answer}))
+}
+
+/// A parsed structured answer: with memory, n8n saves it as JSON text and
+/// returns `{output: <inner output>}`; otherwise the parsed object as is.
+async fn finish_structured(ctx: &ExecCtx<'_>, memory: &Option<Memory<'_>>, user: &str, parsed: Value) -> NodeResult<Value> {
+    if let Some(m) = memory {
+        m.save(ctx, user, &parsed.to_string()).await?;
+        return Ok(json!({"output": parsed.get("output").cloned().unwrap_or(parsed)}));
+    }
+    Ok(parsed)
 }
 
 struct ChainLlm;
