@@ -198,17 +198,28 @@ fn write_tls_files(conn: &ConnConfig) -> std::io::Result<TlsFiles> {
         None
     } else {
         let path = dir.join(format!("r8r-mongo-ca-{unique}.pem"));
-        std::fs::write(&path, &conn.ca)?;
+        write_private(&path, conn.ca.as_bytes())?;
         Some(path)
     };
     let cert_key = if conn.cert.trim().is_empty() && conn.key.trim().is_empty() {
         None
     } else {
         let path = dir.join(format!("r8r-mongo-certkey-{unique}.pem"));
-        std::fs::write(&path, format!("{}\n{}\n", conn.cert, conn.key))?;
+        write_private(&path, format!("{}\n{}\n", conn.cert, conn.key).as_bytes())?;
         Some(path)
     };
     Ok(TlsFiles { ca, cert_key })
+}
+
+/// Creates `path` readable only by this user (it holds a private key), and
+/// never through an existing file or a symlink planted at that name.
+fn write_private(path: &std::path::Path, data: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    options.open(path)?.write_all(data)
 }
 
 async fn connect(conn: &ConnConfig) -> NodeResult<(Client, Database)> {
