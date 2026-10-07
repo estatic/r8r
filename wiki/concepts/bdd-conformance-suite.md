@@ -4,7 +4,7 @@ title: "BDD conformance suite"
 tags: [testing, n8n-compatibility, spec]
 sources: [n8n-in-rust-reimplementation-spec]
 created: 2026-09-25
-updated: 2026-09-26
+updated: 2026-10-07
 ---
 
 # BDD conformance suite
@@ -75,6 +75,13 @@ With the AI cluster nodes (`src/n8n/nodes/ai.rs`: AI Agent with tool
 calling and max iterations, Basic LLM Chain, OpenAI chat model with token
 usage in run data, Calculator tool, window buffer memory), all 392
 default-run scenarios pass.
+
+More chat-model providers followed (plan tasks 2.1–2.3, 2026-09-27 to
+2026-10-07): Ollama, Anthropic, OpenRouter, Groq, Mistral, Google Gemini,
+Azure OpenAI and AWS Bedrock, each with a feature in `10-ai/` against a
+mock provider (46 scenarios). The Bedrock scenarios recompute the SigV4
+signature from the received request, so they check that a request is
+validly signed, not just that it carries a signature; real n8n's AWS SDK passes the same check.
 
 Queue mode (`r8r worker`, `r8r webhook`; Redis or PostgreSQL job queue
 with leases and heartbeats) and the Python runner then made every opt-in

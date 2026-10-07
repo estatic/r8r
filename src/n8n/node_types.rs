@@ -387,6 +387,7 @@ const DESCRIPTIONS: &[Desc] = &[
     d("@n8n/n8n-nodes-langchain.lmChatOpenRouter", "OpenRouter Chat Model", "transform", &[1.0], "For advanced usage with an AI chain", 0, 1, &["model", "options"], &["openRouterApi"]),
     d("@n8n/n8n-nodes-langchain.lmChatGroq", "Groq Chat Model", "transform", &[1.0], "Language Model Groq", 0, 1, &["model", "options"], &["groqApi"]),
     d("@n8n/n8n-nodes-langchain.lmChatMistralCloud", "Mistral Cloud Chat Model", "transform", &[1.0], "For advanced usage with an AI chain", 0, 1, &["model", "options"], &["mistralCloudApi"]),
+    d("@n8n/n8n-nodes-langchain.lmChatAwsBedrock", "AWS Bedrock Chat Model", "transform", &[1.0, 1.1, 1.2], "Language Model AWS Bedrock", 0, 1, &["authentication", "modelSource", "model", "options"], &["aws", "awsAssumeRole"]),
     d("@n8n/n8n-nodes-langchain.lmChatAzureOpenAi", "Azure OpenAI Chat Model", "transform", &[1.0], "For advanced usage with an AI chain", 0, 1, &["authentication", "model", "options"], &["azureOpenAiApi", "azureEntraCognitiveServicesOAuth2Api"]),
     d("@n8n/n8n-nodes-langchain.lmChatGoogleGemini", "Google Gemini Chat Model", "transform", &[1.0, 1.1], "Chat Model Google Gemini", 0, 1, &["modelName", "options"], &["googlePalmApi"]),
 ];

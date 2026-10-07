@@ -640,3 +640,108 @@ async fn gemini_part(w: &mut R8rWorld, n: usize, model: String, kind: String, ne
         .any(|p| p.get(&kind).is_some_and(|v| serde_json::to_string(v).unwrap_or_default().contains(&needle)));
     assert!(found, "no {kind} part containing {needle:?} in: {}", pretty(&body["contents"]));
 }
+
+// ---- AWS Bedrock Converse (/model/<id>/converse) -----------------------------
+
+/// The request path for a model id, percent-encoded like the AWS SDK.
+fn bedrock_path(model: &str) -> String {
+    let encoded: String = model
+        .bytes()
+        .map(|b| if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') { (b as char).to_string() } else { format!("%{b:02X}") })
+        .collect();
+    format!("/model/{encoded}/converse")
+}
+
+/// Doc string: a JSON array of Converse output messages (each with a
+/// `content` block array and optional `stopReason`), returned in order by
+/// `POST /model/<model>/converse` (the last one repeats). Each reply
+/// reports usage of 10 input + 5 output tokens.
+#[given(expr = "a mock Bedrock API for the model {string} that replies in order:")]
+async fn bedrock(w: &mut R8rWorld, model: String, step: &Step) {
+    let replies = parse_strict(docstring(step), "output messages");
+    let replies = replies.as_array().expect("array of messages").clone();
+    let server = mock(w).await;
+    let count = replies.len();
+    for (i, reply) in replies.into_iter().enumerate() {
+        let body = json!({
+            "output": {"message": {"role": "assistant", "content": reply.get("content").cloned().unwrap_or(json!([]))}},
+            "stopReason": reply.get("stopReason").cloned().unwrap_or(json!("end_turn")),
+            "usage": {"inputTokens": 10, "outputTokens": 5, "totalTokens": 15},
+            "metrics": {"latencyMs": 100},
+        });
+        let m = Mock::given(method("POST")).and(path(bedrock_path(&model))).respond_with(ResponseTemplate::new(200).set_body_json(body));
+        let m = if i + 1 < count { m.up_to_n_times(1) } else { m };
+        m.with_priority((i + 1) as u8).mount(server).await;
+    }
+}
+
+async fn bedrock_request(w: &mut R8rWorld, model: &str, n: usize) -> Value {
+    let all = requests_to(w, &bedrock_path(model)).await;
+    let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} Bedrock requests", all.len()));
+    serde_json::from_slice(&r.body).unwrap()
+}
+
+#[then(regex = r#"^the mock Bedrock API received (\d+) requests? for the model "([^"]*)"$"#)]
+async fn bedrock_count(w: &mut R8rWorld, n: usize, model: String) {
+    assert_eq!(requests_to(w, &bedrock_path(&model)).await.len(), n);
+}
+
+#[then(expr = "the last Bedrock request for the model {string} had a JSON body matching:")]
+async fn bedrock_body(w: &mut R8rWorld, model: String, step: &Step) {
+    let count = requests_to(w, &bedrock_path(&model)).await.len();
+    let actual = bedrock_request(w, &model, count).await;
+    let expected = parse_strict(&w.expand(docstring(step)), "expected body");
+    assert_matches(&expected, &actual, Mode::Subset).unwrap_or_else(|e| panic!("{e}\nbody: {}", pretty(&actual)));
+}
+
+#[then(expr = "bedrock request {int} for the model {string} offers the tool {string}")]
+async fn bedrock_tool(w: &mut R8rWorld, n: usize, model: String, tool: String) {
+    let body = bedrock_request(w, &model, n).await;
+    let found = body.pointer("/toolConfig/tools").and_then(Value::as_array).into_iter().flatten().any(|t| t["toolSpec"]["name"] == tool.as_str());
+    assert!(found, "tool {tool} not offered: {}", pretty(&body["toolConfig"]));
+}
+
+#[then(expr = "bedrock request {int} for the model {string} has a {string} block containing {string}")]
+async fn bedrock_block(w: &mut R8rWorld, n: usize, model: String, kind: String, needle: String) {
+    let body = bedrock_request(w, &model, n).await;
+    let found = body["messages"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|m| m["content"].as_array().into_iter().flatten())
+        .any(|b| b.get(&kind).is_some_and(|v| serde_json::to_string(v).unwrap_or_default().contains(&needle)));
+    assert!(found, "no {kind} block containing {needle:?} in: {}", pretty(&body["messages"]));
+}
+
+/// Recomputes the request's SigV4 signature from the headers it says it
+/// signed (as AWS does) and compares: proves the signature valid, not just
+/// present, whatever extra headers the client chose to sign.
+#[then(regex = r#"^the last request to "([^"]*)" was SigV4-signed by "([^"]*)" with secret "([^"]*)" for the region "([^"]*)" and the service "([^"]*)"$"#)]
+async fn sigv4_signed(w: &mut R8rWorld, p: String, key_id: String, secret: String, region: String, service: String) {
+    use hmac::{Hmac, Mac};
+    use sha2::{Digest, Sha256};
+    fn mac(key: &[u8], data: &str) -> Vec<u8> {
+        let mut m = Hmac::<Sha256>::new_from_slice(key).unwrap();
+        m.update(data.as_bytes());
+        m.finalize().into_bytes().to_vec()
+    }
+    let r = last_to(w, &p).await;
+    let header = |name: &str| r.headers.get(name).and_then(|v| v.to_str().ok()).map(String::from);
+    let auth = header("authorization").expect("no authorization header");
+    let re = regex::Regex::new(r"^AWS4-HMAC-SHA256 Credential=([^/]+)/(\d{8})/([^/]+)/([^/]+)/aws4_request, ?SignedHeaders=([^,]+), ?Signature=([0-9a-f]{64})$").unwrap();
+    let c = re.captures(&auth).unwrap_or_else(|| panic!("not a SigV4 authorization header: {auth}"));
+    assert_eq!(&c[1], key_id, "access key id");
+    assert_eq!(&c[3], region, "region");
+    assert_eq!(&c[4], service, "service");
+    let amz_date = header("x-amz-date").expect("no x-amz-date header");
+    let signed: Vec<&str> = c[5].split(';').collect();
+    let canonical_headers: String = signed.iter().map(|h| format!("{h}:{}\n", header(h).unwrap_or_else(|| panic!("signed header {h} missing")).trim())).collect();
+    let mut query: Vec<&str> = r.url.query().unwrap_or("").split('&').filter(|s| !s.is_empty()).collect();
+    query.sort();
+    let uri: String = r.url.path().split('/').map(|s| s.replace('%', "%25")).collect::<Vec<_>>().join("/");
+    let canonical = format!("{}\n{uri}\n{}\n{canonical_headers}\n{}\n{}", r.method, query.join("&"), &c[5], hex::encode(Sha256::digest(&r.body)));
+    let scope = format!("{}/{region}/{service}/aws4_request", &c[2]);
+    let to_sign = format!("AWS4-HMAC-SHA256\n{amz_date}\n{scope}\n{}", hex::encode(Sha256::digest(canonical.as_bytes())));
+    let k = mac(&mac(&mac(&mac(format!("AWS4{secret}").as_bytes(), &c[2]), &region), &service), "aws4_request");
+    assert_eq!(hex::encode(mac(&k, &to_sign)), &c[6], "signature (canonical request:\n{canonical})");
+}

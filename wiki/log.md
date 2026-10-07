@@ -26,3 +26,7 @@ Operations:
 ## [2026-09-26] query | PostgreSQL storage (DB_TYPE=postgresdb); BDD 397/397 on SQLite and on PostgreSQL; updated concepts/bdd-conformance-suite
 
 ## [2026-09-26] ingest | migrate-from-n8n implemented and validated on real n8n 2.35.7 SQLite and PostgreSQL databases; n8n-style resume tokens; BDD 403/403 on both storages; updated concepts/bdd-conformance-suite
+
+## [2026-09-27] compact | auto compaction (summary text unavailable)
+
+## [2026-10-07] query | Google Gemini, Azure OpenAI and AWS Bedrock chat models (plan 2.3); 10-ai BDD 46/46 on r8r; new features green on n8n 2.35.7

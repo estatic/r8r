@@ -155,11 +155,14 @@ node no longer carries `codex.r8r.native = false`.
 ## 3. AI nodes (Phase 5, §6.8)
 
 Done: AI Agent (tools loop, max iterations), Basic LLM Chain, OpenAI Chat
-Model (token usage in run data), Calculator tool, Simple Memory.
+Model (token usage in run data), Calculator tool, Simple Memory; chat
+models for Ollama, Anthropic, OpenRouter, Groq, Mistral, Google Gemini,
+Azure OpenAI (API key) and AWS Bedrock (IAM keys, SigV4) — plan tasks
+2.1–2.3.
 
 Missing:
-- Chat models: Anthropic, Google, Azure OpenAI, Mistral, Groq, Ollama,
-  Bedrock, OpenRouter.
+- Chat models: Google Vertex, Azure Entra ID (OAuth2) auth, Bedrock
+  assume-role auth, and the rest of n8n's list (DeepSeek, xAI, Cohere, …).
 - Root nodes: Question and Answer Chain, Summarization, Information
   Extractor, Text Classifier, Sentiment Analysis; Agent structured output
   and streaming.

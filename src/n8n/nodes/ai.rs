@@ -25,6 +25,7 @@ pub fn all() -> Vec<Box<dyn NodeType>> {
         Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatMistralCloud")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatGoogleGemini")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatAzureOpenAi")),
+        Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatAwsBedrock")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.toolCalculator")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.memoryBufferWindow")),
     ]
@@ -95,6 +96,11 @@ enum Provider {
     /// (`{endpoint}/openai/deployments/{deployment}/chat/completions
     /// ?api-version=...`) with an `api-key` header instead of bearer auth.
     AzureOpenAi { api_version: String },
+    /// Bedrock's Converse API (what LangChain's `ChatBedrockConverse`
+    /// calls): `POST {runtime}/model/{modelId}/converse`, SigV4-signed
+    /// (`api_key` holds the secret key), top-level `system` blocks,
+    /// `toolUse`/`toolResult` content blocks.
+    Bedrock { region: String, access_key_id: String, session_token: Option<String> },
 }
 
 struct Model<'a> {
@@ -232,6 +238,7 @@ async fn load_model<'a>(ctx: &'a ExecCtx<'_>, item: usize) -> NodeResult<Model<'
         // the `models/` prefix and the SDK puts it back in the URL.
         let default = if node.type_version >= 1.1 { "models/gemini-3-flash-preview" } else { "models/gemini-2.5-flash" };
         let model = params["modelName"].as_str().filter(|s| !s.is_empty()).unwrap_or(default);
+        check_path_name(model, "model")?;
         Ok(Model {
             node,
             base_url,
@@ -252,17 +259,47 @@ async fn load_model<'a>(ctx: &'a ExecCtx<'_>, item: usize) -> NodeResult<Model<'
         // The deployment name is the node's `model` parameter; LangChain
         // builds the URL from the endpoint when set, else the resource name.
         let deployment = model_param(&params, "");
+        check_path_name(&deployment, "deployment")?;
         let root = match cred["endpoint"].as_str().map(|e| e.trim_end_matches('/')).filter(|e| !e.is_empty()) {
             Some(endpoint) => endpoint.to_string(),
             None => format!("https://{}.openai.azure.com", cred["resourceName"].as_str().unwrap_or("")),
         };
         Ok(Model {
             node,
-            base_url: format!("{root}/openai/deployments/{deployment}"),
+            base_url: format!("{root}/openai/deployments/{}", path_segment(&deployment)),
             api_key,
             model: deployment,
             options,
             provider: Provider::AzureOpenAi { api_version: cred["apiVersion"].as_str().filter(|s| !s.is_empty()).unwrap_or("2025-03-01-preview").to_string() },
+        })
+    } else if node.node_type == format!("{LC}lmChatAwsBedrock") {
+        if params["authentication"].as_str().is_some_and(|a| a != "iam") {
+            return Err(NodeError::new("AWS assume-role authentication is not supported natively yet; use an AWS (IAM) credential"));
+        }
+        let (_, cred) = ctx.credentials_for(node, "aws").await?;
+        let model = model_param(&params, "");
+        if model.is_empty() || model == "." || model == ".." {
+            return Err(NodeError::new(format!("Invalid model \"{model}\"")));
+        }
+        // A model given as an ARN carries its own region (n8n's
+        // `resolveBedrockRegion`).
+        let arn_region = regex::Regex::new(r"^arn:(?:aws|aws-cn|aws-us-gov):bedrock:([a-z0-9-]+):").unwrap().captures(&model).map(|c| c[1].to_string());
+        let region = arn_region.unwrap_or_else(|| cred["region"].as_str().filter(|s| !s.is_empty()).unwrap_or("us-east-1").to_string());
+        if !regex::Regex::new(r"^[a-z]{2,4}(-[a-z]+)+-\d+$").unwrap().is_match(&region) {
+            return Err(NodeError::new(format!("Invalid AWS region \"{region}\"")));
+        }
+        let base_url = match cred["bedrockRuntimeEndpoint"].as_str().map(str::trim).filter(|s| !s.is_empty()) {
+            Some(custom) => custom.replace("{region}", &region).trim_end_matches('/').to_string(),
+            None => format!("https://bedrock-runtime.{region}.{}", if region.starts_with("cn-") { "amazonaws.com.cn" } else { "amazonaws.com" }),
+        };
+        let session_token = if cred["temporaryCredentials"].as_bool() == Some(true) { cred["sessionToken"].as_str().filter(|s| !s.is_empty()).map(String::from) } else { None };
+        Ok(Model {
+            node,
+            base_url,
+            api_key: cred["secretAccessKey"].as_str().unwrap_or("").to_string(),
+            model,
+            options,
+            provider: Provider::Bedrock { region, access_key_id: cred["accessKeyId"].as_str().unwrap_or("").to_string(), session_token },
         })
     } else {
         Err(NodeError::new(format!("The chat model \"{}\" ({}) is not supported natively yet", node.name, node.node_type)))
@@ -280,6 +317,7 @@ impl Model<'_> {
             Provider::Ollama => self.ollama_body(messages, tools),
             Provider::Anthropic => self.anthropic_body(messages, tools),
             Provider::Gemini => self.gemini_body(messages, tools),
+            Provider::Bedrock { .. } => self.bedrock_body(messages, tools)?,
         };
         let input = json!({"messages": messages, "options": {"model": self.model}});
         let result = self.send(ctx, &body).await;
@@ -290,6 +328,7 @@ impl Model<'_> {
                     Provider::Ollama => self.ollama_response(&resp),
                     Provider::Anthropic => self.anthropic_response(&resp),
                     Provider::Gemini => self.gemini_response(&resp),
+                    Provider::Bedrock { .. } => self.bedrock_response(&resp),
                 };
                 let out = json!({
                     "response": {"generations": [[{"text": message["content"].as_str().unwrap_or(""), "message": message}]]},
@@ -631,13 +670,116 @@ impl Model<'_> {
         (message, usage)
     }
 
+    /// Converts the OpenAI-shaped messages into Converse `messages` the way
+    /// LangChain's `convertToConverseMessages` does: system messages become
+    /// top-level `system` blocks, tool calls `toolUse` blocks, and tool
+    /// replies `toolResult` blocks in a user turn (consecutive ones merged
+    /// into one turn).
+    fn bedrock_body(&self, messages: &[Value], tools: &[Value]) -> NodeResult<Value> {
+        let mut system = Vec::new();
+        let mut out: Vec<Value> = Vec::new();
+        for m in messages {
+            let text = m["content"].as_str().unwrap_or("");
+            match m["role"].as_str() {
+                Some("system") => system.push(json!({"text": text})),
+                Some("user") => out.push(json!({"role": "user", "content": [{"text": text}]})),
+                Some("assistant") => {
+                    let mut content = Vec::new();
+                    if !text.is_empty() {
+                        content.push(json!({"text": text}));
+                    }
+                    for call in m["tool_calls"].as_array().into_iter().flatten() {
+                        let args = call.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("{}");
+                        let input: Value = serde_json::from_str(args).unwrap_or(json!({}));
+                        content.push(json!({"toolUse": {"toolUseId": call["id"], "name": call.pointer("/function/name").cloned().unwrap_or(json!("")), "input": input}}));
+                    }
+                    out.push(json!({"role": "assistant", "content": content}));
+                }
+                Some("tool") => {
+                    let block = json!({"toolResult": {"toolUseId": m["tool_call_id"], "content": [{"text": text}]}});
+                    let has_result = |turn: &Value| turn["role"] == "user" && turn["content"].as_array().is_some_and(|c| c.iter().any(|b| b.get("toolResult").is_some()));
+                    match out.last_mut() {
+                        Some(last) if has_result(last) => last["content"].as_array_mut().expect("checked above").push(block),
+                        _ => out.push(json!({"role": "user", "content": [block]})),
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut body = json!({"messages": out});
+        if !system.is_empty() {
+            body["system"] = Value::Array(system);
+        }
+        let opt = |k: &str| self.options.get(k).cloned();
+        let mut inference = Map::new();
+        for (n8n_key, key) in [("maxTokensToSample", "maxTokens"), ("temperature", "temperature"), ("topP", "topP")] {
+            if let Some(v) = opt(n8n_key) {
+                inference.insert(key.to_string(), v);
+            }
+        }
+        if !inference.is_empty() {
+            body["inferenceConfig"] = Value::Object(inference);
+        }
+        if !tools.is_empty() {
+            let specs: Vec<Value> = tools
+                .iter()
+                .map(|t| json!({"toolSpec": {"name": t["function"]["name"], "description": t["function"]["description"], "inputSchema": {"json": t["function"]["parameters"]}}}))
+                .collect();
+            body["toolConfig"] = json!({"tools": specs});
+        }
+        if let Some(fields) = opt("additionalModelRequestFields").and_then(|v| v.as_str().map(|s| s.trim().to_string())).filter(|s| !s.is_empty() && s != "{}") {
+            body["additionalModelRequestFields"] = serde_json::from_str(&fields).map_err(|_| NodeError::new("Additional Model Request Fields must be valid JSON"))?;
+        }
+        let guardrail = self.options.get("guardrail").map(|g| &g["values"]).cloned().unwrap_or(Value::Null);
+        if let Some(id) = guardrail["guardrailIdentifier"].as_str().filter(|s| !s.is_empty()) {
+            let version = guardrail["guardrailVersion"].as_str().map(str::trim).filter(|s| !s.is_empty()).unwrap_or("DRAFT");
+            let mut config = json!({"guardrailIdentifier": id, "guardrailVersion": version});
+            if let Some(trace) = guardrail["trace"].as_str().filter(|s| !s.is_empty()) {
+                config["trace"] = json!(trace);
+            }
+            body["guardrailConfig"] = config;
+        }
+        // n8n also sets `performanceConfig` from the Latency option, but
+        // LangChain 1.0.3 only reads it from call options, so it never
+        // reaches the request; neither does it here.
+        Ok(body)
+    }
+
+    /// Normalises the Converse output message: `text` blocks as `content`,
+    /// `toolUse` blocks as `tool_calls`.
+    fn bedrock_response(&self, resp: &Value) -> (Value, Value) {
+        let mut text = String::new();
+        let mut tool_calls = Vec::new();
+        for (i, block) in resp.pointer("/output/message/content").and_then(Value::as_array).into_iter().flatten().enumerate() {
+            if let Some(t) = block["text"].as_str() {
+                text.push_str(t);
+            } else if let Some(call) = block.get("toolUse") {
+                let id = call["toolUseId"].as_str().map(String::from).unwrap_or_else(|| format!("call_{i}"));
+                let arguments = serde_json::to_string(call.get("input").unwrap_or(&json!({}))).unwrap_or_else(|_| "{}".to_string());
+                tool_calls.push(json!({"id": id, "type": "function", "function": {"name": call["name"], "arguments": arguments}}));
+            }
+        }
+        let mut message = json!({"role": "assistant", "content": text});
+        if !tool_calls.is_empty() {
+            message["tool_calls"] = Value::Array(tool_calls);
+        }
+        let input = resp["usage"]["inputTokens"].as_i64().unwrap_or(0);
+        let output = resp["usage"]["outputTokens"].as_i64().unwrap_or(0);
+        let total = resp["usage"]["totalTokens"].as_i64().unwrap_or(input + output);
+        (message, json!({"completionTokens": output, "promptTokens": input, "totalTokens": total}))
+    }
+
     fn endpoint(&self) -> String {
         match &self.provider {
             Provider::OpenAi { .. } => format!("{}/chat/completions", self.base_url),
             Provider::Ollama => format!("{}/api/chat", self.base_url),
             Provider::Anthropic => format!("{}/v1/messages", self.base_url),
-            Provider::Gemini => format!("{}/v1beta/models/{}:generateContent", self.base_url, self.model),
-            Provider::AzureOpenAi { api_version } => format!("{}/chat/completions?api-version={api_version}", self.base_url),
+            // As the Google SDK: a name with a `/` (`tunedModels/x`) is a
+            // full resource path, anything else lives under `models/`.
+            Provider::Gemini if self.model.contains('/') => format!("{}/v1beta/{}:generateContent", self.base_url, self.model.split('/').map(path_segment).collect::<Vec<_>>().join("/")),
+            Provider::Gemini => format!("{}/v1beta/models/{}:generateContent", self.base_url, path_segment(&self.model)),
+            Provider::AzureOpenAi { api_version } => format!("{}/chat/completions?api-version={}", self.base_url, path_segment(api_version)),
+            Provider::Bedrock { .. } => format!("{}/model/{}/converse", self.base_url, path_segment(&self.model)),
         }
     }
 
@@ -645,13 +787,15 @@ impl Model<'_> {
     /// `NodeApiError` wrap of the underlying fetch failure.
     fn unreachable_message(&self, err: reqwest::Error) -> String {
         match self.provider {
-            Provider::OpenAi { .. } | Provider::Anthropic | Provider::Gemini | Provider::AzureOpenAi { .. } => format!("The model provider could not be reached: {}", err.without_url()),
+            Provider::OpenAi { .. } | Provider::Anthropic | Provider::Gemini | Provider::AzureOpenAi { .. } | Provider::Bedrock { .. } => format!("The model provider could not be reached: {}", err.without_url()),
             Provider::Ollama => format!("Ollama could not be reached at {}: {}", self.base_url, err.without_url()),
         }
     }
 
     fn error_message(&self, status: reqwest::StatusCode, json: &Value) -> String {
         match self.provider {
+            // AWS errors carry `message` (or `Message`) at the top level.
+            Provider::Bedrock { .. } => json["message"].as_str().or(json["Message"].as_str()).map(String::from).unwrap_or_else(|| format!("The model provider answered {status}")),
             Provider::OpenAi { .. } | Provider::Anthropic | Provider::Gemini | Provider::AzureOpenAi { .. } => json.pointer("/error/message").and_then(Value::as_str).map(String::from).unwrap_or_else(|| format!("The model provider answered {status}")),
             Provider::Ollama => json["error"].as_str().map(String::from).unwrap_or_else(|| format!("Ollama answered {status}")),
         }
@@ -680,8 +824,24 @@ impl Model<'_> {
             Provider::Gemini => {
                 req = req.header("x-goog-api-key", &self.api_key).header("x-goog-api-client", "genai-js/0.24.0");
             }
+            Provider::Bedrock { .. } => {}
         }
-        req = req.json(body);
+        if let Provider::Bedrock { region, access_key_id, session_token } = &self.provider {
+            let bytes = serde_json::to_vec(body).map_err(|e| NodeError::new(e.to_string()))?;
+            let url = reqwest::Url::parse(&self.endpoint()).map_err(|e| NodeError::new(format!("Invalid Bedrock endpoint: {e}")))?;
+            let host = match url.port() {
+                Some(port) => format!("{}:{port}", url.host_str().unwrap_or("")),
+                None => url.host_str().unwrap_or("").to_string(),
+            };
+            let creds = super::aws_sigv4::AwsCredentials { access_key_id, secret_access_key: &self.api_key, session_token: session_token.as_deref() };
+            let amz_date = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+            for (name, value) in super::aws_sigv4::sign(&creds, region, "bedrock", "POST", &host, url.path(), url.query().unwrap_or(""), Some("application/json"), &bytes, &amz_date) {
+                req = req.header(name, value);
+            }
+            req = req.header("content-type", "application/json").body(bytes);
+        } else {
+            req = req.json(body);
+        }
         let timeout = self.options.get("timeout").and_then(Value::as_u64).unwrap_or(60_000);
         let resp = req.timeout(std::time::Duration::from_millis(timeout)).send().await.map_err(|e| NodeError::new(self.unreachable_message(e)))?;
         let status = resp.status();
@@ -701,6 +861,31 @@ impl Model<'_> {
 /// The placeholder thought signature LangChain sends for a Gemini 3
 /// function call it has no real signature for (`@langchain/google-genai`).
 const GEMINI_DUMMY_SIGNATURE: &str = "ErYCCrMCAdHtim9kOoOkrPiCNVsmlpMIKd7ZMxgiFbVQOkgp7nlLcDMzVsZwIzvuT7nQROivoXA72ccC2lSDvR0Gh7dkWaGuj7ctv6t7ZceHnecx0QYa+ix8tYpRfjhyWozQ49lWiws6+YGjCt10KRTyWsZ2h6O7iHTYJwKIRwGUHRKy/qK/6kFxJm5ML00gLq4D8s5Z6DBpp2ZlR+uF4G8jJgeWQgyHWVdx2wGYElaceVAc66tZdPQRdOHpWtgYSI1YdaXgVI8KHY3/EfNc2YqqMIulvkDBAnuMhkAjV9xmBa54Tq+ih3Im4+r3DzqhGqYdsSkhS0kZMwte4Hjs65dZzCw9lANxIqYi1DJ639WNPYihp/DCJCos7o+/EeSPJaio5sgWDyUnMGkY1atsJZ+m7pj7DD5tvQ==";
+
+/// Rejects a model/deployment name whose `/`-separated parts would be dot
+/// segments (or empty) once in a URL path: URL parsing resolves those,
+/// even percent-encoded, which would send the request to another path.
+fn check_path_name(name: &str, what: &str) -> NodeResult<()> {
+    if name.split('/').any(|seg| seg.is_empty() || seg == "." || seg == "..") {
+        return Err(NodeError::new(format!("Invalid {what} name \"{name}\"")));
+    }
+    Ok(())
+}
+
+/// Percent-encodes everything but RFC 3986 unreserved characters, so a
+/// model or deployment name (which may come from an expression) stays one
+/// path segment instead of steering the request elsewhere (`../`, `?`, `#`).
+fn path_segment(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    for b in s.bytes() {
+        if b.is_ascii_alphanumeric() || matches!(b, b'-' | b'.' | b'_' | b'~') {
+            out.push(b as char);
+        } else {
+            out.push_str(&format!("%{b:02X}"));
+        }
+    }
+    out
+}
 
 /// Gemini's function parameters accept only a subset of JSON Schema:
 /// strips `additionalProperties` (everywhere) and `$schema`, like
@@ -1094,6 +1279,17 @@ impl NodeType for ChainLlm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn model_names_stay_inside_their_path_segment() {
+        assert_eq!(path_segment("gemini-2.5-flash"), "gemini-2.5-flash");
+        assert_eq!(path_segment("anthropic.claude-v2:1"), "anthropic.claude-v2%3A1");
+        assert_eq!(path_segment("a/b?x#y"), "a%2Fb%3Fx%23y");
+        assert!(check_path_name("tunedModels/my-model", "model").is_ok());
+        assert!(check_path_name("x/../../v1/files", "model").is_err());
+        assert!(check_path_name("..", "deployment").is_err());
+        assert!(check_path_name("", "deployment").is_err());
+    }
 
     #[test]
     fn calculator_handles_precedence_and_functions() {

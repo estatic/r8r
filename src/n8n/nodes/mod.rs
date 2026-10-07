@@ -1,6 +1,7 @@
 //! Native node implementations (spec §6.6), keyed by n8n type name.
 
 mod ai;
+mod aws_sigv4;
 mod airtable;
 mod code;
 mod compression;
