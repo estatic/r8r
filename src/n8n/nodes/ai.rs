@@ -1074,7 +1074,7 @@ fn code_tool_schema(node: &Node, p: &Value) -> NodeResult<Option<Value>> {
 }
 
 /// The `generate-schema` package's `json()`, as n8n uses it.
-fn schema_from_example(v: &Value, all_required: bool) -> Value {
+pub(super) fn schema_from_example(v: &Value, all_required: bool) -> Value {
     match v {
         Value::Object(o) => {
             let props: Map<String, Value> = o.iter().map(|(k, v)| (k.clone(), schema_from_example(v, all_required))).collect();
@@ -1092,7 +1092,7 @@ fn schema_from_example(v: &Value, all_required: bool) -> Value {
     }
 }
 
-fn close_objects(s: &mut Value) {
+pub(super) fn close_objects(s: &mut Value) {
     if let Some(o) = s.as_object_mut() {
         if o.get("type").and_then(Value::as_str) == Some("object") && !o.contains_key("additionalProperties") {
             o.insert("additionalProperties".into(), json!(false));

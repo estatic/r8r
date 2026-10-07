@@ -11,7 +11,7 @@ use crate::n8n::workflow::Node;
 use serde_json::{json, Map, Value};
 
 pub fn all() -> Vec<Box<dyn NodeType>> {
-    vec![Box::new(SentimentAnalysis), Box::new(TextClassifier)]
+    vec![Box::new(SentimentAnalysis), Box::new(TextClassifier), Box::new(InformationExtractor)]
 }
 
 // ---- structured output (LangChain StructuredOutputParser) ---------------------
@@ -82,7 +82,14 @@ fn validate(v: &Value, schema: &Value, path: &str) -> Result<Value, String> {
             }
             Ok(v.clone())
         }
-        Some("string") => v.as_str().map(|_| v.clone()).ok_or_else(|| format!("Expected string at {at}")),
+        Some("string") => {
+            let s = v.as_str().ok_or_else(|| format!("Expected string at {at}"))?;
+            // zod's `.date()`: an ISO calendar date.
+            if schema["format"].as_str() == Some("date") && chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d").is_err() {
+                return Err(format!("Invalid date at {at}"));
+            }
+            Ok(v.clone())
+        }
         Some("boolean") => v.as_bool().map(|_| v.clone()).ok_or_else(|| format!("Expected boolean at {at}")),
         _ => Ok(v.clone()),
     }
@@ -303,5 +310,94 @@ impl NodeType for TextClassifier {
             }
         }
         Ok(out)
+    }
+}
+
+// ---- Information Extractor -------------------------------------------------------
+
+const EXTRACTOR_SYSTEM: &str = "You are an expert extraction algorithm.\nOnly extract relevant information from the text.\nIf you do not know the value of an attribute asked to extract, you may omit the attribute's value.";
+
+struct InformationExtractor;
+
+/// The schema to extract: from attribute definitions (n8n's
+/// `makeZodSchemaFromAttributes`; only attributes marked required are),
+/// from a JSON example (all fields required from v1.2) or a JSON Schema.
+fn extractor_schema(ctx: &ExecCtx<'_>) -> NodeResult<Value> {
+    let schema_type = ctx.param_str("schemaType", 0, "fromAttributes")?;
+    let mut schema = match schema_type.as_str() {
+        "fromAttributes" => {
+            let attrs = ctx.param("attributes.attributes", 0)?;
+            let attrs = attrs.as_array().cloned().unwrap_or_default();
+            if attrs.is_empty() {
+                return Err(NodeError::new("At least one attribute must be specified"));
+            }
+            let mut props = Map::new();
+            let mut required = Vec::new();
+            for a in &attrs {
+                let name = a["name"].as_str().unwrap_or("").to_string();
+                let mut prop = match a["type"].as_str().unwrap_or("string") {
+                    "number" => json!({"type": "number"}),
+                    "boolean" => json!({"type": "boolean"}),
+                    "date" => json!({"type": "string", "format": "date"}),
+                    "string" => json!({"type": "string"}),
+                    _ => json!({}),
+                };
+                prop["description"] = a["description"].clone();
+                if a["required"].as_bool() == Some(true) {
+                    required.push(name.clone());
+                }
+                props.insert(name, prop);
+            }
+            let mut s = json!({"type": "object", "properties": props});
+            if !required.is_empty() {
+                s["required"] = json!(required);
+            }
+            s
+        }
+        "fromJson" => {
+            let example: Value = serde_json::from_str(&ctx.param_str("jsonSchemaExample", 0, "")?).map_err(|e| NodeError::new(format!("Invalid JSON example: {e}")))?;
+            super::ai::schema_from_example(&example, ctx.node.type_version >= 1.2)
+        }
+        _ => {
+            let mut s: Value = serde_json::from_str(&ctx.param_str("inputSchema", 0, "")?).map_err(|e| NodeError::new(format!("Invalid JSON Schema: {e}")))?;
+            if let Some(o) = s.as_object_mut() {
+                o.remove("$schema");
+            }
+            s
+        }
+    };
+    super::ai::close_objects(&mut schema);
+    Ok(schema)
+}
+
+#[async_trait::async_trait]
+impl NodeType for InformationExtractor {
+    fn type_name(&self) -> &'static str {
+        "@n8n/n8n-nodes-langchain.informationExtractor"
+    }
+
+    async fn execute(&self, ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
+        let schema = extractor_schema(ctx)?;
+        let mut out = Vec::new();
+        for i in 0..ctx.input().len() {
+            let result = async {
+                let input = ctx.param_str("text", i, "")?;
+                if input.trim().is_empty() {
+                    return Err(NodeError::new(format!("Text for item {i} is not defined")));
+                }
+                let template = ctx.param_str("options.systemPromptTemplate", i, EXTRACTOR_SYSTEM)?;
+                let system = format!("{template}\n{}", format_instructions(&schema));
+                let messages = [json!({"role": "system", "content": system}), json!({"role": "user", "content": input})];
+                // n8n always wraps this parser in an OutputFixingParser.
+                structured_call(ctx, i, &messages, &schema, true).await.map_err(StructuredError::wrapped)
+            }
+            .await;
+            match result {
+                Ok(output) => out.push(Item::new(Map::from_iter([("output".to_string(), output)])).paired(i)),
+                Err(e) if ctx.continue_on_fail() => out.push(Item::new(Map::from_iter([("error".to_string(), json!(e.message))])).paired(i)),
+                Err(e) => return Err(e.at(i)),
+            }
+        }
+        Ok(vec![out])
     }
 }
