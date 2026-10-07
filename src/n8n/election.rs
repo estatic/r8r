@@ -90,6 +90,23 @@ pub struct Election {
     /// after that another main may hold it, and leading on would mean two
     /// mains firing every schedule.
     last_held: std::sync::Mutex<std::time::Instant>,
+    /// Every backend call is bounded by this (the check interval): a
+    /// half-open connection can hang in the backend's I/O layer even with
+    /// reconnect support, and a hung `renew()`/`try_acquire()` must not
+    /// block `check()` forever -- that would leave the leadership gate
+    /// stuck past lease expiry (split brain) instead of stepping down.
+    interval: Duration,
+}
+
+/// Bounds `fut` to `interval`, turning a hang into a plain error so callers
+/// (`Election::start`/`check`) can fall through their existing
+/// error-handling path -- including the leader's "hold on until the lease
+/// expires" grace period -- exactly as they do for a backend error.
+async fn with_timeout<T>(interval: Duration, fut: impl std::future::Future<Output = anyhow::Result<T>>) -> anyhow::Result<T> {
+    match tokio::time::timeout(interval, fut).await {
+        Ok(result) => result,
+        Err(_) => anyhow::bail!("timed out after {interval:?} waiting for the leader lock backend"),
+    }
 }
 
 impl Election {
@@ -97,7 +114,7 @@ impl Election {
     /// that renews (if leader) or tries to take over (if follower) every
     /// `interval`.
     pub async fn start(backend: Arc<dyn ElectionBackend>, interval: Duration) -> Arc<Self> {
-        let initial = match backend.try_acquire().await {
+        let initial = match with_timeout(interval, backend.try_acquire()).await {
             Ok(got) => got,
             Err(e) => {
                 tracing::warn!(error = %e, "[multi-main] could not reach the leader lock at start-up; starting as a follower");
@@ -116,6 +133,7 @@ impl Election {
             backend,
             checker: std::sync::Mutex::new(None),
             last_held: std::sync::Mutex::new(std::time::Instant::now()),
+            interval,
         });
         let weak = Arc::downgrade(&election);
         let handle = tokio::spawn(async move {
@@ -134,7 +152,7 @@ impl Election {
     async fn check(&self) {
         let was_leader = self.gate.is_leader();
         let now_leader = if was_leader {
-            match self.backend.renew().await {
+            match with_timeout(self.interval, self.backend.renew()).await {
                 Ok(true) => {
                     *self.last_held.lock().unwrap() = std::time::Instant::now();
                     true
@@ -153,7 +171,7 @@ impl Election {
                 }
             }
         } else {
-            match self.backend.try_acquire().await {
+            match with_timeout(self.interval, self.backend.try_acquire()).await {
                 Ok(got) => {
                     if got {
                         *self.last_held.lock().unwrap() = std::time::Instant::now();
@@ -183,7 +201,8 @@ impl Election {
             h.abort();
         }
         if self.gate.is_leader() {
-            self.backend.release().await;
+            // Best-effort: a hung release must not block shutdown forever.
+            let _ = tokio::time::timeout(self.interval, self.backend.release()).await;
         }
     }
 
@@ -212,7 +231,15 @@ return 0
 ";
 
 pub struct RedisElectionBackend {
-    conn: redis::aio::MultiplexedConnection,
+    // `ConnectionManager` (vs. the `MultiplexedConnection` this replaced)
+    // reconnects automatically after the TCP connection drops -- a plain
+    // `MultiplexedConnection` never reconnects, so once Redis bounces every
+    // subsequent `try_acquire`/`renew` would fail forever and no main could
+    // ever become leader again. Callers still wrap every call in
+    // `tokio::time::timeout` (see `Election::check`) because a half-open
+    // connection (peer gone but no FIN/RST observed) can otherwise hang
+    // indefinitely even with reconnect in place.
+    conn: redis::aio::ConnectionManager,
     key: String,
     host_id: String,
     ttl_secs: u64,
@@ -240,8 +267,7 @@ impl RedisElectionBackend {
         let scheme = if env("QUEUE_BULL_REDIS_TLS").as_deref() == Some("true") { "rediss" } else { "redis" };
         let url = format!("{scheme}://{auth}{host}:{port}/{db}");
         let client = redis::Client::open(url.as_str())?;
-        let conn = client
-            .get_multiplexed_async_connection()
+        let conn = redis::aio::ConnectionManager::new(client)
             .await
             .map_err(|e| anyhow::anyhow!("cannot connect to Redis at {host}:{port} for leader election (QUEUE_BULL_REDIS_HOST/PORT): {e}"))?;
         // n8n's leader key uses the same top-level prefix as the queue
@@ -331,5 +357,64 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(250)).await;
         election.check().await;
         assert!(!election.gate.is_leader(), "past the lease another main may hold the lock");
+    }
+
+    /// Simulates a half-open connection: the backend's `renew()` never
+    /// resolves at all (no error, just silence) instead of failing fast
+    /// with a connection error. Without a timeout around the backend call,
+    /// `check()` would hang forever and the leadership gate would stay
+    /// `true` well past the lease -- a split brain once another main takes
+    /// over the Redis key. With `Election`'s per-call timeout, a hang is
+    /// turned into an error after the check interval and falls through the
+    /// same "hold on until the lease expires, then step down" path as any
+    /// other renew failure.
+    struct Hangs {
+        lease: Duration,
+        /// Only the start-up bid succeeds; later bids hang like `renew()`,
+        /// so the background checker can't win the lock back after it
+        /// steps down.
+        granted: std::sync::atomic::AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl ElectionBackend for Hangs {
+        async fn try_acquire(&self) -> anyhow::Result<bool> {
+            if self.granted.swap(true, std::sync::atomic::Ordering::SeqCst) {
+                std::future::pending().await
+            } else {
+                Ok(true)
+            }
+        }
+        async fn renew(&self) -> anyhow::Result<bool> {
+            std::future::pending().await
+        }
+        async fn release(&self) {}
+        fn describe(&self) -> String {
+            "hangs".into()
+        }
+        fn lease(&self) -> Duration {
+            self.lease
+        }
+    }
+
+    #[tokio::test]
+    async fn a_leader_whose_backend_hangs_times_out_and_steps_down_once_its_lease_is_over() {
+        // `try_acquire` resolves immediately (so `start()` doesn't hang),
+        // but every `renew()` call hangs forever -- the per-call timeout
+        // (here, the check interval: 50ms) is what turns that into an
+        // error at all.
+        let interval = Duration::from_millis(50);
+        let lease = Duration::from_millis(150);
+        let election = Election::start(Arc::new(Hangs { lease, granted: Default::default() }), interval).await;
+        assert!(election.gate.is_leader());
+
+        // Real wait: this `check()` blocks on `renew()` for the full
+        // `interval` before the timeout fires.
+        election.check().await;
+        assert!(election.gate.is_leader(), "a timed-out renewal within the lease keeps leading");
+
+        tokio::time::sleep(lease).await;
+        election.check().await;
+        assert!(!election.gate.is_leader(), "past the lease a hung backend must still cause step-down");
     }
 }
