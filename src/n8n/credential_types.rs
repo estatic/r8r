@@ -195,6 +195,21 @@ pub fn all() -> Vec<CredentialType> {
             fields: vec![f("apiKey", "API Key", true, true, json!("")), f("url", "Base URL", false, false, json!("https://api.mistral.ai/v1"))],
         },
         CredentialType {
+            name: "azureOpenAiApi",
+            display_name: "Azure Open AI",
+            fields: vec![
+                f("apiKey", "API Key", true, true, json!("")),
+                f("resourceName", "Resource Name", false, true, json!("")),
+                f("apiVersion", "API Version", false, true, json!("2025-03-01-preview")),
+                f("endpoint", "Endpoint", false, false, json!("")),
+            ],
+        },
+        CredentialType {
+            name: "googlePalmApi",
+            display_name: "Google Gemini(PaLM) Api",
+            fields: vec![f("host", "Host", false, true, json!("https://generativelanguage.googleapis.com")), f("apiKey", "API Key", true, true, json!(""))],
+        },
+        CredentialType {
             name: "postgres",
             display_name: "Postgres",
             fields: vec![

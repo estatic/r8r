@@ -23,6 +23,8 @@ pub fn all() -> Vec<Box<dyn NodeType>> {
         Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatOpenRouter")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatGroq")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatMistralCloud")),
+        Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatGoogleGemini")),
+        Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatAzureOpenAi")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.toolCalculator")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.memoryBufferWindow")),
     ]
@@ -83,6 +85,16 @@ enum Provider {
     /// `x-api-key` + `anthropic-version`, top-level `system`, required
     /// `max_tokens`, content blocks (`tool_use`/`tool_result`).
     Anthropic,
+    /// Google's Generative Language API (what `@google/generative-ai`, under
+    /// LangChain's `ChatGoogleGenerativeAI`, calls): `POST
+    /// {host}/v1beta/models/{model}:generateContent`, `x-goog-api-key`,
+    /// `contents` with `user`/`model` roles and `parts`, a top-level
+    /// `systemInstruction`, `functionCall`/`functionResponse` parts.
+    Gemini,
+    /// Azure OpenAI: the OpenAI wire format against a deployment URL
+    /// (`{endpoint}/openai/deployments/{deployment}/chat/completions
+    /// ?api-version=...`) with an `api-key` header instead of bearer auth.
+    AzureOpenAi { api_version: String },
 }
 
 struct Model<'a> {
@@ -213,6 +225,45 @@ async fn load_model<'a>(ctx: &'a ExecCtx<'_>, item: usize) -> NodeResult<Model<'
             options,
             provider: Provider::OpenAi { organization: None },
         })
+    } else if node.node_type == format!("{LC}lmChatGoogleGemini") {
+        let (_, cred) = ctx.credentials_for(node, "googlePalmApi").await?;
+        let base_url = cred["host"].as_str().filter(|s| !s.is_empty()).unwrap_or("https://generativelanguage.googleapis.com").trim_end_matches('/').to_string();
+        // n8n's default model depends on the node version; LangChain drops
+        // the `models/` prefix and the SDK puts it back in the URL.
+        let default = if node.type_version >= 1.1 { "models/gemini-3-flash-preview" } else { "models/gemini-2.5-flash" };
+        let model = params["modelName"].as_str().filter(|s| !s.is_empty()).unwrap_or(default);
+        Ok(Model {
+            node,
+            base_url,
+            api_key: cred["apiKey"].as_str().unwrap_or("").to_string(),
+            model: model.strip_prefix("models/").unwrap_or(model).to_string(),
+            options,
+            provider: Provider::Gemini,
+        })
+    } else if node.node_type == format!("{LC}lmChatAzureOpenAi") {
+        if params["authentication"].as_str().is_some_and(|a| a != "azureOpenAiApi") {
+            return Err(NodeError::new("Azure Entra ID (OAuth2) authentication is not supported natively yet; use an API key credential"));
+        }
+        let (_, cred) = ctx.credentials_for(node, "azureOpenAiApi").await?;
+        let api_key = cred["apiKey"].as_str().unwrap_or("").to_string();
+        if api_key.is_empty() {
+            return Err(NodeError::new("API Key is missing in the selected Azure OpenAI API credential. Please configure the API Key or choose Entra ID authentication."));
+        }
+        // The deployment name is the node's `model` parameter; LangChain
+        // builds the URL from the endpoint when set, else the resource name.
+        let deployment = model_param(&params, "");
+        let root = match cred["endpoint"].as_str().map(|e| e.trim_end_matches('/')).filter(|e| !e.is_empty()) {
+            Some(endpoint) => endpoint.to_string(),
+            None => format!("https://{}.openai.azure.com", cred["resourceName"].as_str().unwrap_or("")),
+        };
+        Ok(Model {
+            node,
+            base_url: format!("{root}/openai/deployments/{deployment}"),
+            api_key,
+            model: deployment,
+            options,
+            provider: Provider::AzureOpenAi { api_version: cred["apiVersion"].as_str().filter(|s| !s.is_empty()).unwrap_or("2025-03-01-preview").to_string() },
+        })
     } else {
         Err(NodeError::new(format!("The chat model \"{}\" ({}) is not supported natively yet", node.name, node.node_type)))
     }
@@ -225,18 +276,20 @@ impl Model<'_> {
     async fn chat(&self, ctx: &ExecCtx<'_>, messages: &[Value], tools: &[Value]) -> NodeResult<Value> {
         let started = now_ms();
         let body = match &self.provider {
-            Provider::OpenAi { .. } => self.openai_body(messages, tools),
+            Provider::OpenAi { .. } | Provider::AzureOpenAi { .. } => self.openai_body(messages, tools),
             Provider::Ollama => self.ollama_body(messages, tools),
             Provider::Anthropic => self.anthropic_body(messages, tools),
+            Provider::Gemini => self.gemini_body(messages, tools),
         };
         let input = json!({"messages": messages, "options": {"model": self.model}});
         let result = self.send(ctx, &body).await;
         match result {
             Ok(resp) => {
                 let (message, usage) = match &self.provider {
-                    Provider::OpenAi { .. } => self.openai_response(&resp),
+                    Provider::OpenAi { .. } | Provider::AzureOpenAi { .. } => self.openai_response(&resp),
                     Provider::Ollama => self.ollama_response(&resp),
                     Provider::Anthropic => self.anthropic_response(&resp),
+                    Provider::Gemini => self.gemini_response(&resp),
                 };
                 let out = json!({
                     "response": {"generations": [[{"text": message["content"].as_str().unwrap_or(""), "message": message}]]},
@@ -470,11 +523,121 @@ impl Model<'_> {
         (message, usage)
     }
 
+    /// Converts the OpenAI-shaped messages into Gemini `contents`, as
+    /// LangChain's `convertBaseMessagesToContent` does: the leading system
+    /// message becomes `systemInstruction`, assistant turns are role
+    /// `model` with `functionCall` parts, and each tool reply is a `user`
+    /// turn with a `functionResponse` part named after the tool it answers
+    /// (Gemini matches calls to results by name, not id).
+    fn gemini_body(&self, messages: &[Value], tools: &[Value]) -> Value {
+        let mut system = Vec::new();
+        let mut contents = Vec::new();
+        let mut call_names: HashMap<String, String> = HashMap::new();
+        for m in messages {
+            let text = m["content"].as_str().unwrap_or("");
+            match m["role"].as_str() {
+                Some("system") => system.push(json!({"text": text})),
+                Some("user") => contents.push(json!({"role": "user", "parts": [{"text": text}]})),
+                Some("assistant") => {
+                    let mut parts = Vec::new();
+                    if !text.is_empty() {
+                        parts.push(json!({"text": text}));
+                    }
+                    for call in m["tool_calls"].as_array().into_iter().flatten() {
+                        let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
+                        if let Some(id) = call["id"].as_str() {
+                            call_names.insert(id.to_string(), name.to_string());
+                        }
+                        let args = call.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("{}");
+                        let mut part = json!({"functionCall": {"name": name, "args": serde_json::from_str::<Value>(args).unwrap_or(json!({}))}});
+                        // Gemini 3 rejects a replayed function call without
+                        // the thought signature it came with.
+                        if let Some(sig) = call["thought_signature"].as_str() {
+                            part["thoughtSignature"] = json!(sig);
+                        } else if self.model.contains("gemini-3") {
+                            part["thoughtSignature"] = json!(GEMINI_DUMMY_SIGNATURE);
+                        }
+                        parts.push(part);
+                    }
+                    contents.push(json!({"role": "model", "parts": parts}));
+                }
+                Some("tool") => {
+                    let id = m["tool_call_id"].as_str().unwrap_or("");
+                    let name = m["name"].as_str().map(String::from).or_else(|| call_names.get(id).cloned()).unwrap_or_default();
+                    contents.push(json!({"role": "user", "parts": [{"functionResponse": {"name": name, "response": {"result": text}}}]}));
+                }
+                _ => {}
+            }
+        }
+        let opt = |k: &str| self.options.get(k).cloned();
+        let mut config = Map::new();
+        for key in ["maxOutputTokens", "temperature", "topP", "topK"] {
+            if let Some(v) = opt(key) {
+                config.insert(key.to_string(), v);
+            }
+        }
+        let mut body = json!({"contents": contents, "generationConfig": config});
+        if !system.is_empty() {
+            body["systemInstruction"] = json!({"role": "system", "parts": system});
+        }
+        let safety: Vec<Value> = match self.options.get("safetySettings").map(|s| &s["values"]) {
+            Some(Value::Array(v)) => v.clone(),
+            Some(v @ Value::Object(_)) => vec![v.clone()],
+            _ => vec![],
+        };
+        if !safety.is_empty() {
+            body["safetySettings"] = Value::Array(safety);
+        }
+        if !tools.is_empty() {
+            let declarations: Vec<Value> = tools
+                .iter()
+                .map(|t| json!({"name": t["function"]["name"], "description": t["function"]["description"], "parameters": gemini_schema(&t["function"]["parameters"])}))
+                .collect();
+            body["tools"] = json!([{"functionDeclarations": declarations}]);
+        }
+        body
+    }
+
+    /// Normalises the first candidate into the OpenAI-shaped message:
+    /// non-thought `text` parts as `content`, `functionCall` parts as
+    /// `tool_calls` (with a generated id when Gemini sends none, and the
+    /// part's thought signature kept for the replay).
+    fn gemini_response(&self, resp: &Value) -> (Value, Value) {
+        let mut text = String::new();
+        let mut tool_calls = Vec::new();
+        for (i, part) in resp.pointer("/candidates/0/content/parts").and_then(Value::as_array).into_iter().flatten().enumerate() {
+            if let Some(call) = part.get("functionCall") {
+                let id = call["id"].as_str().map(String::from).unwrap_or_else(|| format!("call_{}_{i}", uuid::Uuid::new_v4().simple()));
+                let arguments = serde_json::to_string(call.get("args").unwrap_or(&json!({}))).unwrap_or_else(|_| "{}".to_string());
+                let mut tc = json!({"id": id, "type": "function", "function": {"name": call["name"], "arguments": arguments}});
+                if let Some(sig) = part["thoughtSignature"].as_str() {
+                    tc["thought_signature"] = json!(sig);
+                }
+                tool_calls.push(tc);
+            } else if part["thought"].as_bool() != Some(true) {
+                text.push_str(part["text"].as_str().unwrap_or(""));
+            }
+        }
+        let mut message = json!({"role": "assistant", "content": text});
+        if !tool_calls.is_empty() {
+            message["tool_calls"] = Value::Array(tool_calls);
+        }
+        let usage = &resp["usageMetadata"];
+        let usage = json!({
+            "completionTokens": usage["candidatesTokenCount"].as_i64().unwrap_or(0),
+            "promptTokens": usage["promptTokenCount"].as_i64().unwrap_or(0),
+            "totalTokens": usage["totalTokenCount"].as_i64().unwrap_or(0),
+        });
+        (message, usage)
+    }
+
     fn endpoint(&self) -> String {
-        match self.provider {
+        match &self.provider {
             Provider::OpenAi { .. } => format!("{}/chat/completions", self.base_url),
             Provider::Ollama => format!("{}/api/chat", self.base_url),
             Provider::Anthropic => format!("{}/v1/messages", self.base_url),
+            Provider::Gemini => format!("{}/v1beta/models/{}:generateContent", self.base_url, self.model),
+            Provider::AzureOpenAi { api_version } => format!("{}/chat/completions?api-version={api_version}", self.base_url),
         }
     }
 
@@ -482,14 +645,14 @@ impl Model<'_> {
     /// `NodeApiError` wrap of the underlying fetch failure.
     fn unreachable_message(&self, err: reqwest::Error) -> String {
         match self.provider {
-            Provider::OpenAi { .. } | Provider::Anthropic => format!("The model provider could not be reached: {}", err.without_url()),
+            Provider::OpenAi { .. } | Provider::Anthropic | Provider::Gemini | Provider::AzureOpenAi { .. } => format!("The model provider could not be reached: {}", err.without_url()),
             Provider::Ollama => format!("Ollama could not be reached at {}: {}", self.base_url, err.without_url()),
         }
     }
 
     fn error_message(&self, status: reqwest::StatusCode, json: &Value) -> String {
         match self.provider {
-            Provider::OpenAi { .. } | Provider::Anthropic => json.pointer("/error/message").and_then(Value::as_str).map(String::from).unwrap_or_else(|| format!("The model provider answered {status}")),
+            Provider::OpenAi { .. } | Provider::Anthropic | Provider::Gemini | Provider::AzureOpenAi { .. } => json.pointer("/error/message").and_then(Value::as_str).map(String::from).unwrap_or_else(|| format!("The model provider answered {status}")),
             Provider::Ollama => json["error"].as_str().map(String::from).unwrap_or_else(|| format!("Ollama answered {status}")),
         }
     }
@@ -511,6 +674,12 @@ impl Model<'_> {
             Provider::Anthropic => {
                 req = req.header("x-api-key", &self.api_key).header("anthropic-version", "2023-06-01");
             }
+            Provider::AzureOpenAi { .. } => {
+                req = req.header("api-key", &self.api_key);
+            }
+            Provider::Gemini => {
+                req = req.header("x-goog-api-key", &self.api_key).header("x-goog-api-client", "genai-js/0.24.0");
+            }
         }
         req = req.json(body);
         let timeout = self.options.get("timeout").and_then(Value::as_u64).unwrap_or(60_000);
@@ -526,6 +695,21 @@ impl Model<'_> {
             return Err(NodeError::new("The model provider returned an invalid response"));
         }
         Ok(json)
+    }
+}
+
+/// The placeholder thought signature LangChain sends for a Gemini 3
+/// function call it has no real signature for (`@langchain/google-genai`).
+const GEMINI_DUMMY_SIGNATURE: &str = "ErYCCrMCAdHtim9kOoOkrPiCNVsmlpMIKd7ZMxgiFbVQOkgp7nlLcDMzVsZwIzvuT7nQROivoXA72ccC2lSDvR0Gh7dkWaGuj7ctv6t7ZceHnecx0QYa+ix8tYpRfjhyWozQ49lWiws6+YGjCt10KRTyWsZ2h6O7iHTYJwKIRwGUHRKy/qK/6kFxJm5ML00gLq4D8s5Z6DBpp2ZlR+uF4G8jJgeWQgyHWVdx2wGYElaceVAc66tZdPQRdOHpWtgYSI1YdaXgVI8KHY3/EfNc2YqqMIulvkDBAnuMhkAjV9xmBa54Tq+ih3Im4+r3DzqhGqYdsSkhS0kZMwte4Hjs65dZzCw9lANxIqYi1DJ639WNPYihp/DCJCos7o+/EeSPJaio5sgWDyUnMGkY1atsJZ+m7pj7DD5tvQ==";
+
+/// Gemini's function parameters accept only a subset of JSON Schema:
+/// strips `additionalProperties` (everywhere) and `$schema`, like
+/// LangChain's `removeAdditionalProperties`.
+fn gemini_schema(schema: &Value) -> Value {
+    match schema {
+        Value::Object(o) => Value::Object(o.iter().filter(|(k, _)| *k != "additionalProperties" && *k != "$schema").map(|(k, v)| (k.clone(), gemini_schema(v))).collect()),
+        Value::Array(a) => Value::Array(a.iter().map(gemini_schema).collect()),
+        v => v.clone(),
     }
 }
 

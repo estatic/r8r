@@ -376,6 +376,10 @@ async fn bearer_only(w: &mut R8rWorld, token: String, p: String) {
 /// usage of 10 prompt + 5 completion tokens.
 #[given(expr = "a mock OpenAI API that replies in order:")]
 async fn openai(w: &mut R8rWorld, step: &Step) {
+    mount_openai(w, "/v1/chat/completions", step).await;
+}
+
+async fn mount_openai(w: &mut R8rWorld, at: &str, step: &Step) {
     let replies = parse_strict(docstring(step), "assistant messages");
     let replies = replies.as_array().expect("array of messages").clone();
     let server = mock(w).await;
@@ -391,7 +395,7 @@ async fn openai(w: &mut R8rWorld, step: &Step) {
             "usage": {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15}
         });
         let m = Mock::given(method("POST"))
-            .and(path("/v1/chat/completions"))
+            .and(path(at))
             .respond_with(ResponseTemplate::new(200).set_body_json(body));
         let m = if i + 1 < count { m.up_to_n_times(1) } else { m };
         m.with_priority((i + 1) as u8).mount(server).await;
@@ -419,6 +423,44 @@ async fn openai_tool(w: &mut R8rWorld, n: usize, tool: String) {
     let all = requests_to(w, "/v1/chat/completions").await;
     let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} chat requests", all.len()));
     let body: Value = serde_json::from_slice(&r.body).unwrap();
+    let found = body["tools"].as_array().into_iter().flatten().any(|t| t["function"]["name"] == tool.as_str());
+    assert!(found, "tool {tool} not offered: {}", pretty(&body["tools"]));
+}
+
+// ---- Azure OpenAI (OpenAI shape on a deployment path) ---------------------
+
+fn azure_path(deployment: &str) -> String {
+    format!("/openai/deployments/{deployment}/chat/completions")
+}
+
+/// Like `a mock OpenAI API that replies in order:`, served on
+/// `POST /openai/deployments/<deployment>/chat/completions`.
+#[given(expr = "a mock Azure OpenAI deployment {string} that replies in order:")]
+async fn azure_openai(w: &mut R8rWorld, deployment: String, step: &Step) {
+    mount_openai(w, &azure_path(&deployment), step).await;
+}
+
+async fn azure_request(w: &mut R8rWorld, deployment: &str, n: usize) -> Value {
+    let all = requests_to(w, &azure_path(deployment)).await;
+    let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} chat requests", all.len()));
+    serde_json::from_slice(&r.body).unwrap()
+}
+
+#[then(regex = r#"^the mock Azure OpenAI deployment "([^"]*)" received (\d+) chat requests?$"#)]
+async fn azure_count(w: &mut R8rWorld, deployment: String, n: usize) {
+    assert_eq!(requests_to(w, &azure_path(&deployment)).await.len(), n);
+}
+
+#[then(expr = "azure chat request {int} to {string} contains a {string} message containing {string}")]
+async fn azure_message(w: &mut R8rWorld, n: usize, deployment: String, role: String, needle: String) {
+    let body = azure_request(w, &deployment, n).await;
+    let found = body["messages"].as_array().into_iter().flatten().any(|m| m["role"] == role.as_str() && serde_json::to_string(&m["content"]).unwrap_or_default().contains(&needle));
+    assert!(found, "no {role} message containing {needle:?} in: {}", pretty(&body["messages"]));
+}
+
+#[then(expr = "azure chat request {int} to {string} offers the tool {string}")]
+async fn azure_tool(w: &mut R8rWorld, n: usize, deployment: String, tool: String) {
+    let body = azure_request(w, &deployment, n).await;
     let found = body["tools"].as_array().into_iter().flatten().any(|t| t["function"]["name"] == tool.as_str());
     assert!(found, "tool {tool} not offered: {}", pretty(&body["tools"]));
 }
@@ -536,3 +578,65 @@ async fn anthropic_system(w: &mut R8rWorld, n: usize, needle: String) {
     assert_eq!(body["system"].as_str().unwrap_or(""), needle, "body: {}", pretty(&body));
 }
 
+
+// ---- Google Gemini (generativelanguage /v1beta) -----------------------------
+
+fn gemini_path(model: &str) -> String {
+    format!("/v1beta/models/{model}:generateContent")
+}
+
+/// Doc string: a JSON array of Gemini candidate contents (each with a
+/// `parts` array), returned in order by `POST
+/// /v1beta/models/<model>:generateContent` (the last one repeats). Each
+/// reply reports usage of 10 prompt + 5 candidate tokens.
+#[given(expr = "a mock Gemini API for the model {string} that replies in order:")]
+async fn gemini(w: &mut R8rWorld, model: String, step: &Step) {
+    let replies = parse_strict(docstring(step), "candidate contents");
+    let replies = replies.as_array().expect("array of contents").clone();
+    let server = mock(w).await;
+    let count = replies.len();
+    for (i, reply) in replies.into_iter().enumerate() {
+        let body = json!({
+            "candidates": [{
+                "content": {"role": "model", "parts": reply.get("parts").cloned().unwrap_or(json!([]))},
+                "finishReason": "STOP",
+                "index": 0,
+            }],
+            "usageMetadata": {"promptTokenCount": 10, "candidatesTokenCount": 5, "totalTokenCount": 15},
+            "modelVersion": model,
+        });
+        let m = Mock::given(method("POST")).and(path(gemini_path(&model))).respond_with(ResponseTemplate::new(200).set_body_json(body));
+        let m = if i + 1 < count { m.up_to_n_times(1) } else { m };
+        m.with_priority((i + 1) as u8).mount(server).await;
+    }
+}
+
+async fn gemini_request(w: &mut R8rWorld, model: &str, n: usize) -> Value {
+    let all = requests_to(w, &gemini_path(model)).await;
+    let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} Gemini requests", all.len()));
+    serde_json::from_slice(&r.body).unwrap()
+}
+
+#[then(regex = r#"^the mock Gemini API received (\d+) requests? for the model "([^"]*)"$"#)]
+async fn gemini_count(w: &mut R8rWorld, n: usize, model: String) {
+    assert_eq!(requests_to(w, &gemini_path(&model)).await.len(), n);
+}
+
+#[then(expr = "gemini request {int} for the model {string} offers the tool {string}")]
+async fn gemini_tool(w: &mut R8rWorld, n: usize, model: String, tool: String) {
+    let body = gemini_request(w, &model, n).await;
+    let found = body["tools"].as_array().into_iter().flatten().flat_map(|t| t["functionDeclarations"].as_array().into_iter().flatten()).any(|d| d["name"] == tool.as_str());
+    assert!(found, "tool {tool} not offered: {}", pretty(&body["tools"]));
+}
+
+#[then(expr = "gemini request {int} for the model {string} has a {string} part containing {string}")]
+async fn gemini_part(w: &mut R8rWorld, n: usize, model: String, kind: String, needle: String) {
+    let body = gemini_request(w, &model, n).await;
+    let found = body["contents"]
+        .as_array()
+        .into_iter()
+        .flatten()
+        .flat_map(|c| c["parts"].as_array().into_iter().flatten())
+        .any(|p| p.get(&kind).is_some_and(|v| serde_json::to_string(v).unwrap_or_default().contains(&needle)));
+    assert!(found, "no {kind} part containing {needle:?} in: {}", pretty(&body["contents"]));
+}
