@@ -30,3 +30,5 @@ Operations:
 ## [2026-09-27] compact | auto compaction (summary text unavailable)
 
 ## [2026-10-07] query | Google Gemini, Azure OpenAI and AWS Bedrock chat models (plan 2.3); 10-ai BDD 46/46 on r8r; new features green on n8n 2.35.7
+
+## [2026-10-07] query | AI tools (plan 2.4): $fromAI, native nodes as tools, Code Tool, Workflow Tool; NODES_EXCLUDE covers tool variants; full suite 958/958; new features green on n8n 2.35.7

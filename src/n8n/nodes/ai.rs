@@ -28,6 +28,7 @@ pub fn all() -> Vec<Box<dyn NodeType>> {
         Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatAwsBedrock")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.toolCalculator")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.toolCode")),
+        Box::new(SubNode("@n8n/n8n-nodes-langchain.toolWorkflow")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.memoryBufferWindow")),
     ]
 }
@@ -48,6 +49,11 @@ impl NodeType for SubNode {
 // ---- run data for sub-nodes ----------------------------------------------------
 
 fn record(ctx: &ExecCtx<'_>, sub: &str, kind: &str, input: Value, output: Result<Value, &NodeError>, started: i64) {
+    record_items(ctx, sub, kind, input, output.map(|o| vec![o]), started);
+}
+
+/// Like `record`, with several output items.
+fn record_items(ctx: &ExecCtx<'_>, sub: &str, kind: &str, input: Value, output: Result<Vec<Value>, &NodeError>, started: i64) {
     let mut task = json!({
         "startTime": started,
         "executionIndex": 0,
@@ -58,7 +64,7 @@ fn record(ctx: &ExecCtx<'_>, sub: &str, kind: &str, input: Value, output: Result
         "inputOverride": {kind: [[{"json": input}]]},
     });
     match output {
-        Ok(out) => task["data"] = json!({kind: [[{"json": out}]]}),
+        Ok(out) => task["data"] = json!({kind: [out.into_iter().map(|o| json!({"json": o})).collect::<Vec<_>>()]}),
         // n8n records a sub-node's input as its data first and only
         // replaces it on success, so a failed run keeps its input there.
         Err(e) => {
@@ -947,6 +953,10 @@ enum ToolKind {
     /// The Code Tool: JavaScript run with `query` = the model's input, a
     /// single string unless an input schema is given.
     Code { description: String, code: String, schema: Option<Value> },
+    /// The Workflow Tool: runs a sub-workflow with the model's input. With
+    /// workflow inputs mapped through `$fromAI` it takes those arguments,
+    /// otherwise a single string.
+    Workflow { description: String, workflow_id: String, args: Option<Vec<FromAi>> },
 }
 
 struct Tool<'a> {
@@ -985,6 +995,28 @@ fn load_tools<'a>(ctx: &'a ExecCtx<'_>, item: usize) -> NodeResult<Vec<Tool<'a>>
                 return Err(NodeError::new(format!("The Code Tool \"{}\" uses Python, which is not supported natively yet", node.name)));
             }
             ToolKind::Code { description: p["description"].as_str().unwrap_or("").to_string(), code: node.parameters["jsCode"].as_str().unwrap_or("").to_string(), schema: code_tool_schema(node, &p)? }
+        } else if node.node_type == format!("{LC}toolWorkflow") {
+            let p = &node.parameters;
+            if node.type_version <= 2.1 {
+                name = ctx.resolve_value(&p["name"], item)?.as_str().unwrap_or("").to_string();
+            }
+            if node.type_version < 2.0 {
+                return Err(NodeError::new(format!("The Workflow Tool \"{}\" is version {}; only version 2 and later are supported natively", node.name, node.type_version)));
+            }
+            if p["source"].as_str().unwrap_or("database") != "database" {
+                return Err(NodeError::new(format!("The Workflow Tool \"{}\" defines its workflow inline, which is not supported natively yet; pick a saved workflow", node.name)));
+            }
+            let workflow_id = match ctx.resolve_value(&p["workflowId"], item)? {
+                Value::Object(o) => o.get("value").map(|v| v.as_str().map(String::from).unwrap_or_else(|| v.to_string())).unwrap_or_default(),
+                Value::String(s) => s,
+                _ => String::new(),
+            };
+            // n8n's WorkflowToolService: a structured tool only when the
+            // workflow inputs have a schema and the parameters use $fromAI.
+            let use_schema = p.pointer("/workflowInputs/schema").and_then(Value::as_array).is_some_and(|a| !a.is_empty());
+            let args = if use_schema { Some(tool_arguments(node)?).filter(|a: &Vec<FromAi>| !a.is_empty()) } else { None };
+            let description = ctx.resolve_value(&p["description"], item)?.as_str().unwrap_or("").to_string();
+            ToolKind::Workflow { description, workflow_id, args }
         } else if let Some(base) = registry().tool_base(&node.node_type).filter(|_| !registry().is_excluded(&node.node_type, &ctx.config().nodes_exclude)) {
             ToolKind::Node { base, description: tool_description(ctx, node, base, item)?, args: tool_arguments(node)? }
         } else {
@@ -1217,6 +1249,40 @@ fn parse_from_ai_args(args: &str) -> Result<FromAi, String> {
     Ok(FromAi { key: clean.first().cloned().unwrap_or_default(), description: clean.get(1).cloned(), kind, default })
 }
 
+/// n8n's `generateZodSchema` for each `$fromAI` argument, as JSON schema;
+/// every key required.
+fn from_ai_schema(args: &[FromAi]) -> Value {
+    let mut props = Map::new();
+    for a in args {
+        let mut prop = match a.kind.as_str() {
+            "json" => json!({"anyOf": [{"type": "object", "minProperties": 1, "additionalProperties": true}, {"type": "array", "minItems": 1}]}),
+            k => json!({"type": k}),
+        };
+        if let Some(d) = a.description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+            prop["description"] = json!(d);
+        }
+        if let Some(d) = &a.default {
+            prop["default"] = d.clone();
+        }
+        props.insert(a.key.clone(), prop);
+    }
+    let required: Vec<&String> = args.iter().map(|a| &a.key).collect();
+    json!({"type": "object", "properties": props, "required": required, "additionalProperties": false})
+}
+
+/// A context for running `node` as a tool: its one input item is `json`
+/// (what `$json` and `$fromAI` read), the rest as in the agent's run.
+fn tool_ctx<'a>(ctx: &ExecCtx<'a>, node: &'a Node, json: Map<String, Value>) -> ExecCtx<'a> {
+    let item = Item::new(json);
+    let mut data = (ctx.expr_data)();
+    data["input"] = json!([item]);
+    data["inputs"] = json!([[item]]);
+    data["source"] = json!([null]);
+    data["node"] = json!({"name": node.name, "type": node.node_type, "parameters": node.parameters});
+    let run_index = ctx.run.lock().unwrap().sub_runs.iter().filter(|(n, _)| *n == node.name).count();
+    ExecCtx::new(node, ctx.workflow, vec![vec![item]], run_index, ctx.mode, ctx.execution_id.clone(), ctx.services, ctx.options, ctx.run.clone(), Box::new(move || data.clone()))
+}
+
 impl Tool<'_> {
     fn schema(&self) -> Value {
         let (description, parameters) = match &self.kind {
@@ -1224,25 +1290,9 @@ impl Tool<'_> {
                 "Useful for getting the result of a math expression. The input to this tool should be a valid mathematical expression that could be executed by a simple calculator.".to_string(),
                 json!({"type": "object", "properties": {"input": {"type": "string"}}, "required": ["input"], "additionalProperties": false}),
             ),
-            ToolKind::Node { description, args, .. } => {
-                // n8n's `generateZodSchema`, as JSON schema; every key required.
-                let mut props = Map::new();
-                for a in args {
-                    let mut prop = match a.kind.as_str() {
-                        "json" => json!({"anyOf": [{"type": "object", "minProperties": 1, "additionalProperties": true}, {"type": "array", "minItems": 1}]}),
-                        k => json!({"type": k}),
-                    };
-                    if let Some(d) = a.description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
-                        prop["description"] = json!(d);
-                    }
-                    if let Some(d) = &a.default {
-                        prop["default"] = d.clone();
-                    }
-                    props.insert(a.key.clone(), prop);
-                }
-                let required: Vec<&String> = args.iter().map(|a| &a.key).collect();
-                (description.clone(), json!({"type": "object", "properties": props, "required": required, "additionalProperties": false}))
-            }
+            ToolKind::Node { description, args, .. } => (description.clone(), from_ai_schema(args)),
+            ToolKind::Workflow { description, args: Some(args), .. } => (description.clone(), from_ai_schema(args)),
+            ToolKind::Workflow { description, args: None, .. } => (description.clone(), json!({"type": "object", "properties": {"input": {"type": "string"}}, "additionalProperties": false})),
             // Without a schema, LangChain's `DynamicTool`: one optional string.
             ToolKind::Code { description, schema, .. } => (
                 description.clone(),
@@ -1250,6 +1300,40 @@ impl Tool<'_> {
             ),
         };
         json!({"type": "function", "function": {"name": self.name, "description": description, "parameters": parameters}})
+    }
+
+    /// Runs the Workflow Tool's sub-workflow on one item: the tool input as
+    /// `query` plus the workflow inputs (resolved against it, so `$fromAI`
+    /// reads the model's arguments), minus inputs the schema removed. Returns
+    /// the last node's items (from v2.1; the first item's JSON before).
+    async fn run_workflow(&self, ctx: &ExecCtx<'_>, workflow_id: &str, query: &Value, use_schema: bool) -> NodeResult<Vec<Value>> {
+        let runner = ctx.services.sub_workflows.clone().ok_or_else(|| NodeError::new("Sub-workflows need a running r8r server"))?;
+        let p = &self.node.parameters;
+        let mut json = Map::from_iter([("query".to_string(), query.clone())]);
+        if use_schema {
+            let sub = tool_ctx(ctx, self.node, json.clone());
+            if let Value::Object(values) = sub.resolve_value(&p.pointer("/workflowInputs/value").cloned().unwrap_or(json!({})), 0)? {
+                json.extend(values);
+            }
+            for field in p.pointer("/workflowInputs/schema").and_then(Value::as_array).into_iter().flatten() {
+                if field["removed"].as_bool() == Some(true) {
+                    if let Some(name) = field["displayName"].as_str() {
+                        json.remove(name);
+                    }
+                }
+            }
+        } else if let Value::Object(o) = query {
+            json = o.clone();
+        }
+        let items = runner.run_sub_workflow(ctx.workflow.id.as_deref(), workflow_id, vec![Item::new(json)], true).await?;
+        let mut out: Vec<Value> = items.into_iter().map(|i| Value::Object(i.json)).collect();
+        if self.node.type_version <= 2.0 {
+            out.truncate(1);
+        }
+        if out.is_empty() {
+            return Err(NodeError::new("There was an error: \"The workflow did not return a response\""));
+        }
+        Ok(out)
     }
 
     async fn call(&self, ctx: &ExecCtx<'_>, arguments: &str) -> NodeResult<String> {
@@ -1294,30 +1378,33 @@ impl Tool<'_> {
                     }
                 }
             }
+            ToolKind::Workflow { workflow_id, args: schema, .. } => {
+                let args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({"input": arguments}));
+                let query = if schema.is_some() { args } else { args.get("input").cloned().unwrap_or(Value::Null) };
+                let input = json!({"query": query});
+                match self.run_workflow(ctx, workflow_id, &query, schema.is_some()).await {
+                    Ok(items) => {
+                        // n8n's handleToolResponse: the items' JSON (v2.0: the
+                        // first item's), pretty-printed.
+                        let response = if self.node.type_version <= 2.0 { serde_json::to_string_pretty(&items[0]) } else { serde_json::to_string_pretty(&items) }.unwrap_or_default();
+                        record_items(ctx, &self.node.name, "ai_tool", input, Ok(items), started);
+                        Ok(response)
+                    }
+                    // The error goes to the model, and is logged as the
+                    // tool's (successful) output, as n8n does.
+                    Err(e) => {
+                        let response = format!("There was an error: \"{}\"", e.message);
+                        record(ctx, &self.node.name, "ai_tool", input, Ok(json!({"error": response})), started);
+                        Ok(response)
+                    }
+                }
+            }
             ToolKind::Node { base, .. } => {
                 let args = match serde_json::from_str::<Value>(arguments) {
                     Ok(Value::Object(m)) => m,
                     _ => Map::new(),
                 };
-                let item = Item::new(args.clone());
-                let mut data = (ctx.expr_data)();
-                data["input"] = json!([item]);
-                data["inputs"] = json!([[item]]);
-                data["source"] = json!([null]);
-                data["node"] = json!({"name": self.node.name, "type": self.node.node_type, "parameters": self.node.parameters});
-                let run_index = ctx.run.lock().unwrap().sub_runs.iter().filter(|(n, _)| *n == self.node.name).count();
-                let mut sub = ExecCtx::new(
-                    self.node,
-                    ctx.workflow,
-                    vec![vec![item]],
-                    run_index,
-                    ctx.mode,
-                    ctx.execution_id.clone(),
-                    ctx.services,
-                    ctx.options,
-                    ctx.run.clone(),
-                    Box::new(move || data.clone()),
-                );
+                let mut sub = tool_ctx(ctx, self.node, args.clone());
                 let node_type = registry().get(base).expect("tool bases are registered");
                 match node_type.execute(&mut sub).await {
                     Ok(outputs) => {

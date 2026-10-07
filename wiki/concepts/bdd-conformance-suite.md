@@ -83,6 +83,13 @@ mock provider (46 scenarios). The Bedrock scenarios recompute the SigV4
 signature from the received request, so they check that a request is
 validly signed, not just that it carries a signature; real n8n's AWS SDK passes the same check.
 
+Plan task 2.4 (2026-10-07) added AI tools: any native `usableAsTool` node as
+a `<type>Tool` sub-node driven by `$fromAI`, the Code Tool and the Workflow
+Tool (`10-ai/node_tools`, `code_tool`, `workflow_tool`). Two n8n behaviours
+the scenarios pin down: a failing node-as-tool gives the model an empty
+result and the agent carries on, and `NODES_EXCLUDE` removes a node's tool
+variant with it. Full default suite at that point: 958/958.
+
 Queue mode (`r8r worker`, `r8r webhook`; Redis or PostgreSQL job queue
 with leases and heartbeats) and the Python runner then made every opt-in
 scenario pass too: 397/397 with `@requires-*` and `@slow`. Of the `@perf`

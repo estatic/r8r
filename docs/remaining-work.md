@@ -168,8 +168,10 @@ Missing:
   and streaming.
 - Embeddings, vector stores (in-memory, PGVector, Qdrant, Pinecone,
   Supabase), document loaders, text splitters, output parsers.
-- Tools: Workflow Tool, HTTP Request Tool, Code Tool, any node as a tool via
-  `$fromAI`.
+- Tools: done for native nodes as tools (`<type>Tool`, e.g. HTTP Request
+  Tool) with `$fromAI`, the JavaScript Code Tool and the Workflow Tool v2
+  (plan 2.4); missing: Python Code Tool, Workflow Tool v1 / inline
+  workflow source, the legacy `toolHttpRequest` node.
 - Memory backed by Postgres/Redis (current memory is in-process only).
 - MCP Client Tool and MCP Server Trigger (spec suggests the `rmcp` crate).
 
