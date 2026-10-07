@@ -2,6 +2,7 @@
 
 mod ai;
 mod ai_chains;
+pub mod doc_loader;
 pub mod text_split;
 mod aws_sigv4;
 mod airtable;
