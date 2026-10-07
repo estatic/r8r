@@ -27,6 +27,7 @@ pub fn all() -> Vec<Box<dyn NodeType>> {
         Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatAzureOpenAi")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.lmChatAwsBedrock")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.toolCalculator")),
+        Box::new(SubNode("@n8n/n8n-nodes-langchain.toolCode")),
         Box::new(SubNode("@n8n/n8n-nodes-langchain.memoryBufferWindow")),
     ]
 }
@@ -943,11 +944,15 @@ enum ToolKind {
     Calculator,
     /// Runs `base` with the model's arguments as its one input item.
     Node { base: &'static str, description: String, args: Vec<FromAi> },
+    /// The Code Tool: JavaScript run with `query` = the model's input, a
+    /// single string unless an input schema is given.
+    Code { description: String, code: String, schema: Option<Value> },
 }
 
 struct Tool<'a> {
     node: &'a Node,
-    /// n8n's `nodeNameToToolName`: the node name, other characters as `_`.
+    /// n8n's `nodeNameToToolName`: the node name, other characters as `_`
+    /// (a Code Tool before v1.2 names itself).
     name: String,
     kind: ToolKind,
 }
@@ -968,14 +973,24 @@ fn load_tools<'a>(ctx: &'a ExecCtx<'_>, item: usize) -> NodeResult<Vec<Tool<'a>>
         if node.disabled {
             continue;
         }
+        let mut name = tool_name(node);
         let kind = if node.node_type == format!("{LC}toolCalculator") {
             ToolKind::Calculator
-        } else if let Some(base) = registry().tool_base(&node.node_type) {
+        } else if node.node_type == format!("{LC}toolCode") {
+            let p = ctx.resolve_value(&node.parameters, item)?;
+            if node.type_version <= 1.1 {
+                name = p["name"].as_str().unwrap_or("").to_string();
+            }
+            if p["language"].as_str().unwrap_or("javaScript") != "javaScript" {
+                return Err(NodeError::new(format!("The Code Tool \"{}\" uses Python, which is not supported natively yet", node.name)));
+            }
+            ToolKind::Code { description: p["description"].as_str().unwrap_or("").to_string(), code: node.parameters["jsCode"].as_str().unwrap_or("").to_string(), schema: code_tool_schema(node, &p)? }
+        } else if let Some(base) = registry().tool_base(&node.node_type).filter(|_| !registry().is_excluded(&node.node_type, &ctx.config().nodes_exclude)) {
             ToolKind::Node { base, description: tool_description(ctx, node, base, item)?, args: tool_arguments(node)? }
         } else {
             return Err(NodeError::new(format!("The tool \"{}\" ({}) is not supported natively yet", node.name, node.node_type)));
         };
-        tools.push(Tool { node, name: tool_name(node), kind });
+        tools.push(Tool { node, name, kind });
     }
     Ok(tools)
 }
@@ -999,6 +1014,60 @@ fn tool_description(ctx: &ExecCtx<'_>, node: &Node, base: &str, item: usize) -> 
             (Some(resource), Some(operation)) => Ok(format!("{operation} {resource} in {display}")),
             _ => Ok(fallback.to_string()),
         },
+    }
+}
+
+/// A Code Tool's input schema when "Specify Input Schema" is on: from a
+/// JSON example (all fields required from v1.3, as n8n) or given as JSON
+/// Schema; objects get `additionalProperties: false` like LangChain's zod
+/// round trip.
+fn code_tool_schema(node: &Node, p: &Value) -> NodeResult<Option<Value>> {
+    if p["specifyInputSchema"].as_bool() != Some(true) {
+        return Ok(None);
+    }
+    let bad = |e: String| NodeError::new(format!("Error during parsing of JSON Schema. \n {e}"));
+    let mut schema = if p["schemaType"].as_str() == Some("manual") {
+        serde_json::from_str::<Value>(p["inputSchema"].as_str().unwrap_or("")).map_err(|e| bad(e.to_string()))?
+    } else {
+        let example: Value = serde_json::from_str(p["jsonSchemaExample"].as_str().unwrap_or("")).map_err(|e| bad(e.to_string()))?;
+        schema_from_example(&example, node.type_version >= 1.3)
+    };
+    close_objects(&mut schema);
+    if let Some(o) = schema.as_object_mut() {
+        o.remove("$schema");
+    }
+    Ok(Some(schema))
+}
+
+/// The `generate-schema` package's `json()`, as n8n uses it.
+fn schema_from_example(v: &Value, all_required: bool) -> Value {
+    match v {
+        Value::Object(o) => {
+            let props: Map<String, Value> = o.iter().map(|(k, v)| (k.clone(), schema_from_example(v, all_required))).collect();
+            let mut s = json!({"type": "object", "properties": props});
+            if all_required && !o.is_empty() {
+                s["required"] = json!(o.keys().collect::<Vec<_>>());
+            }
+            s
+        }
+        Value::Array(a) => json!({"type": "array", "items": a.first().map(|x| schema_from_example(x, all_required)).unwrap_or(json!({}))}),
+        Value::String(_) => json!({"type": "string"}),
+        Value::Number(_) => json!({"type": "number"}),
+        Value::Bool(_) => json!({"type": "boolean"}),
+        Value::Null => json!({"type": "null"}),
+    }
+}
+
+fn close_objects(s: &mut Value) {
+    if let Some(o) = s.as_object_mut() {
+        if o.get("type").and_then(Value::as_str) == Some("object") && !o.contains_key("additionalProperties") {
+            o.insert("additionalProperties".into(), json!(false));
+        }
+        for v in o.values_mut() {
+            close_objects(v);
+        }
+    } else if let Some(a) = s.as_array_mut() {
+        a.iter_mut().for_each(close_objects);
     }
 }
 
@@ -1174,6 +1243,11 @@ impl Tool<'_> {
                 let required: Vec<&String> = args.iter().map(|a| &a.key).collect();
                 (description.clone(), json!({"type": "object", "properties": props, "required": required, "additionalProperties": false}))
             }
+            // Without a schema, LangChain's `DynamicTool`: one optional string.
+            ToolKind::Code { description, schema, .. } => (
+                description.clone(),
+                schema.clone().unwrap_or_else(|| json!({"type": "object", "properties": {"input": {"type": "string"}}, "additionalProperties": false})),
+            ),
         };
         json!({"type": "function", "function": {"name": self.name, "description": description, "parameters": parameters}})
     }
@@ -1190,6 +1264,35 @@ impl Tool<'_> {
                 };
                 record(ctx, &self.node.name, "ai_tool", json!({"input": input}), Ok(json!({"response": result})), started);
                 Ok(result)
+            }
+            ToolKind::Code { code, schema, .. } => {
+                let args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({"input": arguments}));
+                let query = if schema.is_some() { args } else { args.get("input").cloned().unwrap_or(Value::Null) };
+                // n8n's Code Tool handler: numbers become strings, anything
+                // else that isn't a string is an error the model is told about.
+                let outcome = match super::code::run_js_tool(ctx, code, &query) {
+                    Ok(Some(Value::String(s))) => Ok(s),
+                    Ok(Some(Value::Number(n))) => Ok(n.to_string()),
+                    Ok(other) => {
+                        let kind = match other {
+                            None | Some(Value::Null) => "undefined",
+                            Some(Value::Bool(_)) => "boolean",
+                            _ => "object",
+                        };
+                        Err(NodeError::new("Wrong output type returned").describe(format!("The response property should be a string, but it is an {kind}")))
+                    }
+                    Err(e) => Err(e),
+                };
+                match outcome {
+                    Ok(response) => {
+                        record(ctx, &self.node.name, "ai_tool", json!({"query": query}), Ok(json!({"response": response})), started);
+                        Ok(response)
+                    }
+                    Err(e) => {
+                        record(ctx, &self.node.name, "ai_tool", json!({"query": query}), Err(&e), started);
+                        Ok(format!("There was an error: \"{}\"", e.message))
+                    }
+                }
             }
             ToolKind::Node { base, .. } => {
                 let args = match serde_json::from_str::<Value>(arguments) {

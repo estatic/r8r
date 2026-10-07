@@ -201,3 +201,19 @@ async fn run_python(ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
     }
     Ok(vec![out])
 }
+
+/// Runs a Code Tool's JavaScript (the body of an async function) in the
+/// Code node's sandbox, with `query` set to the model's input: n8n's
+/// `runCodeForTool`. Returns what the code returned (`None` = `undefined`).
+pub fn run_js_tool(ctx: &ExecCtx<'_>, code: &str, query: &Value) -> NodeResult<Option<Value>> {
+    let timeout_secs = ctx.config().runners_task_timeout_secs;
+    let timezone = ctx.workflow.setting_str("timezone").unwrap_or(&ctx.config().timezone).to_string();
+    let vm = Vm::new(VmOptions { memory_limit: 256 * 1024 * 1024, timezone, freeze_data: false }).map_err(|e| NodeError::new(e.message()))?;
+    let allowed = serde_json::to_string(&ctx.config().node_function_allow_builtin).unwrap();
+    vm.run_script(&format!("globalThis.__r8r_allow_builtin = {allowed};"), Duration::from_secs(1)).map_err(|e| NodeError::new(e.message()))?;
+    vm.run_script(CODE_PRELUDE, Duration::from_secs(5)).map_err(|e| NodeError::new(e.message()))?;
+    vm.set_data((ctx.expr_data)()).map_err(|e| NodeError::new(e.message()))?;
+    let query = serde_json::to_string(query).unwrap_or_else(|_| "null".into());
+    vm.run_script(&format!("globalThis.items = $input.all(); globalThis.query = {query};"), Duration::from_secs(5)).map_err(|e| NodeError::new(e.message()))?;
+    vm.eval_async_body(code, Duration::from_secs(timeout_secs)).map_err(|e| to_node_error(e, timeout_secs))
+}
