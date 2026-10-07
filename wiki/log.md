@@ -34,3 +34,5 @@ Operations:
 ## [2026-10-07] query | AI tools (plan 2.4): $fromAI, native nodes as tools, Code Tool, Workflow Tool; NODES_EXCLUDE covers tool variants; full suite 958/958; new features green on n8n 2.35.7
 
 ## [2026-10-07] query | Postgres and Redis chat memory (plan 2.5) in n8n's LangChain storage format, captured from n8n 2.35.7; chat_memory 4/4 on r8r and n8n; full suite 958/958
+
+## [2026-10-07] query | AI chain root nodes (plan 2.6 part): Sentiment Analysis, Text Classifier, Information Extractor with LangChain structured output; prompts captured from n8n 2.35.7; 10-ai 69/69
