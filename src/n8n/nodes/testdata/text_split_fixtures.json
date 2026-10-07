@@ -1,0 +1,418 @@
+[
+ {
+  "kind": "recursive",
+  "opts": {
+   "chunkSize": 12,
+   "chunkOverlap": 5
+  },
+  "text": "same line\nsame line\nsame line\n\nsame line\nsame line",
+  "chunks": [
+   "same line",
+   "same line",
+   "same line",
+   "same line",
+   "same line"
+  ],
+  "lines": [
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 2,
+    "to": 2
+   },
+   {
+    "from": 3,
+    "to": 3
+   },
+   {
+    "from": 5,
+    "to": 5
+   },
+   {
+    "from": 6,
+    "to": 6
+   }
+  ]
+ },
+ {
+  "kind": "recursive",
+  "opts": {
+   "chunkSize": 10,
+   "chunkOverlap": 3
+  },
+  "text": "supercalifragilisticexpialidocious antidisestablishmentarianism x y",
+  "chunks": [
+   "supercalif",
+   "lifragilis",
+   "listicexpi",
+   "xpialidoci",
+   "ocious",
+   "antidises",
+   "sestablish",
+   "ishmentari",
+   "arianism",
+   "x y"
+  ],
+  "lines": [
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   }
+  ]
+ },
+ {
+  "kind": "recursive",
+  "opts": {
+   "chunkSize": 10,
+   "chunkOverlap": 2
+  },
+  "text": "     ",
+  "chunks": [],
+  "lines": []
+ },
+ {
+  "kind": "recursive",
+  "opts": {
+   "chunkSize": 14,
+   "chunkOverlap": 4
+  },
+  "text": "line one\r\nline two\r\n\r\nline three is longer",
+  "chunks": [
+   "line one",
+   "line two",
+   "line three is",
+   "is longer"
+  ],
+  "lines": [
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 2,
+    "to": 2
+   },
+   {
+    "from": 4,
+    "to": 4
+   },
+   {
+    "from": 4,
+    "to": 4
+   }
+  ]
+ },
+ {
+  "kind": "character",
+  "opts": {
+   "chunkSize": 20,
+   "chunkOverlap": 5,
+   "separator": "|"
+  },
+  "text": "supercalifragilisticexpialidocious antidisestablishmentarianism x y",
+  "chunks": [
+   "supercalifragilisticexpialidocious antidisestablishmentarianism x y"
+  ],
+  "lines": [
+   {
+    "from": 1,
+    "to": 1
+   }
+  ]
+ },
+ {
+  "kind": "character",
+  "opts": {
+   "chunkSize": 25,
+   "chunkOverlap": 0,
+   "separator": "\n"
+  },
+  "text": "same line\nsame line\nsame line\n\nsame line\nsame line",
+  "chunks": [
+   "same line\nsame line",
+   "same line\nsame line",
+   "same line"
+  ],
+  "lines": [
+   {
+    "from": 1,
+    "to": 2
+   },
+   {
+    "from": 2,
+    "to": 3
+   },
+   {
+    "from": 3,
+    "to": 3
+   }
+  ]
+ },
+ {
+  "kind": "recursive",
+  "opts": {
+   "chunkSize": 40,
+   "chunkOverlap": 10
+  },
+  "text": "Hello world.\n\nThis is the second paragraph, which is a bit longer than the first one.\nIt has two lines.\n\nThird paragraph here. With some sentences. And more words to split on spaces when needed.",
+  "chunks": [
+   "Hello world.",
+   "This is the second paragraph, which is",
+   "which is a bit longer than the first",
+   "the first one.",
+   "It has two lines.",
+   "Third paragraph here. With some",
+   "With some sentences. And more words to",
+   "words to split on spaces when needed."
+  ],
+  "lines": [
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 3,
+    "to": 3
+   },
+   {
+    "from": 3,
+    "to": 3
+   },
+   {
+    "from": 3,
+    "to": 3
+   },
+   {
+    "from": 4,
+    "to": 4
+   },
+   {
+    "from": 6,
+    "to": 6
+   },
+   {
+    "from": 6,
+    "to": 6
+   },
+   {
+    "from": 6,
+    "to": 6
+   }
+  ]
+ },
+ {
+  "kind": "recursive",
+  "opts": {
+   "chunkSize": 12,
+   "chunkOverlap": 4
+  },
+  "text": "aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj",
+  "chunks": [
+   "aaaa bbbb",
+   "cccc dddd",
+   "eeee ffff",
+   "gggg hhhh",
+   "iiii jjjj"
+  ],
+  "lines": [
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   }
+  ]
+ },
+ {
+  "kind": "recursive",
+  "opts": {
+   "chunkSize": 1000,
+   "chunkOverlap": 200
+  },
+  "text": "Hello world.\n\nThis is the second paragraph, which is a bit longer than the first one.\nIt has two lines.\n\nThird paragraph here. With some sentences. And more words to split on spaces when needed.",
+  "chunks": [
+   "Hello world.\n\nThis is the second paragraph, which is a bit longer than the first one.\nIt has two lines.\n\nThird paragraph here. With some sentences. And more words to split on spaces when needed."
+  ],
+  "lines": [
+   {
+    "from": 1,
+    "to": 6
+   }
+  ]
+ },
+ {
+  "kind": "recursive",
+  "opts": {
+   "chunkSize": 15,
+   "chunkOverlap": 0
+  },
+  "text": "Ünïcödé 😀 emoji and text\n\nsecond part with more words",
+  "chunks": [
+   "Ünïcödé 😀",
+   "emoji and text",
+   "second part",
+   "with more",
+   "words"
+  ],
+  "lines": [
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 3,
+    "to": 3
+   },
+   {
+    "from": 3,
+    "to": 3
+   },
+   {
+    "from": 3,
+    "to": 3
+   }
+  ]
+ },
+ {
+  "kind": "character",
+  "opts": {
+   "chunkSize": 40,
+   "chunkOverlap": 10,
+   "separator": "\n\n"
+  },
+  "text": "Hello world.\n\nThis is the second paragraph, which is a bit longer than the first one.\nIt has two lines.\n\nThird paragraph here. With some sentences. And more words to split on spaces when needed.",
+  "chunks": [
+   "Hello world.",
+   "This is the second paragraph, which is a bit longer than the first one.\nIt has two lines.",
+   "Third paragraph here. With some sentences. And more words to split on spaces when needed."
+  ],
+  "lines": [
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 3,
+    "to": 4
+   },
+   {
+    "from": 6,
+    "to": 6
+   }
+  ]
+ },
+ {
+  "kind": "character",
+  "opts": {
+   "chunkSize": 12,
+   "chunkOverlap": 4,
+   "separator": " "
+  },
+  "text": "aaaa bbbb cccc dddd eeee ffff gggg hhhh iiii jjjj",
+  "chunks": [
+   "aaaa bbbb",
+   "bbbb cccc",
+   "cccc dddd",
+   "dddd eeee",
+   "eeee ffff",
+   "ffff gggg",
+   "gggg hhhh",
+   "hhhh iiii",
+   "iiii jjjj"
+  ],
+  "lines": [
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   },
+   {
+    "from": 1,
+    "to": 1
+   }
+  ]
+ }
+]
