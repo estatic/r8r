@@ -55,6 +55,34 @@ Feature: Isolation and hardening
     Then the execution fails
     And the mock service received no requests
 
+  @phase-5 @beyond-n8n
+  Scenario: Chat model sub-nodes go through the same SSRF guard
+    Given the environment variable "R8R_SSRF_ALLOWED_HOSTS" is not set
+    And a mock HTTP service
+    And a mock Azure OpenAI deployment "gpt4o-prod" that replies in order:
+      """
+      [{"role": "assistant", "content": "should not be reached"}]
+      """
+    And the credential "Internal Azure" of type "azureOpenAiApi" with the data:
+      """
+      {"apiKey": "azure-key-123", "resourceName": "unused", "apiVersion": "2024-10-21", "endpoint": "%{MOCK_URL}"}
+      """
+    And a workflow with nodes:
+      | name  | type                 | parameters                                            |
+      | Start | manualTrigger        |                                                       |
+      | Agent | lc.agent             | {"promptType": "define", "text": "hi", "options": {}} |
+      | Model | lc.lmChatAzureOpenAi | {"model": "gpt4o-prod", "options": {}}                |
+    And the node "Model" uses the "azureOpenAiApi" credential "Internal Azure"
+    And the connections:
+      """
+      Start -> Agent
+      Model -[ai_languageModel]-> Agent
+      """
+    When I execute the workflow
+    Then the execution fails
+    And the node "Agent" failed with an error containing "blocked"
+    And the mock service received no requests
+
   @phase-1 @beyond-n8n
   Scenario Outline: Well-known internal targets are blocked
     Given the environment variable "R8R_SSRF_ALLOWED_HOSTS" is not set

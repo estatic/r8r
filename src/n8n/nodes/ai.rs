@@ -802,7 +802,11 @@ impl Model<'_> {
     }
 
     async fn send(&self, ctx: &ExecCtx<'_>, body: &Value) -> NodeResult<Value> {
-        let mut req = ctx.services.http.post(self.endpoint());
+        // Base URLs come from credentials and node options, so they go
+        // through the same SSRF guard as every other outbound node.
+        let url = reqwest::Url::parse(&self.endpoint()).map_err(|e| NodeError::new(format!("Invalid model provider URL: {e}")))?;
+        super::check_ssrf(&url, ctx.config()).await.map_err(NodeError::new)?;
+        let mut req = ctx.services.http.post(url);
         match &self.provider {
             Provider::OpenAi { organization } => {
                 req = req.bearer_auth(&self.api_key);
@@ -828,7 +832,7 @@ impl Model<'_> {
         }
         if let Provider::Bedrock { region, access_key_id, session_token } = &self.provider {
             let bytes = serde_json::to_vec(body).map_err(|e| NodeError::new(e.to_string()))?;
-            let url = reqwest::Url::parse(&self.endpoint()).map_err(|e| NodeError::new(format!("Invalid Bedrock endpoint: {e}")))?;
+            let url = reqwest::Url::parse(&self.endpoint()).expect("parsed above");
             let host = match url.port() {
                 Some(port) => format!("{}:{port}", url.host_str().unwrap_or("")),
                 None => url.host_str().unwrap_or("").to_string(),
