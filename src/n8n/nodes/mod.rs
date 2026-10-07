@@ -170,6 +170,15 @@ fn tool_variant_names() -> &'static [(&'static str, &'static str)] {
 }
 
 impl Registry {
+    /// Whether `NODES_EXCLUDE` rules `type_name` out. A tool variant goes
+    /// with its base node, as in n8n, which only builds tool variants for the
+    /// node types it loaded: otherwise `executeCommandTool` would run an
+    /// excluded Execute Command.
+    pub fn is_excluded(&self, type_name: &str, excluded: &[String]) -> bool {
+        let listed = |t: &str| excluded.iter().any(|e| e == t);
+        listed(type_name) || self.tool_base(type_name).is_some_and(listed)
+    }
+
     /// The node a `<type>Tool` variant runs, if `type_name` is one.
     pub fn tool_base(&self, type_name: &str) -> Option<&'static str> {
         let base = type_name.strip_suffix("Tool")?;

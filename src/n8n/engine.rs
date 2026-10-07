@@ -173,8 +173,10 @@ pub fn check_node_types(workflow: &Workflow, registry: &Registry, services: &Ser
         if node.node_type.ends_with(".stickyNote") {
             continue;
         }
-        if services.config.nodes_exclude.iter().any(|t| t == &node.node_type) || registry.get(&node.node_type).is_none() {
-            return Err(SetupError(format!("Unrecognized node type: {}", node.node_type)));
+        if registry.is_excluded(&node.node_type, &services.config.nodes_exclude) || registry.get(&node.node_type).is_none() {
+            // n8n resolves a tool variant through its base, so it names that.
+            let name = registry.tool_base(&node.node_type).unwrap_or(&node.node_type);
+            return Err(SetupError(format!("Unrecognized node type: {name}")));
         }
     }
     Ok(())

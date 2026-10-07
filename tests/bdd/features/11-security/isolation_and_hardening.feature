@@ -16,6 +16,41 @@ Feature: Isolation and hardening
     And the command output does not contain "pwned"
     And the command output contains "n8n-nodes-base.executeCommand"
 
+  # A node excluded by NODES_EXCLUDE has no AI tool variant either, so an
+  # agent can't run it as a tool.
+  @phase-5
+  Scenario: Execute Command is disabled as an AI tool too
+    Given a mock HTTP service
+    And the credential "Mock OpenAI" of type "openAiApi" with the data:
+      """
+      {"apiKey": "sk-test-123", "url": "%{MOCK_URL}/v1"}
+      """
+    And a mock OpenAI API that replies in order:
+      """
+      [
+        {"role": "assistant", "content": null, "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "Shell", "arguments": "{\"cmd\": \"printf 'pw%s' ned\"}"}}]},
+        {"role": "assistant", "content": "done"}
+      ]
+      """
+    And a workflow with nodes:
+      | name  | type                | parameters                                                                       |
+      | Start | manualTrigger       |                                                                                  |
+      | Agent | lc.agent            | {"promptType": "define", "text": "run it", "options": {}}                        |
+      | Model | lc.lmChatOpenAi     | {"model": {"__rl": true, "mode": "list", "value": "gpt-4o-mini"}, "options": {}} |
+      | Shell | executeCommandTool  | {"command": "={{ $fromAI('cmd') }}"}                                             |
+    And the node "Model" uses the "openAiApi" credential "Mock OpenAI"
+    And the connections:
+      """
+      Start -> Agent
+      Model -[ai_languageModel]-> Agent
+      Shell -[ai_tool]-> Agent
+      """
+    When I execute the workflow
+    Then the command fails
+    And the command output does not contain "pwned"
+    And the command output contains "Unrecognized node type: n8n-nodes-base.executeCommand"
+    And the mock service received no requests
+
   @phase-1
   Scenario: Execute Command can be enabled explicitly
     Given the environment variable "NODES_EXCLUDE" is "[]"

@@ -417,7 +417,7 @@ fn describe(desc: &Desc) -> Value {
 pub fn descriptions(registry: &Registry, excluded: &[String]) -> Vec<Value> {
     let mut out: Vec<Value> = DESCRIPTIONS
         .iter()
-        .filter(|d| !excluded.iter().any(|e| e == d.name))
+        .filter(|d| !registry.is_excluded(d.name, excluded))
         .map(|d| {
             let mut v = describe(d);
             if registry.get(d.name).is_none() {
@@ -429,7 +429,7 @@ pub fn descriptions(registry: &Registry, excluded: &[String]) -> Vec<Value> {
     // AI tool variants, shaped like n8n's `convertNodeToAiTool`.
     for d in DESCRIPTIONS {
         let name = format!("{}Tool", d.name);
-        if registry.tool_base(&name).is_none() || excluded.iter().any(|e| *e == name) {
+        if registry.tool_base(&name).is_none() || registry.is_excluded(&name, excluded) {
             continue;
         }
         let mut v = describe(d);
