@@ -8,6 +8,8 @@ use serde_json::{json, Map, Value};
 /// check them against the pinned n8n version in Phase 0.
 pub fn default_type_version(node_type: &str) -> Value {
     let short = node_type.rsplit('.').next().unwrap_or(node_type);
+    // A node-as-tool variant (`httpRequestTool`) has its base's versions.
+    let short = short.strip_suffix("Tool").filter(|b| !b.is_empty()).unwrap_or(short);
     match short {
         "set" => json!(3.4),
         "if" => json!(2.2),

@@ -415,7 +415,7 @@ fn describe(desc: &Desc) -> Value {
 /// Descriptions of every allowed node type: the native ones, plus the GA
 /// catalog entries r8r can show but not run yet (marked in `codex`).
 pub fn descriptions(registry: &Registry, excluded: &[String]) -> Vec<Value> {
-    DESCRIPTIONS
+    let mut out: Vec<Value> = DESCRIPTIONS
         .iter()
         .filter(|d| !excluded.iter().any(|e| e == d.name))
         .map(|d| {
@@ -425,5 +425,33 @@ pub fn descriptions(registry: &Registry, excluded: &[String]) -> Vec<Value> {
             }
             v
         })
-        .collect()
+        .collect();
+    // AI tool variants, shaped like n8n's `convertNodeToAiTool`.
+    for d in DESCRIPTIONS {
+        let name = format!("{}Tool", d.name);
+        if registry.tool_base(&name).is_none() || excluded.iter().any(|e| *e == name) {
+            continue;
+        }
+        let mut v = describe(d);
+        v["name"] = json!(name);
+        v["displayName"] = json!(format!("{} Tool", d.display));
+        v["inputs"] = json!([]);
+        v["outputs"] = json!(["ai_tool"]);
+        let props = v["properties"].as_array_mut().expect("describe builds an array");
+        let mut description = json!({"displayName": "Description", "name": "toolDescription", "type": "string", "default": d.description, "required": true});
+        if d.params.iter().any(|p| *p == "resource" || *p == "operation") {
+            description["displayOptions"] = json!({"show": {"descriptionType": ["manual"]}});
+            props.insert(0, description);
+            props.insert(0, json!({"displayName": "Tool Description", "name": "descriptionType", "type": "options", "default": "auto", "options": [{"name": "Set Automatically", "value": "auto"}, {"name": "Set Manually", "value": "manual"}]}));
+        } else {
+            props.insert(0, description);
+        }
+        out.push(v);
+    }
+    out
+}
+
+/// A node type's display name and description (for AI tool descriptions).
+pub fn summary(name: &str) -> Option<(&'static str, &'static str)> {
+    DESCRIPTIONS.iter().find(|d| d.name == name).map(|d| (d.display, d.description))
 }

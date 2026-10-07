@@ -289,6 +289,18 @@ mod tests {
     }
 
     #[test]
+    fn from_ai_reads_the_tool_arguments_like_n8n() {
+        let e = Evaluator::new(&data(serde_json::json!({"city": "Paris", "query": {"n": 3}})), "UTC", Duration::from_secs(1)).unwrap();
+        assert_eq!(e.template("{{ $fromAI('city', 'the city', 'string') }}").unwrap(), Some(serde_json::json!("Paris")));
+        assert_eq!(e.template("{{ $fromAI('n') }}").unwrap(), Some(serde_json::json!(3)));
+        assert_eq!(e.template("{{ $fromAI('missing', '', 'string', 'fallback') }}").unwrap(), Some(serde_json::json!("fallback")));
+        assert_eq!(e.template("{{ $fromai('city') }}").unwrap(), Some(serde_json::json!("Paris")));
+        assert!(e.template("{{ $fromAI('') }}").is_err());
+        assert!(e.template("{{ $fromAI('bad key') }}").is_err());
+        assert!(e.template("{{ $fromAI('constructor') }}").is_err());
+    }
+
+    #[test]
     fn pooled_vms_do_not_leak_state_between_runs() {
         let d = || data(serde_json::json!({"a": 1}));
         for _ in 0..3 {

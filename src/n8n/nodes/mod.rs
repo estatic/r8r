@@ -143,9 +143,78 @@ impl Default for Registry {
         for n in ftp::all() {
             r.add(n);
         }
+        // Each native node n8n marks `usableAsTool` also exists as an AI
+        // tool sub-node, `<type>Tool` (e.g. `httpRequestTool`).
+        for &(name, base) in tool_variant_names() {
+            if r.types.contains_key(base) {
+                r.add(Box::new(ai::NodeAsTool { name }));
+            }
+        }
         r
     }
 }
+
+/// `(variant, base)` full type names for `USABLE_AS_TOOL`, built once
+/// (registry keys must be `'static`).
+fn tool_variant_names() -> &'static [(&'static str, &'static str)] {
+    static NAMES: std::sync::OnceLock<Vec<(&'static str, &'static str)>> = std::sync::OnceLock::new();
+    NAMES.get_or_init(|| {
+        USABLE_AS_TOOL
+            .iter()
+            .map(|b| {
+                let base: &'static str = Box::leak(format!("n8n-nodes-base.{b}").into_boxed_str());
+                (&*Box::leak(format!("{base}Tool").into_boxed_str()), base)
+            })
+            .collect()
+    })
+}
+
+impl Registry {
+    /// The node a `<type>Tool` variant runs, if `type_name` is one.
+    pub fn tool_base(&self, type_name: &str) -> Option<&'static str> {
+        let base = type_name.strip_suffix("Tool")?;
+        let short = base.strip_prefix("n8n-nodes-base.")?;
+        USABLE_AS_TOOL.contains(&short).then(|| self.types.get_key_value(base).map(|(k, _)| *k)).flatten()
+    }
+}
+
+/// `n8n-nodes-base` node types with `usableAsTool` in n8n 2.35.7 (from its
+/// `types/nodes.json`); those r8r runs natively get a tool variant.
+pub const USABLE_AS_TOOL: &[&str] = &[
+    "Brandfetch", "actionNetwork", "activeCampaign", "adalo", "affinity", "agileCrm", "airtable", "airtop",
+    "amqp", "apiTemplateIo", "asana", "autopilot", "awsLambda", "awsS3", "awsSes", "awsSns", "awsTextract",
+    "awsTranscribe", "bambooHr", "baserow", "beeminder", "bitly", "bitwarden", "bubble", "chargebee", "circleCi",
+    "ciscoWebex", "clearbit", "clickUp", "clockify", "cloudflare", "cockpit", "coda", "coinGecko", "compression",
+    "contentful", "convertKit", "copper", "crateDb", "crypto", "currents", "customerIo", "dataTable",
+    "databricks", "dateTime", "deepL", "demio", "dhl", "discord", "discourse", "drift", "dropbox", "dropcontact",
+    "e2eTest", "egoi", "elasticSecurity", "elasticsearch", "emailSend", "emelia", "erpNext", "executeCommand",
+    "facebookGraphApi", "filemaker", "freshdesk", "freshservice", "freshworksCrm", "gSuiteAdmin", "getResponse",
+    "ghost", "git", "github", "gitlab", "gmail", "goToWebinar", "gong", "googleAds", "googleAnalytics",
+    "googleBigQuery", "googleBooks", "googleBusinessProfile", "googleCalendar", "googleChat",
+    "googleCloudNaturalLanguage", "googleCloudStorage", "googleContacts", "googleDocs", "googleDrive",
+    "googleFirebaseCloudFirestore", "googleFirebaseRealtimeDatabase", "googlePerspective", "googleSheets",
+    "googleSlides", "googleTasks", "googleTranslate", "gotify", "grafana", "graphql", "grist", "hackerNews",
+    "haloPSA", "harvest", "helpScout", "highLevel", "homeAssistant", "httpRequest", "hubspot", "humanticAi",
+    "hunter", "intercom", "invoiceNinja", "iterable", "jenkins", "jinaAi", "jira", "jwt", "kafka", "keap",
+    "koBoToolbox", "ldap", "lemlist", "line", "linear", "lingvaNex", "linkedIn", "loneScale", "magento2",
+    "mailcheck", "mailchimp", "mailerLite", "mailgun", "mailjet", "mandrill", "marketstack", "matrix",
+    "mattermost", "mautic", "medium", "messageAnAgent", "messageBird", "metabase", "microsoftDynamicsCrm",
+    "microsoftEntra", "microsoftExcel", "microsoftExcelSharePoint", "microsoftGraphSecurity", "microsoftOneDrive",
+    "microsoftOutlook", "microsoftSharePoint", "microsoftSql", "microsoftTeams", "microsoftToDo", "misp",
+    "mistralAi", "mocean", "mondayCom", "mongoDb", "monicaCrm", "mqtt", "msg91", "mySql", "nasa", "netlify",
+    "nextCloud", "nocoDb", "notion", "npm", "odoo", "okta", "oneSimpleApi", "onfleet", "openThesaurus",
+    "openWeatherMap", "oracleDatabase", "oura", "paddle", "pagerDuty", "peekalink", "perplexity", "phantombuster",
+    "philipsHue", "pipedrive", "plivo", "postBin", "postHog", "postgres", "profitWell", "pushbullet", "pushcut",
+    "pushover", "questDb", "quickChart", "quickbase", "quickbooks", "rabbitmq", "raindrop", "reddit", "redis",
+    "rocketchat", "rssFeedRead", "rundeck", "s3", "salesforce", "salesmate", "seaTable", "securityScorecard",
+    "segment", "sendGrid", "sendInBlue", "sendy", "sentryIo", "serviceNow", "shopify", "signl4", "slack", "sms77",
+    "snowflake", "splunk", "spotify", "stackby", "storyblok", "strapi", "strava", "stripe", "supabase",
+    "syncroMsp", "taiga", "tapfiliate", "telegram", "theHive", "theHiveProject", "timescaleDb", "todoist", "totp",
+    "travisCi", "trello", "twake", "twilio", "twist", "twitter", "unleashedSoftware", "uplead", "uproc",
+    "uptimeRobot", "urlScanIo", "venafiTlsProtectCloud", "venafiTlsProtectDatacenter", "vero", "vonage",
+    "webflow", "wekan", "whatsApp", "wooCommerce", "wordpress", "xero", "youTube", "yourls", "zammad", "zendesk",
+    "zohoCrm", "zoom", "zulip"
+];
 
 // ---- helpers shared by nodes ----------------------------------------------
 

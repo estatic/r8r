@@ -465,6 +465,26 @@ async fn azure_tool(w: &mut R8rWorld, n: usize, deployment: String, tool: String
     assert!(found, "tool {tool} not offered: {}", pretty(&body["tools"]));
 }
 
+#[then(expr = "chat request {int} has a {string} message with the content {string}")]
+async fn openai_message_exact(w: &mut R8rWorld, n: usize, role: String, content: String) {
+    let all = requests_to(w, "/v1/chat/completions").await;
+    let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} chat requests", all.len()));
+    let body: Value = serde_json::from_slice(&r.body).unwrap();
+    let found = body["messages"].as_array().into_iter().flatten().any(|m| m["role"] == role.as_str() && m["content"].as_str() == Some(content.as_str()));
+    assert!(found, "no {role} message with content {content:?} in: {}", pretty(&body["messages"]));
+}
+
+/// The tool's whole OpenAI function definition, matched as a subset.
+#[then(expr = "chat request {int} offers the tool {string} as:")]
+async fn openai_tool_as(w: &mut R8rWorld, n: usize, tool: String, step: &Step) {
+    let all = requests_to(w, "/v1/chat/completions").await;
+    let r = all.get(n - 1).unwrap_or_else(|| panic!("only {} chat requests", all.len()));
+    let body: Value = serde_json::from_slice(&r.body).unwrap();
+    let found = body["tools"].as_array().into_iter().flatten().find(|t| t["function"]["name"] == tool.as_str()).unwrap_or_else(|| panic!("tool {tool} not offered: {}", pretty(&body["tools"])));
+    let expected = parse_strict(&w.expand(docstring(step)), "expected tool");
+    assert_matches(&expected, &found["function"], Mode::Subset).unwrap_or_else(|e| panic!("{e}\ntool: {}", pretty(found)));
+}
+
 // ---- Ollama native API (/api/chat) ---------------------------------------
 
 /// Doc string: a JSON array of assistant messages returned in order by

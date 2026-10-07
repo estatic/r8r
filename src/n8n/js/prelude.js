@@ -118,6 +118,23 @@
   g.__r8r_static = { global: {}, node: {} };
   let extra = {};
 
+  // `$fromAI(key, description, type, default)`: the value a model chose
+  // for `key` when this node runs as an AI tool. As in n8n, the model's
+  // arguments are the node's input item, so it reads `$json.query[key]`,
+  // then `$json[key]` (own keys only), then the default.
+  const ownKey = (o, k) => (o !== null && typeof o === 'object' && Object.prototype.hasOwnProperty.call(o, k) ? o[k] : undefined);
+  g.$fromAI = function (name, _description, _type, defaultValue) {
+    if (!name || name === '') throw new ExpressionError("Add a key, e.g. $fromAI('placeholder_name')");
+    if (!/^[a-zA-Z0-9_-]{0,64}$/.test(name)) {
+      throw new ExpressionError('Invalid parameter key, must be between 1 and 64 characters long and only contain lowercase letters, uppercase letters, numbers, underscores, and hyphens');
+    }
+    if (name === '__proto__' || name === 'constructor' || name === 'prototype') throw new ExpressionError('Invalid parameter key');
+    const data = g.$json;
+    if (data === undefined || data === null) throw new ExpressionError('No execution data available');
+    return ownKey(ownKey(data, 'query'), name) ?? ownKey(data, name) ?? defaultValue;
+  };
+  g.$fromai = g.$fromAI;
+
   g.__r8r_set_data = function (data) {
     D = __r8r_freeze ? deepFreeze(data) : data;
     if (data.staticData) {

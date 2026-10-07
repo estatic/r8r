@@ -58,7 +58,10 @@ fn record(ctx: &ExecCtx<'_>, sub: &str, kind: &str, input: Value, output: Result
     });
     match output {
         Ok(out) => task["data"] = json!({kind: [[{"json": out}]]}),
+        // n8n records a sub-node's input as its data first and only
+        // replaces it on success, so a failed run keeps its input there.
         Err(e) => {
+            task["data"] = task["inputOverride"].clone();
             if let Some(node) = ctx.workflow.node(sub) {
                 task["error"] = e.to_json(node);
             }
@@ -913,56 +916,323 @@ fn redact(message: &str, key: &str) -> String {
 
 // ---- tools ---------------------------------------------------------------------
 
+/// A native node used as an AI tool (`<type>Tool`): only runs when an
+/// agent calls it, as its base node with the model's arguments as input.
+pub struct NodeAsTool {
+    pub name: &'static str,
+}
+
+#[async_trait::async_trait]
+impl NodeType for NodeAsTool {
+    fn type_name(&self) -> &'static str {
+        self.name
+    }
+    async fn execute(&self, ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
+        Err(NodeError::new(format!("\"{}\" is a tool: connect it to an AI Agent", ctx.node.name)))
+    }
+}
+
+/// The node implementations a node-as-tool runs (the registry is
+/// stateless, so one shared copy serves every run).
+fn registry() -> &'static super::Registry {
+    static REGISTRY: OnceLock<super::Registry> = OnceLock::new();
+    REGISTRY.get_or_init(super::Registry::default)
+}
+
+enum ToolKind {
+    Calculator,
+    /// Runs `base` with the model's arguments as its one input item.
+    Node { base: &'static str, description: String, args: Vec<FromAi> },
+}
+
 struct Tool<'a> {
     node: &'a Node,
-    /// Tool names are the node names (n8n does the same).
+    /// n8n's `nodeNameToToolName`: the node name, other characters as `_`.
     name: String,
+    kind: ToolKind,
 }
 
 fn tool_name(node: &Node) -> String {
-    node.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '_' || c == '-' { c } else { '_' }).collect()
+    let mut name = regex::Regex::new(r"[^a-zA-Z0-9_-]+").unwrap().replace_all(&node.name, "_").to_string();
+    if name.len() > 64 {
+        name.truncate(64);
+        name = name.trim_end_matches(['_', '-']).to_string();
+    }
+    name
 }
 
-fn load_tools<'a>(ctx: &'a ExecCtx<'_>) -> NodeResult<Vec<Tool<'a>>> {
+fn load_tools<'a>(ctx: &'a ExecCtx<'_>, item: usize) -> NodeResult<Vec<Tool<'a>>> {
     let mut tools = Vec::new();
     for name in ctx.workflow.sub_nodes(&ctx.node.name, "ai_tool") {
         let node = ctx.workflow.node(&name).expect("connected nodes exist");
         if node.disabled {
             continue;
         }
-        if node.node_type != format!("{LC}toolCalculator") {
+        let kind = if node.node_type == format!("{LC}toolCalculator") {
+            ToolKind::Calculator
+        } else if let Some(base) = registry().tool_base(&node.node_type) {
+            ToolKind::Node { base, description: tool_description(ctx, node, base, item)?, args: tool_arguments(node)? }
+        } else {
             return Err(NodeError::new(format!("The tool \"{}\" ({}) is not supported natively yet", node.name, node.node_type)));
-        }
-        tools.push(Tool { node, name: tool_name(node) });
+        };
+        tools.push(Tool { node, name: tool_name(node), kind });
     }
     Ok(tools)
 }
 
-impl Tool<'_> {
-    fn schema(&self) -> Value {
-        json!({
-            "type": "function",
-            "function": {
-                "name": self.name,
-                "description": "Useful for getting the result of a math expression. The input to this tool should be a valid mathematical expression that could be executed by a simple calculator.",
-                "parameters": {"type": "object", "properties": {"input": {"type": "string"}}, "required": ["input"], "additionalProperties": false},
+/// n8n's `getToolDescriptionForNode`: the manual `toolDescription` (an
+/// expression is resolved in the agent's context), else one made from
+/// resource and operation, else the node type's description.
+fn tool_description(ctx: &ExecCtx<'_>, node: &Node, base: &str, item: usize) -> NodeResult<String> {
+    let (display, fallback) = crate::n8n::node_types::summary(base).unwrap_or(("", ""));
+    let p = &node.parameters;
+    let manual = p["toolDescription"].as_str().filter(|s| !s.trim().is_empty());
+    match manual {
+        Some(raw) if p["descriptionType"].as_str() != Some("auto") => {
+            if raw.starts_with('=') {
+                Ok(ctx.resolve_value(&json!(raw), item)?.as_str().map(String::from).unwrap_or_default())
+            } else {
+                Ok(raw.to_string())
+            }
+        }
+        _ => match (p["resource"].as_str(), p["operation"].as_str()) {
+            (Some(resource), Some(operation)) => Ok(format!("{operation} {resource} in {display}")),
+            _ => Ok(fallback.to_string()),
+        },
+    }
+}
+
+/// One `$fromAI(key, description, type, default)` call found in a node's
+/// parameters (n8n's `extractFromAICalls`).
+#[derive(Clone, Debug, PartialEq)]
+struct FromAi {
+    key: String,
+    description: Option<String>,
+    kind: String,
+    default: Option<Value>,
+}
+
+/// Every `$fromAI` call in the node's parameters, deduplicated by key, with
+/// n8n's errors for bad or conflicting keys.
+fn tool_arguments(node: &Node) -> NodeResult<Vec<FromAi>> {
+    fn walk(v: &Value, out: &mut Vec<FromAi>) -> Result<(), String> {
+        match v {
+            Value::String(s) => out.extend(extract_from_ai(s)?),
+            Value::Array(a) => a.iter().try_for_each(|x| walk(x, out))?,
+            Value::Object(o) => o.values().try_for_each(|x| walk(x, out))?,
+            _ => {}
+        }
+        Ok(())
+    }
+    let mut found = Vec::new();
+    walk(&node.parameters, &mut found).map_err(NodeError::new)?;
+    let valid = regex::Regex::new(r"^[a-zA-Z0-9_-]{1,64}$").unwrap();
+    let mut unique: Vec<FromAi> = Vec::new();
+    for arg in found {
+        if !valid.is_match(&arg.key) {
+            let msg = if arg.key.is_empty() { "You must specify a key when using $fromAI()".to_string() } else { format!("Parameter key `{}` is invalid", arg.key) };
+            return Err(NodeError::new(msg).describe("Invalid parameter key, must be between 1 and 64 characters long and only contain letters, numbers, underscores, and hyphens"));
+        }
+        match unique.iter_mut().find(|u| u.key == arg.key) {
+            Some(existing) if existing.description != arg.description || existing.kind != arg.kind => {
+                return Err(NodeError::new(format!("Duplicate key '{}' found with different description or type", arg.key))
+                    .describe("Ensure all $fromAI() calls with the same key have consistent descriptions and types"));
+            }
+            // n8n keeps the last occurrence of a key.
+            Some(existing) => *existing = arg,
+            None => unique.push(arg),
+        }
+    }
+    Ok(unique)
+}
+
+/// Parses the `$fromAI(...)` calls in one string (n8n's
+/// `extractFromAICalls` + `parseArguments`).
+fn extract_from_ai(s: &str) -> Result<Vec<FromAi>, String> {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = Vec::new();
+    let re = regex::Regex::new(r"(?i)\$fromAI\s*\(\s*").unwrap();
+    for m in re.find_iter(s) {
+        // Byte offset -> char offset.
+        let mut i = s[..m.end()].chars().count();
+        let (mut depth, mut quote, mut args) = (1, None::<char>, String::new());
+        while i < chars.len() && depth > 0 {
+            let c = chars[i];
+            if let Some(q) = quote {
+                if c == '\\' && i + 1 < chars.len() {
+                    args.push(c);
+                    args.push(chars[i + 1]);
+                    i += 2;
+                    continue;
+                }
+                if c == q {
+                    quote = None;
+                }
+                args.push(c);
+            } else {
+                match c {
+                    '"' | '\'' | '`' => quote = Some(c),
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    _ => {}
+                }
+                if depth > 0 || c != ')' {
+                    args.push(c);
+                }
+            }
+            i += 1;
+        }
+        if depth != 0 {
+            return Err(format!("Unbalanced parentheses while parsing $fromAI call: {}", &s[m.end()..]));
+        }
+        out.push(parse_from_ai_args(&args).map_err(|e| format!("Failed to parse $fromAI arguments: {args}: Error: {e}"))?);
+    }
+    Ok(out)
+}
+
+fn parse_from_ai_args(args: &str) -> Result<FromAi, String> {
+    let mut parts = Vec::new();
+    let (mut current, mut quote, mut escape) = (String::new(), None::<char>, false);
+    for c in args.chars() {
+        if escape {
+            current.push(c);
+            escape = false;
+            continue;
+        }
+        if c == '\\' {
+            escape = true;
+            continue;
+        }
+        if matches!(c, '"' | '\'' | '`') {
+            match quote {
+                None => quote = Some(c),
+                Some(q) if q == c => quote = None,
+                _ => {}
+            }
+            current.push(c);
+            continue;
+        }
+        if c == ',' && quote.is_none() {
+            parts.push(current.trim().to_string());
+            current.clear();
+            continue;
+        }
+        current.push(c);
+    }
+    if !current.is_empty() {
+        parts.push(current.trim().to_string());
+    }
+    let clean: Vec<String> = parts
+        .iter()
+        .map(|p| {
+            let t = p.trim();
+            let quoted = t.len() >= 2 && [('\'', '\''), ('`', '`'), ('"', '"')].iter().any(|(a, b)| t.starts_with(*a) && t.ends_with(*b));
+            if quoted {
+                t[1..t.len() - 1].replace("\\'", "'").replace("\\`", "`").replace("\\\"", "\"").replace("\\\\", "\\")
+            } else {
+                t.to_string()
             }
         })
+        .collect();
+    let raw_type = clean.get(2).cloned().unwrap_or_else(|| "string".into());
+    let kind = raw_type.to_lowercase();
+    if !["string", "number", "boolean", "json"].contains(&kind.as_str()) {
+        return Err(format!("Invalid type: {raw_type}"));
+    }
+    let default = clean.get(3).map(|v| match kind.as_str() {
+        "string" => json!(v),
+        "boolean" if v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("false") => json!(v.eq_ignore_ascii_case("true")),
+        "number" if v.parse::<f64>().is_ok() => serde_json::from_str(v).unwrap_or_else(|_| json!(v.parse::<f64>().unwrap())),
+        _ => serde_json::from_str(v).unwrap_or_else(|_| json!(v)),
+    });
+    Ok(FromAi { key: clean.first().cloned().unwrap_or_default(), description: clean.get(1).cloned(), kind, default })
+}
+
+impl Tool<'_> {
+    fn schema(&self) -> Value {
+        let (description, parameters) = match &self.kind {
+            ToolKind::Calculator => (
+                "Useful for getting the result of a math expression. The input to this tool should be a valid mathematical expression that could be executed by a simple calculator.".to_string(),
+                json!({"type": "object", "properties": {"input": {"type": "string"}}, "required": ["input"], "additionalProperties": false}),
+            ),
+            ToolKind::Node { description, args, .. } => {
+                // n8n's `generateZodSchema`, as JSON schema; every key required.
+                let mut props = Map::new();
+                for a in args {
+                    let mut prop = match a.kind.as_str() {
+                        "json" => json!({"anyOf": [{"type": "object", "minProperties": 1, "additionalProperties": true}, {"type": "array", "minItems": 1}]}),
+                        k => json!({"type": k}),
+                    };
+                    if let Some(d) = a.description.as_deref().map(str::trim).filter(|d| !d.is_empty()) {
+                        prop["description"] = json!(d);
+                    }
+                    if let Some(d) = &a.default {
+                        prop["default"] = d.clone();
+                    }
+                    props.insert(a.key.clone(), prop);
+                }
+                let required: Vec<&String> = args.iter().map(|a| &a.key).collect();
+                (description.clone(), json!({"type": "object", "properties": props, "required": required, "additionalProperties": false}))
+            }
+        };
+        json!({"type": "function", "function": {"name": self.name, "description": description, "parameters": parameters}})
     }
 
-    fn call(&self, ctx: &ExecCtx<'_>, arguments: &str) -> String {
+    async fn call(&self, ctx: &ExecCtx<'_>, arguments: &str) -> NodeResult<String> {
         let started = now_ms();
-        let args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({"input": arguments}));
-        let input = args["input"].as_str().map(String::from).unwrap_or_else(|| args.to_string());
-        let (result, output) = match calculate(&input) {
-            Ok(n) => {
-                let s = format_number(n);
-                (s.clone(), Ok(json!({"response": s})))
+        match &self.kind {
+            ToolKind::Calculator => {
+                let args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({"input": arguments}));
+                let input = args["input"].as_str().map(String::from).unwrap_or_else(|| args.to_string());
+                let result = match calculate(&input) {
+                    Ok(n) => format_number(n),
+                    Err(e) => format!("Error: {e}"),
+                };
+                record(ctx, &self.node.name, "ai_tool", json!({"input": input}), Ok(json!({"response": result})), started);
+                Ok(result)
             }
-            Err(e) => (format!("Error: {e}"), Ok(json!({"response": format!("Error: {e}")}))),
-        };
-        record(ctx, &self.node.name, "ai_tool", json!({"input": input}), output, started);
-        result
+            ToolKind::Node { base, .. } => {
+                let args = match serde_json::from_str::<Value>(arguments) {
+                    Ok(Value::Object(m)) => m,
+                    _ => Map::new(),
+                };
+                let item = Item::new(args.clone());
+                let mut data = (ctx.expr_data)();
+                data["input"] = json!([item]);
+                data["inputs"] = json!([[item]]);
+                data["source"] = json!([null]);
+                data["node"] = json!({"name": self.node.name, "type": self.node.node_type, "parameters": self.node.parameters});
+                let run_index = ctx.run.lock().unwrap().sub_runs.iter().filter(|(n, _)| *n == self.node.name).count();
+                let mut sub = ExecCtx::new(
+                    self.node,
+                    ctx.workflow,
+                    vec![vec![item]],
+                    run_index,
+                    ctx.mode,
+                    ctx.execution_id.clone(),
+                    ctx.services,
+                    ctx.options,
+                    ctx.run.clone(),
+                    Box::new(move || data.clone()),
+                );
+                let node_type = registry().get(base).expect("tool bases are registered");
+                match node_type.execute(&mut sub).await {
+                    Ok(outputs) => {
+                        // n8n's `mapResult`: the first output's JSON, stringified.
+                        let response: Vec<Value> = outputs.into_iter().next().unwrap_or_default().into_iter().map(|i| Value::Object(i.json)).collect();
+                        let response = Value::Array(response);
+                        record(ctx, &self.node.name, "ai_tool", Value::Object(args), Ok(json!({"response": response})), started);
+                        Ok(serde_json::to_string(&response).unwrap_or_default())
+                    }
+                    // n8n's agent records the tool's error and hands the model
+                    // an empty result; the run carries on.
+                    Err(e) => {
+                        record(ctx, &self.node.name, "ai_tool", Value::Object(args), Err(&e), started);
+                        Ok(String::new())
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -1203,7 +1473,7 @@ impl NodeType for Agent {
 async fn run_agent(ctx: &ExecCtx<'_>, item: usize) -> NodeResult<String> {
     let user = prompt(ctx, item)?;
     let model = load_model(ctx, item).await?;
-    let tools = load_tools(ctx)?;
+    let tools = load_tools(ctx, item)?;
     let memory = load_memory(ctx, item)?;
     let system = ctx.param_str("options.systemMessage", item, "You are a helpful assistant")?;
     let max_iterations = ctx.param_f64("options.maxIterations", item, 10.0)?.max(1.0) as usize;
@@ -1226,7 +1496,7 @@ async fn run_agent(ctx: &ExecCtx<'_>, item: usize) -> NodeResult<String> {
             let name = call.pointer("/function/name").and_then(Value::as_str).unwrap_or("");
             let args = call.pointer("/function/arguments").and_then(Value::as_str).unwrap_or("{}");
             let result = match tools.iter().find(|t| t.name == name) {
-                Some(tool) => tool.call(ctx, args),
+                Some(tool) => tool.call(ctx, args).await?,
                 None => format!("Error: there is no tool called \"{name}\""),
             };
             messages.push(json!({"role": "tool", "tool_call_id": call["id"], "content": result}));
@@ -1283,6 +1553,20 @@ impl NodeType for ChainLlm {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn from_ai_calls_are_parsed_like_n8n() {
+        let calls = extract_from_ai("={{ $fromAI('city', 'The city, e.g. \"Paris\"', 'string') }}/{{ $fromai(\"n\", ``, 'number', 5) }}").unwrap();
+        assert_eq!(calls.len(), 2);
+        assert_eq!(calls[0], FromAi { key: "city".into(), description: Some("The city, e.g. \"Paris\"".into()), kind: "string".into(), default: None });
+        assert_eq!(calls[1], FromAi { key: "n".into(), description: Some("".into()), kind: "number".into(), default: Some(json!(5)) });
+        let only_key = extract_from_ai("{{ $fromAI('q') }}").unwrap();
+        assert_eq!(only_key[0].kind, "string");
+        assert_eq!(only_key[0].description, None);
+        assert!(extract_from_ai("{{ $fromAI('x', '', 'date') }}").is_err());
+        assert!(extract_from_ai("{{ $fromAI('x' }}").is_err());
+        assert_eq!(extract_from_ai("{{ $fromAI('b', 'flag', 'boolean', 'true') }}").unwrap()[0].default, Some(json!(true)));
+    }
 
     #[test]
     fn model_names_stay_inside_their_path_segment() {
