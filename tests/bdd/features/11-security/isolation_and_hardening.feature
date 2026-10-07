@@ -55,6 +55,35 @@ Feature: Isolation and hardening
     Then the execution fails
     And the mock service received no requests
 
+  @phase-1 @beyond-n8n
+  Scenario: A redirect to an internal address is blocked
+    Given the environment variable "R8R_SSRF_ALLOWED_HOSTS" is "127.0.0.1"
+    And a mock HTTP service
+    And the mock service redirects GET "/hop" to "http://10.0.0.1/latest/meta-data/"
+    And a workflow with nodes:
+      | name  | type          | parameters                                                      |
+      | Start | manualTrigger |                                                                 |
+      | Call  | httpRequest   | {"url": "%{MOCK_URL}/hop", "options": {"timeout": 2000}}        |
+    And the connections "Start -> Call"
+    When I execute the workflow
+    Then the execution fails
+    And the node "Call" failed with an error containing "blocked"
+
+  @phase-1 @beyond-n8n
+  Scenario: A redirect to a host name that resolves internally is blocked
+    Given the environment variable "R8R_SSRF_ALLOWED_HOSTS" is "127.0.0.1"
+    And a mock HTTP service
+    And the mock service redirects GET "/hop" to its own path "/secret" via the host "localhost"
+    And the mock service responds to GET "/secret" with status 200
+    And a workflow with nodes:
+      | name  | type          | parameters                                               |
+      | Start | manualTrigger |                                                          |
+      | Call  | httpRequest   | {"url": "%{MOCK_URL}/hop", "options": {"timeout": 2000}} |
+    And the connections "Start -> Call"
+    When I execute the workflow
+    Then the execution fails
+    And the mock service received 0 requests to "/secret"
+
   @phase-5 @beyond-n8n
   Scenario: Chat model sub-nodes go through the same SSRF guard
     Given the environment variable "R8R_SSRF_ALLOWED_HOSTS" is not set

@@ -125,8 +125,24 @@ pub struct Services {
 
 impl Services {
     pub fn new(config: Config, store: Option<Store>) -> Self {
+        let allowed = std::sync::Arc::new(config.ssrf_allowed_hosts.clone());
+        let redirect_allowed = allowed.clone();
         let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::limited(21))
+            // `check_ssrf` vets the URL a node asks for; these two keep the
+            // guard on for what happens after: a redirect to an internal
+            // IP literal, and a host name that resolves (or re-resolves, at
+            // connect time) to an internal address.
+            .redirect(reqwest::redirect::Policy::custom(move |attempt| {
+                if attempt.previous().len() > 20 {
+                    return attempt.error("too many redirects");
+                }
+                let blocked = attempt.url().host_str().map(|h| h.trim_start_matches('[').trim_end_matches(']')).filter(|h| !redirect_allowed.iter().any(|a| a.eq_ignore_ascii_case(h))).and_then(|h| h.parse::<std::net::IpAddr>().ok()).filter(|ip| crate::n8n::nodes::is_internal(*ip));
+                match blocked {
+                    Some(ip) => attempt.error(format!("Redirect to the internal address {ip} blocked. Add the host to R8R_SSRF_ALLOWED_HOSTS to allow it.")),
+                    None => attempt.follow(),
+                }
+            }))
+            .dns_resolver(std::sync::Arc::new(GuardedResolver { allowed }))
             .build()
             .expect("HTTP client");
         Self { config, store, http, sub_workflows: None }
@@ -134,6 +150,30 @@ impl Services {
 
     pub fn is_server(&self) -> bool {
         self.sub_workflows.is_some()
+    }
+}
+
+/// DNS for the shared HTTP client: refuses names that resolve to an
+/// internal address (unless allow-listed), so neither a redirect nor DNS
+/// rebinding between `check_ssrf` and the connection gets past the guard.
+struct GuardedResolver {
+    allowed: std::sync::Arc<Vec<String>>,
+}
+
+impl reqwest::dns::Resolve for GuardedResolver {
+    fn resolve(&self, name: reqwest::dns::Name) -> reqwest::dns::Resolving {
+        let host = name.as_str().to_string();
+        let allowed = self.allowed.iter().any(|a| a.eq_ignore_ascii_case(&host));
+        Box::pin(async move {
+            let addrs: Vec<std::net::SocketAddr> = tokio::net::lookup_host((host.as_str(), 0)).await?.collect();
+            if !allowed {
+                if let Some(addr) = addrs.iter().find(|a| crate::n8n::nodes::is_internal(a.ip())) {
+                    let msg = format!("Request to {host} blocked: it resolves to the internal address {}. Add the host to R8R_SSRF_ALLOWED_HOSTS to allow it.", addr.ip());
+                    return Err(msg.into());
+                }
+            }
+            Ok(Box::new(addrs.into_iter()) as reqwest::dns::Addrs)
+        })
     }
 }
 

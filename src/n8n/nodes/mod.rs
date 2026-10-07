@@ -46,7 +46,7 @@ mod transform;
 mod utility;
 
 pub use conditions::evaluate_conditions;
-pub use http::check_ssrf;
+pub use http::{check_ssrf, is_internal};
 
 use super::node::NodeType;
 use serde_json::{Map, Value};

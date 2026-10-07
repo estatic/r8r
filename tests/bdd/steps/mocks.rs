@@ -745,3 +745,21 @@ async fn sigv4_signed(w: &mut R8rWorld, p: String, key_id: String, secret: Strin
     let k = mac(&mac(&mac(&mac(format!("AWS4{secret}").as_bytes(), &c[2]), &region), &service), "aws4_request");
     assert_eq!(hex::encode(mac(&k, &to_sign)), &c[6], "signature (canonical request:\n{canonical})");
 }
+
+// ---- redirects ----------------------------------------------------------------
+
+/// `302` from `from` to `target` (placeholders expanded).
+#[given(expr = "the mock service redirects GET {string} to {string}")]
+async fn redirect_to(w: &mut R8rWorld, from: String, target: String) {
+    let location = w.expand(&target);
+    Mock::given(method("GET")).and(path(from.as_str())).respond_with(ResponseTemplate::new(302).insert_header("location", location.as_str())).mount(mock(w).await).await;
+}
+
+/// `302` from `from` to the mock's own `to` path, addressed by `host`
+/// instead of the mock's IP (e.g. `localhost`, to go through DNS).
+#[given(expr = "the mock service redirects GET {string} to its own path {string} via the host {string}")]
+async fn redirect_via_host(w: &mut R8rWorld, from: String, to: String, host: String) {
+    let port = mock(w).await.address().port();
+    let location = format!("http://{host}:{port}{to}");
+    Mock::given(method("GET")).and(path(from.as_str())).respond_with(ResponseTemplate::new(302).insert_header("location", location.as_str())).mount(mock(w).await).await;
+}

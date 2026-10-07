@@ -8,7 +8,23 @@ use std::net::IpAddr;
 
 pub struct HttpRequest;
 
-fn is_internal(ip: IpAddr) -> bool {
+/// `e` plus its chain of causes, so a blocked redirect or DNS answer says
+/// why instead of just "error following redirect".
+fn with_causes(e: &dyn std::error::Error) -> String {
+    let mut out = e.to_string();
+    let mut cause = e.source();
+    while let Some(c) = cause {
+        let text = c.to_string();
+        if !out.contains(&text) {
+            out.push_str(": ");
+            out.push_str(&text);
+        }
+        cause = c.source();
+    }
+    out
+}
+
+pub fn is_internal(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => {
             v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified() || v4.is_broadcast() || v4.octets()[0] == 0
@@ -247,7 +263,7 @@ impl HttpRequest {
                 }
             }
             let resp = req.send().await.map_err(|e| {
-                let msg = if e.is_timeout() { format!("The request timed out after {timeout_ms} ms") } else { format!("The request failed: {e}") };
+                let msg = if e.is_timeout() { format!("The request timed out after {timeout_ms} ms") } else { format!("The request failed: {}", with_causes(&e)) };
                 NodeError::api(msg, None, None).at(item)
             })?;
             let status = resp.status().as_u16();
