@@ -341,26 +341,30 @@ impl Node for AgentNode {
         let empty_tools = serde_json::json!([]);
         let tools_param = ctx.parameters.get("tools").unwrap_or(&empty_tools);
 
-        let credential_id_str = ctx
-            .parameters
-            .get("auth")
-            .and_then(|a| a.get("credential_id"))
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| NodeError::ExecutionFailed("ai.agent requires auth.credential_id".into()))?;
-        let credential_id = uuid::Uuid::parse_str(credential_id_str)
-            .map_err(|e| NodeError::ExecutionFailed(format!("ai.agent: invalid credential_id: {e}")))?;
-        let credential_data = ctx
-            .credentials
-            .get(&credential_id)
-            .ok_or_else(|| NodeError::ExecutionFailed(format!("ai.agent: credential {credential_id} was not resolved for this run")))?;
-        let api_key = credential_data
-            .get("api_key")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| NodeError::ExecutionFailed("ai.agent: credential is missing \"api_key\"".into()))?;
+        // The credential is optional for OpenAI-compatible servers that take
+        // no key (Ollama): the base URL then comes from `api_base_url`.
+        let credential_data = match ctx.parameters.get("auth").and_then(|a| a.get("credential_id")).and_then(|v| v.as_str()) {
+            Some(id) => {
+                let credential_id = uuid::Uuid::parse_str(id)
+                    .map_err(|e| NodeError::ExecutionFailed(format!("ai.agent: invalid credential_id: {e}")))?;
+                Some(ctx.credentials.get(&credential_id).ok_or_else(|| {
+                    NodeError::ExecutionFailed(format!("ai.agent: credential {credential_id} was not resolved for this run"))
+                })?)
+            }
+            None => None,
+        };
+        let api_key = credential_data.and_then(|c| c.get("api_key")).and_then(|v| v.as_str()).unwrap_or("");
+        if api_key.is_empty() && provider_name == "anthropic" {
+            return Err(NodeError::ExecutionFailed(match credential_data {
+                Some(_) => "ai.agent: credential is missing \"api_key\"".into(),
+                None => "ai.agent: the Anthropic provider needs a credential with an API key".into(),
+            }));
+        }
+        let api_base_url = ctx.parameters.get("api_base_url").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
 
         match provider_name {
             "anthropic" => {
-                let base_url = ctx.parameters.get("api_base_url").and_then(|v| v.as_str());
+                let base_url = api_base_url;
                 let client = match base_url {
                     Some(url) => crate::llm::anthropic::AnthropicClient::with_base_url_for_node(url.to_string())?,
                     None => crate::llm::anthropic::AnthropicClient::new()?,
@@ -368,7 +372,12 @@ impl Node for AgentNode {
                 run_agent_loop(&client, model, api_key, system_prompt, user_message, tools_param, max_iterations, max_context_tokens, ctx).await
             }
             "openai" => {
-                let base_url = credential_data.get("base_url").and_then(|v| v.as_str()).map(|s| s.to_string());
+                let base_url = credential_data
+                    .and_then(|c| c.get("base_url"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .or(api_base_url)
+                    .map(|s| s.to_string());
                 let client = crate::llm::openai::OpenAiClient::new(base_url)?;
                 run_agent_loop(&client, model, api_key, system_prompt, user_message, tools_param, max_iterations, max_context_tokens, ctx).await
             }
@@ -895,5 +904,41 @@ mod tests {
         let err = AgentNode.execute(&ctx).await.unwrap_err().to_string();
         assert!(err.contains("missing required parameters: model, user_message"), "{err}");
         assert!(!err.contains("provider"), "provider should come from the openaiApi credential: {err}");
+    }
+
+    #[tokio::test]
+    async fn an_openai_compatible_server_runs_without_a_credential() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"role": "assistant", "content": "hi from ollama"}, "finish_reason": "stop"}]
+            })))
+            .mount(&server)
+            .await;
+        let ctx = NodeExecutionContext {
+            parameters: serde_json::json!({
+                "provider": "openai", "model": "llama3.1", "user_message": "hi", "api_base_url": server.uri()
+            }),
+            input_items: vec![Item { json: serde_json::json!({}), binary: serde_json::json!({}) }],
+            ..ctx_with_tool_executor(std::sync::Arc::new(SpyToolExecutor { calls: Mutex::new(Vec::new()), result: Ok(vec![vec![]]) }))
+        };
+        let out = AgentNode.execute(&ctx).await.unwrap();
+        assert!(serde_json::to_string(&out[0][0].json).unwrap().contains("hi from ollama"), "{:?}", out);
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests[0].headers.get("authorization").is_none());
+    }
+
+    #[tokio::test]
+    async fn anthropic_without_a_credential_says_it_needs_one() {
+        let ctx = NodeExecutionContext {
+            parameters: serde_json::json!({"provider": "anthropic", "model": "claude", "user_message": "hi"}),
+            input_items: vec![Item { json: serde_json::json!({}), binary: serde_json::json!({}) }],
+            ..Default::default()
+        };
+        let err = AgentNode.execute(&ctx).await.unwrap_err().to_string();
+        assert!(err.contains("Anthropic provider needs a credential"), "{err}");
     }
 }

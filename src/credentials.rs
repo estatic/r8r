@@ -280,11 +280,11 @@ mod tests {
 
     #[test]
     fn null_clears_an_optional_field_but_never_a_required_one() {
-        let schema = schema_for("openaiApi");
-        let stored = serde_json::json!({"api_key": "sk-1", "base_url": "http://local:8080"});
-        let patch = serde_json::json!({"base_url": null});
-        assert_eq!(merge_credential_data(schema, &stored, &patch), serde_json::json!({"api_key": "sk-1"}));
-        let patch = serde_json::json!({"api_key": null});
+        let schema = schema_for("basicAuth");
+        let stored = serde_json::json!({"username": "ada", "password": "secret"});
+        let patch = serde_json::json!({"password": null});
+        assert_eq!(merge_credential_data(schema, &stored, &patch), serde_json::json!({"username": "ada"}));
+        let patch = serde_json::json!({"username": null});
         assert_eq!(merge_credential_data(schema, &stored, &patch), stored);
     }
 

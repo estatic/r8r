@@ -47,7 +47,8 @@ pub fn known_credential_types() -> &'static [CredentialTypeSchema] {
             display_name: "OpenAI API",
             generic: false,
             fields: &[
-                CredentialField { name: "api_key", label: "API Key", field_type: FieldType::Password, required: true },
+                // Optional: local OpenAI-compatible servers (Ollama, ...) take none.
+                CredentialField { name: "api_key", label: "API Key (optional for local servers)", field_type: FieldType::Password, required: false },
                 CredentialField { name: "base_url", label: "Base URL (optional)", field_type: FieldType::Text, required: false },
             ],
         },
@@ -127,12 +128,12 @@ mod tests {
     }
 
     #[test]
-    fn openai_api_requires_api_key_and_has_optional_base_url() {
+    fn openai_api_has_an_optional_api_key_for_local_servers_and_optional_base_url() {
         let schema = find("openaiApi");
         assert!(!schema.generic);
         assert_eq!(schema.fields.len(), 2);
         assert_eq!(schema.fields[0].name, "api_key");
-        assert!(schema.fields[0].required);
+        assert!(!schema.fields[0].required);
         assert_eq!(schema.fields[1].name, "base_url");
         assert_eq!(schema.fields[1].field_type, FieldType::Text);
         assert!(!schema.fields[1].required);

@@ -87,10 +87,12 @@ impl ProviderClient for OpenAiClient {
                 .collect::<Vec<_>>());
         }
 
-        let response = self
-            .client
-            .post(format!("{}/chat/completions", self.base_url))
-            .bearer_auth(api_key)
+        let mut request = self.client.post(format!("{}/chat/completions", self.base_url));
+        // Local OpenAI-compatible servers (Ollama, ...) take no key.
+        if !api_key.is_empty() {
+            request = request.bearer_auth(api_key);
+        }
+        let response = request
             .json(&body)
             .send()
             .await
@@ -213,6 +215,27 @@ mod tests {
             ProviderResponse::Text(text) => assert_eq!(text, "Hello there"),
             other => panic!("expected Text, got {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn an_empty_api_key_sends_no_authorization_header() {
+        // Local OpenAI-compatible servers (Ollama, llama.cpp, LM Studio)
+        // take no key.
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let client = OpenAiClient::with_base_url(server.uri());
+        let messages = vec![LlmMessage::User { content: "hi".into() }];
+        client.send_message("", &messages, &[], "llama3.1", "").await.unwrap();
+
+        let requests = server.received_requests().await.unwrap();
+        assert!(requests[0].headers.get("authorization").is_none(), "{:?}", requests[0].headers);
     }
 
     #[tokio::test]
