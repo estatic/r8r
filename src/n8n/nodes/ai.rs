@@ -37,7 +37,7 @@ pub fn all() -> Vec<Box<dyn NodeType>> {
 }
 
 /// Sub-nodes only run when a root node calls them.
-struct SubNode(&'static str);
+pub(super) struct SubNode(pub &'static str);
 
 #[async_trait::async_trait]
 impl NodeType for SubNode {

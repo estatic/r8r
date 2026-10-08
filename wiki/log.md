@@ -40,3 +40,5 @@ Operations:
 ## [2026-10-07] query | Summarization Chain v2 with ported LangChain text splitters and n8n's JSON document loader (fixtures from the real packages); summarization 4/4 on r8r and n8n; full suite 974/974
 
 ## [2026-10-07] query | AI Agent structured output (Structured Output Parser via format_final_json_response) and n8n's no-default-system-message behaviour; full suite 978/978
+
+## [2026-10-08] query | Plan 2.7 started: OpenAI embeddings, Default Data Loader, text splitter sub-nodes, Simple Vector Store insert/load (scores bit-identical to n8n); full suite 980/980

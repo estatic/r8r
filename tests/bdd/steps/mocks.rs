@@ -815,3 +815,49 @@ async fn redirect_via_host(w: &mut R8rWorld, from: String, to: String, host: Str
     let location = format!("http://{host}:{port}{to}");
     Mock::given(method("GET")).and(path(from.as_str())).respond_with(ResponseTemplate::new(302).insert_header("location", location.as_str())).mount(mock(w).await).await;
 }
+
+// ---- OpenAI embeddings (/v1/embeddings) ---------------------------------------
+
+/// Answers like OpenAI: one embedding per input text (a string or an
+/// array), looked up in a text -> vector table (`[0, 0, 1]` if absent), as
+/// base64 float32 when the request asks for it (the OpenAI SDK's default).
+struct EmbeddingsResponder(serde_json::Map<String, Value>);
+
+impl wiremock::Respond for EmbeddingsResponder {
+    fn respond(&self, request: &Request) -> ResponseTemplate {
+        use base64::Engine as _;
+        let body: Value = serde_json::from_slice(&request.body).unwrap_or(Value::Null);
+        let texts: Vec<String> = match &body["input"] {
+            Value::String(s) => vec![s.clone()],
+            Value::Array(a) => a.iter().map(|t| t.as_str().unwrap_or("").to_string()).collect(),
+            _ => vec![],
+        };
+        let base64 = body["encoding_format"] == "base64";
+        let data: Vec<Value> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, t)| {
+                let v: Vec<f64> = self.0.get(t).and_then(Value::as_array).map(|a| a.iter().map(|x| x.as_f64().unwrap()).collect()).unwrap_or_else(|| vec![0.0, 0.0, 1.0]);
+                let embedding = if base64 {
+                    json!(base64::engine::general_purpose::STANDARD.encode(v.iter().flat_map(|f| (*f as f32).to_le_bytes()).collect::<Vec<u8>>()))
+                } else {
+                    json!(v)
+                };
+                json!({"object": "embedding", "index": i, "embedding": embedding})
+            })
+            .collect();
+        ResponseTemplate::new(200).set_body_json(json!({"object": "list", "data": data, "model": body["model"], "usage": {"prompt_tokens": 1, "total_tokens": 1}}))
+    }
+}
+
+/// Doc string: `{"text": [vector], ...}`.
+#[given(expr = "a mock OpenAI embeddings API with the vectors:")]
+async fn embeddings_api(w: &mut R8rWorld, step: &Step) {
+    let table = parse_strict(docstring(step), "vectors").as_object().expect("an object of text -> vector").clone();
+    Mock::given(method("POST")).and(path("/v1/embeddings")).respond_with(EmbeddingsResponder(table)).mount(mock(w).await).await;
+}
+
+#[then(regex = r#"^the mock embeddings API received (\d+) requests?$"#)]
+async fn embeddings_count(w: &mut R8rWorld, n: usize) {
+    assert_eq!(requests_to(w, "/v1/embeddings").await.len(), n);
+}

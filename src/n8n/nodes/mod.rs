@@ -2,6 +2,7 @@
 
 mod ai;
 mod ai_chains;
+mod ai_vector;
 pub mod doc_loader;
 pub mod text_split;
 mod aws_sigv4;
@@ -109,6 +110,9 @@ impl Default for Registry {
             r.add(n);
         }
         for n in ai_chains::all() {
+            r.add(n);
+        }
+        for n in ai_vector::all() {
             r.add(n);
         }
         for n in postgres::all() {

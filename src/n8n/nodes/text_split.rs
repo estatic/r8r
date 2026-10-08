@@ -243,6 +243,22 @@ mod tests {
         }
     }
 
+    /// The Recursive Character Text Splitter sub-node drops separators.
+    #[test]
+    fn matches_langchain_without_kept_separators() {
+        let cases: Value = serde_json::from_str(include_str!("testdata/text_split_nokeep_fixtures.json")).unwrap();
+        for case in cases.as_array().unwrap() {
+            let separators = ["\n\n", "\n", " ", ""].iter().map(|s| s.to_string()).collect();
+            let s = Splitter::new(case["size"].as_u64().unwrap() as usize, case["overlap"].as_u64().unwrap() as usize, false, Kind::Recursive { separators }).unwrap();
+            let docs = s.create_documents(&[case["text"].as_str().unwrap().to_string()], &[]);
+            let chunks: Vec<&str> = docs.iter().map(|d| d.page_content.as_str()).collect();
+            let expected: Vec<&str> = case["chunks"].as_array().unwrap().iter().map(|c| c.as_str().unwrap()).collect();
+            assert_eq!(chunks, expected, "size {}", case["size"]);
+            let lines: Vec<Value> = docs.iter().map(|d| d.metadata["loc"]["lines"].clone()).collect();
+            assert_eq!(Value::Array(lines), case["lines"]);
+        }
+    }
+
     #[test]
     fn overlap_must_be_smaller_than_the_chunk() {
         assert!(Splitter::recursive(10, 10).is_err());
