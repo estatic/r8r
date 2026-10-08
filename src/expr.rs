@@ -123,11 +123,36 @@ pub fn eval_js(script: &str, ctx: &EvalContext) -> Result<serde_json::Value, Exp
                 if start.elapsed() >= SCRIPT_TIMEOUT {
                     return Err(ExprError::Timeout);
                 }
-                return Err(ExprError::Runtime(e.to_string()));
+                return Err(ExprError::Runtime(exception_message(&js, e)));
             }
         };
         js_to_json(&js, result)
     })
+}
+
+/// The message of what a script threw. For a JS exception rquickjs only
+/// returns `Error::Exception`, whose text is a generic "Exception generated
+/// by QuickJS"; the thrown value itself waits in the context.
+fn exception_message(js: &rquickjs::Ctx<'_>, e: rquickjs::Error) -> String {
+    if !matches!(e, rquickjs::Error::Exception) {
+        return e.to_string();
+    }
+    let thrown = js.catch();
+    if let Some(ex) = thrown.as_exception() {
+        // As JS prints it ("TypeError: …"); rquickjs's Display would give
+        // "Error:<line>:<col> …" plus the stack.
+        let name: Option<String> = ex.get("name").ok();
+        let message = ex.message().unwrap_or_default();
+        return match name.filter(|n| !n.is_empty()) {
+            Some(n) if !message.is_empty() => format!("{n}: {message}"),
+            Some(n) => n,
+            None => message,
+        };
+    }
+    match thrown.as_string().and_then(|s| s.to_string().ok()) {
+        Some(s) => s,
+        None => js_to_json(js, thrown).map(|v| v.to_string()).unwrap_or_else(|_| e.to_string()),
+    }
 }
 
 /// Builds the `$items()` native function bound to the precomputed items
@@ -312,6 +337,22 @@ mod tests {
     fn malformed_script_returns_err_not_panic() {
         let result = eval_js("this is not valid js (((", &empty_ctx());
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn a_thrown_error_reports_its_javascript_message() {
+        let result = eval_js("$json.message.text", &empty_ctx());
+        match result {
+            Err(ExprError::Runtime(msg)) => assert!(
+                msg == "TypeError: cannot read property 'text' of undefined",
+                "expected the TypeError's own message, got {msg:?}"
+            ),
+            other => panic!("expected ExprError::Runtime, got {other:?}"),
+        }
+        match eval_js("throw 'plain string'", &empty_ctx()) {
+            Err(ExprError::Runtime(msg)) => assert!(msg.contains("plain string"), "got {msg:?}"),
+            other => panic!("expected ExprError::Runtime, got {other:?}"),
+        }
     }
 
     #[test]
