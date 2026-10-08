@@ -6,6 +6,8 @@ import AgentSettings from './AgentSettings.vue'
 import TelegramTriggerSettings from './TelegramTriggerSettings.vue'
 import SetFieldsEditor from './SetFieldsEditor.vue'
 import CodeSettings from './CodeSettings.vue'
+import TelegramSendSettings from './TelegramSendSettings.vue'
+import { buildMessage, loadMessage, type MessageForm } from '../canvas/telegramMessage'
 import { CODE_EXAMPLES, type CodeLanguage } from '../canvas/codeExamples'
 import { buildFields, loadRows, type SetFieldRow } from '../canvas/setFields'
 import type { UpstreamSource } from '../canvas/inputData'
@@ -77,13 +79,18 @@ const takesCredential = computed(() => {
   return !nodeTypesStore.loaded || !meta || meta.credential_types.length > 0
 })
 
+const isTelegramSend = computed(() => props.node?.node_type === 'telegram.sendMessage')
+const telegramMessage = ref<MessageForm>(loadMessage({}))
+// The keys the Send Message form owns (it rewrites them all on Apply).
+const TELEGRAM_MESSAGE_KEYS = ['chat_id', 'text', 'parse_mode', 'reply_markup', 'disable_notification', 'protect_content', 'disable_web_page_preview', 'reply_to_message_id', 'message_thread_id']
+
 const isLoop = computed(() => props.node?.node_type === 'core.loop')
 const batchSize = ref<number | string>(1)
 
 const isSet = computed(() => props.node?.node_type === 'core.set')
 const setRows = ref<SetFieldRow[]>([])
 // Nodes with their own form keep the raw JSON under "Advanced".
-const hasForm = computed(() => isAgent.value || isSet.value || isCode.value || isLoop.value)
+const hasForm = computed(() => isAgent.value || isSet.value || isCode.value || isLoop.value || isTelegramSend.value)
 
 const isTelegramTrigger = computed(() => props.node?.node_type === 'telegram.trigger')
 // Nothing chosen yet means every update, as the trigger treats it.
@@ -137,6 +144,7 @@ const formSnapshot = computed(() =>
     codeFields.value.language,
     codeFields.value.script,
     batchSize.value,
+    isTelegramSend.value ? telegramMessage.value : null,
     telegramUpdates.value,
     setRows.value,
   ]),
@@ -163,6 +171,7 @@ watch(
       setRows.value = node.node_type === 'core.set' ? loadRows(node.parameters?.fields) : []
       if (node.node_type === 'core.code') codeFields.value = loadCode(node.parameters ?? {})
       batchSize.value = typeof node.parameters?.batch_size === 'number' ? node.parameters.batch_size : 1
+      telegramMessage.value = loadMessage(node.node_type === 'telegram.sendMessage' ? (node.parameters ?? {}) : {})
       loaded.value = formSnapshot.value
       // A new Code node shows its example: save it, so the node can run as shown.
       if (node.node_type === 'core.code' && typeof node.parameters?.script !== 'string') {
@@ -208,6 +217,12 @@ function build(): NodeInstance | string {
     const { credential_id: _dropped, ...rest } = parsed.auth as Record<string, unknown>
     if (Object.keys(rest).length > 0) parsed.auth = rest
     else delete parsed.auth
+  }
+  if (isTelegramSend.value) {
+    const built = buildMessage(telegramMessage.value)
+    if ('error' in built) return built.error
+    for (const key of TELEGRAM_MESSAGE_KEYS) delete parsed[key]
+    Object.assign(parsed, built.fields)
   }
   if (isLoop.value) {
     const n = Number(batchSize.value)
@@ -372,6 +387,7 @@ onBeforeUnmount(() => {
           done, <b>done</b> continues with everything they sent back.
         </p>
       </fieldset>
+      <TelegramSendSettings v-if="isTelegramSend" v-model="telegramMessage" />
       <CodeSettings v-if="isCode" v-model="codeFields" :sources="inputSources" :node-labels="nodeLabels" />
       <SetFieldsEditor v-if="isSet" v-model="setRows" :sources="inputSources" :node-labels="nodeLabels" />
       <div v-if="takesCredential" data-testid="credential-section">

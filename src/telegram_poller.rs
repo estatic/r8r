@@ -474,6 +474,32 @@ async fn trigger_bot_token(storage: &dyn Storage, trigger_node: &NodeInstance) -
         .to_string())
 }
 
+/// Where the bot's token may be sent: the credential's Base URL, else
+/// Telegram. A node-level `api_base_url` is refused, since whoever edits the
+/// workflow could point it at a server of their own.
+async fn trigger_api_base_url(storage: &dyn Storage, trigger_node: &NodeInstance) -> anyhow::Result<String> {
+    if trigger_node.parameters.get("api_base_url").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()) {
+        return Err(anyhow::anyhow!(
+            "telegram.trigger: api_base_url can't be set on the node; set the Base URL on the Telegram credential instead"
+        ));
+    }
+    let credential_id = trigger_node
+        .parameters
+        .pointer("/auth/credential_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .ok_or_else(|| anyhow::anyhow!("telegram.trigger requires parameters.auth.credential_id"))?;
+    let credential = storage.get_credential(credential_id).await?.ok_or_else(|| anyhow::anyhow!("credential {credential_id} does not exist"))?;
+    Ok(credential
+        .data
+        .get("base_url")
+        .and_then(|v| v.as_str())
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_TELEGRAM_API_BASE_URL)
+        .trim_end_matches('/')
+        .to_string())
+}
+
 pub async fn activate_telegram_trigger(
     state: &AppState,
     workflow: &Workflow,
@@ -481,13 +507,7 @@ pub async fn activate_telegram_trigger(
 ) -> anyhow::Result<()> {
     validate_updates(trigger_node)?;
     let bot_token = trigger_bot_token(state.storage.as_ref(), trigger_node).await?;
-
-    let api_base_url = trigger_node
-        .parameters
-        .get("api_base_url")
-        .and_then(|v| v.as_str())
-        .unwrap_or(DEFAULT_TELEGRAM_API_BASE_URL)
-        .to_string();
+    let api_base_url = trigger_api_base_url(state.storage.as_ref(), trigger_node).await?;
 
     let storage = state.storage.clone();
     let registry = state.registry.clone();
@@ -549,10 +569,10 @@ pub async fn wait_for_test_update(
     wait: std::time::Duration,
 ) -> Result<Item, TestUpdateError> {
     let bot_token = trigger_bot_token(storage, trigger_node).await.map_err(|e| TestUpdateError::Failed(e.to_string()))?;
-    let api_base_url = trigger_node.parameters.get("api_base_url").and_then(|v| v.as_str()).unwrap_or(DEFAULT_TELEGRAM_API_BASE_URL);
+    let api_base_url = trigger_api_base_url(storage, trigger_node).await.map_err(|e| TestUpdateError::Failed(e.to_string()))?;
     let client = build_client().map_err(TestUpdateError::Failed)?;
     let allowed = trigger_updates(trigger_node);
-    let update = next_update(&client, api_base_url, &bot_token, &allowed, wait).await?;
+    let update = next_update(&client, &api_base_url, &bot_token, &allowed, wait).await?;
     Ok(Item { json: update, binary: serde_json::json!({}) })
 }
 
@@ -929,7 +949,7 @@ mod poller_tests {
         }
     }
 
-    fn trigger_workflow(credential_id: Uuid, api_base_url: &str, downstream: NodeInstance, connect_to: &str) -> Workflow {
+    fn trigger_workflow(credential_id: Uuid, downstream: NodeInstance, connect_to: &str) -> Workflow {
         let now = chrono::Utc::now();
         Workflow {
             id: Uuid::new_v4(),
@@ -942,7 +962,6 @@ mod poller_tests {
                     position: (0.0, 0.0),
                     parameters: serde_json::json!({
                         "auth": {"credential_id": credential_id.to_string()},
-                        "api_base_url": api_base_url,
                     }),
                     disabled: false,
                     settings: Default::default(),
@@ -1013,7 +1032,6 @@ mod poller_tests {
 
         let wf = trigger_workflow(
             credential_id,
-            &telegram.uri(),
             NodeInstance {
                 id: "passthrough".into(),
                 node_type: "core.noop".into(),
@@ -1116,7 +1134,7 @@ mod poller_tests {
             disabled: false,
             settings: Default::default(),
         };
-        let wf = trigger_workflow(credential_id, &telegram.uri(), set("old"), "set");
+        let wf = trigger_workflow(credential_id, set("old"), "set");
         storage.create_workflow(&wf).await.unwrap();
 
         let (events, _rx) = tokio::sync::broadcast::channel(16);
@@ -1185,7 +1203,6 @@ mod poller_tests {
 
         let wf = trigger_workflow(
             credential_id,
-            &telegram.uri(),
             NodeInstance {
                 id: "passthrough".into(),
                 node_type: "core.noop".into(),
@@ -1401,7 +1418,7 @@ mod poller_tests {
             disabled: false,
             settings: Default::default(),
         };
-        let wf = trigger_workflow(credential.id, &telegram.uri(), noop, "passthrough");
+        let wf = trigger_workflow(credential.id, noop, "passthrough");
         storage.create_workflow(&wf).await.unwrap();
 
         let (events, _rx) = tokio::sync::broadcast::channel(16);

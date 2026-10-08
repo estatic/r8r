@@ -455,6 +455,48 @@ describe('NodeConfigPanel', () => {
     })
   })
 
+  describe('Telegram Send Message', () => {
+    const tg = (parameters: Record<string, unknown>): NodeInstance => ({ id: 's1', node_type: 'telegram.sendMessage', position: [0, 0], parameters, disabled: false })
+    const applied = (w: ReturnType<typeof mount>) => (w.emitted('update')![0][0] as NodeInstance).parameters
+
+    it('a new node answers the incoming chat; text and parse mode are saved', async () => {
+      const wrapper = mount(NodeConfigPanel, { props: { node: tg({}) } })
+      expect((wrapper.find('input[aria-label="Chat ID"]').element as HTMLInputElement).value).toBe('{{ $json.message.chat.id }}')
+      await wrapper.find('textarea[aria-label="Text"]').setValue('{{ $json.output }}')
+      await wrapper.find('select[aria-label="Parse mode"]').setValue('HTML')
+      await clickApply(wrapper)
+      expect(applied(wrapper)).toMatchObject({ chat_id: '{{ $json.message.chat.id }}', text: '{{ $json.output }}', parse_mode: 'HTML' })
+    })
+
+    it('builds an inline keyboard', async () => {
+      const wrapper = mount(NodeConfigPanel, { props: { node: tg({ chat_id: '1', text: 'Choose' }) } })
+      await wrapper.find('select[aria-label="Reply markup"]').setValue('inline')
+      await wrapper.find('input[aria-label="Button label"]').setValue('Yes')
+      await wrapper.find('input[aria-label="Button value"]').setValue('yes')
+      await wrapper.find('[data-testid="add-button"]').trigger('click')
+      const labels = wrapper.findAll('input[aria-label="Button label"]')
+      await labels[1].setValue('Docs')
+      await wrapper.findAll('select[aria-label="Button action"]')[1].setValue('url')
+      await wrapper.findAll('input[aria-label="Button value"]')[1].setValue('https://example.com')
+      await clickApply(wrapper)
+      expect(applied(wrapper).reply_markup).toEqual({ inline_keyboard: [[{ text: 'Yes', callback_data: 'yes' }, { text: 'Docs', url: 'https://example.com' }]] })
+    })
+
+    it('saves additional fields', async () => {
+      const wrapper = mount(NodeConfigPanel, { props: { node: tg({ chat_id: '1', text: 'hi' }) } })
+      await wrapper.find('input[aria-label="Disable notification"]').setValue(true)
+      await wrapper.find('input[aria-label="Reply to message ID"]').setValue('{{ $json.message.message_id }}')
+      await clickApply(wrapper)
+      expect(applied(wrapper)).toMatchObject({ disable_notification: true, reply_to_message_id: '{{ $json.message.message_id }}' })
+    })
+
+    it('refuses a message without text', async () => {
+      const wrapper = mount(NodeConfigPanel, { props: { node: tg({ chat_id: '1' }) } })
+      await clickApply(wrapper)
+      expect(wrapper.text()).toContain('Text is required.')
+    })
+  })
+
   describe('Loop Over Items', () => {
     const loopNode = (parameters: Record<string, unknown>): NodeInstance => ({ id: 'l1', node_type: 'core.loop', position: [0, 0], parameters, disabled: false })
     const size = (w: ReturnType<typeof mount>) => w.find('input[aria-label="Items per batch"]')

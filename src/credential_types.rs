@@ -34,7 +34,11 @@ pub fn known_credential_types() -> &'static [CredentialTypeSchema] {
             credential_type: "telegramApi",
             display_name: "Telegram Bot",
             generic: false,
-            fields: &[CredentialField { name: "bot_token", label: "Bot Token", field_type: FieldType::Password, required: true }],
+            fields: &[
+                CredentialField { name: "bot_token", label: "Bot Token", field_type: FieldType::Password, required: true },
+                // Where the token may be sent (a self-hosted Bot API server); only the credential's owner sets it.
+                CredentialField { name: "base_url", label: "Base URL (optional)", field_type: FieldType::Text, required: false },
+            ],
         },
         CredentialTypeSchema {
             credential_type: "anthropicApi",
@@ -115,10 +119,12 @@ mod tests {
     fn telegram_api_requires_bot_token() {
         let schema = find("telegramApi");
         assert!(!schema.generic);
-        assert_eq!(schema.fields.len(), 1);
+        assert_eq!(schema.fields.len(), 2);
         assert_eq!(schema.fields[0].name, "bot_token");
         assert_eq!(schema.fields[0].field_type, FieldType::Password);
         assert!(schema.fields[0].required);
+        assert_eq!(schema.fields[1].name, "base_url");
+        assert!(!schema.fields[1].required);
     }
 
     #[test]

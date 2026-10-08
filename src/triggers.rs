@@ -332,7 +332,7 @@ mod tests {
         assert!(state.trigger_registry.take_cron_job(wf2.id).is_none());
     }
 
-    fn telegram_trigger_workflow(credential_id: Uuid, api_base_url: &str) -> Workflow {
+    fn telegram_trigger_workflow(credential_id: Uuid) -> Workflow {
         let now = chrono::Utc::now();
         Workflow {
             id: Uuid::new_v4(),
@@ -345,7 +345,6 @@ mod tests {
                     position: (0.0, 0.0),
                     parameters: serde_json::json!({
                         "auth": {"credential_id": credential_id.to_string()},
-                        "api_base_url": api_base_url,
                     }),
                     disabled: false,
                     settings: Default::default(),
@@ -386,7 +385,8 @@ mod tests {
                 id: credential_id,
                 name: "bot".into(),
                 credential_type: "telegramApi".into(),
-                data: serde_json::json!({"bot_token": "111:AAA"}),
+                // A closed port: the poll just fails and retries.
+                data: serde_json::json!({"bot_token": "111:AAA", "base_url": "http://127.0.0.1:1"}),
                 owner_id,
                 created_at: chrono::Utc::now(),
                 updated_at: chrono::Utc::now(),
@@ -400,7 +400,7 @@ mod tests {
     async fn activate_registers_a_telegram_poll_for_a_telegram_trigger_start_node() {
         let state = test_state().await;
         let credential_id = create_telegram_credential(&state).await;
-        let wf = telegram_trigger_workflow(credential_id, "http://127.0.0.1:1");
+        let wf = telegram_trigger_workflow(credential_id);
         state.storage.create_workflow(&wf).await.unwrap();
 
         activate_workflow_triggers(&state, &wf).await.unwrap();
@@ -412,7 +412,7 @@ mod tests {
     #[tokio::test]
     async fn activate_errors_when_telegram_trigger_credential_id_is_missing() {
         let state = test_state().await;
-        let mut wf = telegram_trigger_workflow(Uuid::new_v4(), "http://127.0.0.1:1");
+        let mut wf = telegram_trigger_workflow(Uuid::new_v4());
         wf.nodes[0].parameters = serde_json::json!({});
         let result = activate_workflow_triggers(&state, &wf).await;
         assert!(result.is_err());
@@ -421,7 +421,7 @@ mod tests {
     #[tokio::test]
     async fn activate_errors_when_telegram_trigger_credential_does_not_exist() {
         let state = test_state().await;
-        let wf = telegram_trigger_workflow(Uuid::new_v4(), "http://127.0.0.1:1");
+        let wf = telegram_trigger_workflow(Uuid::new_v4());
         let result = activate_workflow_triggers(&state, &wf).await;
         assert!(result.is_err());
     }
@@ -430,7 +430,7 @@ mod tests {
     async fn deactivate_aborts_a_previously_activated_telegram_poll() {
         let state = test_state().await;
         let credential_id = create_telegram_credential(&state).await;
-        let wf = telegram_trigger_workflow(credential_id, "http://127.0.0.1:1");
+        let wf = telegram_trigger_workflow(credential_id);
         state.storage.create_workflow(&wf).await.unwrap();
         activate_workflow_triggers(&state, &wf).await.unwrap();
 

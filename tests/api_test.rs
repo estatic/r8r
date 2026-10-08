@@ -1298,7 +1298,7 @@ async fn credential_authenticated_telegram_send_message_executes_end_to_end() {
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
-                    serde_json::json!({"name": "my-bot", "credential_type": "telegramApi", "data": {"bot_token": "987:XYZ"}}).to_string(),
+                    serde_json::json!({"name": "my-bot", "credential_type": "telegramApi", "data": {"bot_token": "987:XYZ", "base_url": mock_server.uri()}}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -1316,8 +1316,7 @@ async fn credential_authenticated_telegram_send_message_executes_end_to_end() {
             {"id": "send", "node_type": "telegram.sendMessage", "position": [1.0, 0.0], "parameters": {
                 "chat_id": "42",
                 "text": "hello from r8r",
-                "auth": {"credential_id": credential_id},
-                "api_base_url": mock_server.uri()
+                "auth": {"credential_id": credential_id}
             }, "disabled": false}
         ],
         "connections": [
@@ -1412,7 +1411,7 @@ async fn telegram_trigger_fires_downstream_node_on_incoming_update() {
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
-                    serde_json::json!({"name": "incoming-bot", "credential_type": "telegramApi", "data": {"bot_token": "111:AAA"}}).to_string(),
+                    serde_json::json!({"name": "incoming-bot", "credential_type": "telegramApi", "data": {"bot_token": "111:AAA", "base_url": telegram.uri()}}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -1430,7 +1429,7 @@ async fn telegram_trigger_fires_downstream_node_on_incoming_update() {
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
-                    serde_json::json!({"name": "outgoing-bot", "credential_type": "telegramApi", "data": {"bot_token": "222:BBB"}}).to_string(),
+                    serde_json::json!({"name": "outgoing-bot", "credential_type": "telegramApi", "data": {"bot_token": "222:BBB", "base_url": telegram.uri()}}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -1444,14 +1443,12 @@ async fn telegram_trigger_fires_downstream_node_on_incoming_update() {
         "name": "telegram-trigger-e2e-wf",
         "nodes": [
             {"id": "trigger", "node_type": "telegram.trigger", "position": [0.0, 0.0], "parameters": {
-                "auth": {"credential_id": incoming_cred_id},
-                "api_base_url": telegram.uri()
+                "auth": {"credential_id": incoming_cred_id}
             }, "disabled": false},
             {"id": "echo", "node_type": "telegram.sendMessage", "position": [1.0, 0.0], "parameters": {
                 "chat_id": "{{ $json.message.chat.id }}",
                 "text": "echo: {{ $json.message.text }}",
-                "auth": {"credential_id": outgoing_cred_id},
-                "api_base_url": telegram.uri()
+                "auth": {"credential_id": outgoing_cred_id}
             }, "disabled": false}
         ],
         "connections": [

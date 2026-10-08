@@ -83,6 +83,26 @@ impl Node for TelegramSendMessageNode {
 /// `bot_token` value -- only generic, constant descriptions (plus, in the
 /// `ok: false` branch, Telegram's own non-secret `description` field from
 /// the parsed response body).
+/// The `sendMessage` body: chat and text, plus the options that are set
+/// (n8n's "Reply Markup" and "Additional Fields"). Unset, empty or false
+/// options are left out, as Telegram's defaults then apply.
+fn message_body(p: &serde_json::Value, chat_id: serde_json::Value, text: &str) -> serde_json::Value {
+    let mut body = serde_json::json!({"chat_id": chat_id, "text": text});
+    let set = |v: &serde_json::Value| !(v.is_null() || v == &serde_json::json!("") || v == &serde_json::json!(false));
+    for key in ["parse_mode", "reply_markup", "disable_notification", "protect_content", "message_thread_id"] {
+        if let Some(v) = p.get(key).filter(|v| set(v)) {
+            body[key] = v.clone();
+        }
+    }
+    if let Some(id) = p.get("reply_to_message_id").filter(|v| set(v)) {
+        body["reply_parameters"] = serde_json::json!({"message_id": id});
+    }
+    if p.get("disable_web_page_preview").and_then(|v| v.as_bool()) == Some(true) {
+        body["link_preview_options"] = serde_json::json!({"is_disabled": true});
+    }
+    body
+}
+
 async fn execute_with_client(
     client: &reqwest::Client,
     ctx: &NodeExecutionContext,
@@ -115,11 +135,19 @@ async fn execute_with_client(
         .and_then(|v| v.as_str())
         .ok_or_else(|| NodeError::ExecutionFailed("telegramApi credential missing \"bot_token\"".into()))?;
 
-    let base_url = ctx
-        .parameters
-        .get("api_base_url")
+    // The bot token goes only where its credential says: a node-set address
+    // could be pointed anywhere by whoever edits the workflow.
+    if ctx.parameters.get("api_base_url").and_then(|v| v.as_str()).is_some_and(|s| !s.is_empty()) {
+        return Err(NodeError::ExecutionFailed(
+            "telegram.sendMessage: api_base_url can't be set on the node; set the Base URL on the Telegram credential instead".into(),
+        ));
+    }
+    let base_url = credential_data
+        .get("base_url")
         .and_then(|v| v.as_str())
-        .unwrap_or(DEFAULT_API_BASE_URL);
+        .filter(|s| !s.is_empty())
+        .unwrap_or(DEFAULT_API_BASE_URL)
+        .trim_end_matches('/');
     let url = format!("{base_url}/bot{bot_token}/sendMessage");
 
     // Never interpolate `e` (the reqwest::Error) or `url` into any error
@@ -128,7 +156,7 @@ async fn execute_with_client(
     // plan's Global Constraints.
     let response = client
         .post(&url)
-        .json(&serde_json::json!({"chat_id": chat_id, "text": text}))
+        .json(&message_body(&ctx.parameters, chat_id, text))
         .send()
         .await
         .map_err(|_| NodeError::ExecutionFailed("telegram.sendMessage: request to Telegram API failed".into()))?;
@@ -175,15 +203,14 @@ mod tests {
 
         let credential_id = Uuid::new_v4();
         let mut credentials = std::collections::HashMap::new();
-        credentials.insert(credential_id, serde_json::json!({"bot_token": "123:ABC"}));
+        credentials.insert(credential_id, serde_json::json!({"bot_token": "123:ABC", "base_url": server.uri()}));
 
         let node = TelegramSendMessageNode;
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({
                 "chat_id": "42",
                 "text": "hello",
-                "auth": {"credential_id": credential_id.to_string()},
-                "api_base_url": server.uri()
+                "auth": {"credential_id": credential_id.to_string()}
             }),
             input_items: vec![],
             credentials,
@@ -195,6 +222,77 @@ mod tests {
         };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result[0][0].json["result"]["message_id"], 42);
+    }
+
+    fn send_ctx(server_uri: &str, params: serde_json::Value) -> NodeExecutionContext {
+        let credential_id = Uuid::new_v4();
+        let mut parameters = params;
+        parameters["auth"] = serde_json::json!({"credential_id": credential_id.to_string()});
+        NodeExecutionContext {
+            parameters,
+            credentials: std::collections::HashMap::from([(credential_id, serde_json::json!({"bot_token": "123:ABC", "base_url": server_uri}))]),
+            ..Default::default()
+        }
+    }
+
+    #[tokio::test]
+    async fn sends_formatting_reply_markup_and_additional_fields() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/bot123:ABC/sendMessage$"))
+            .and(body_json(serde_json::json!({
+                "chat_id": 42,
+                "text": "*hi*",
+                "parse_mode": "MarkdownV2",
+                "reply_markup": {"inline_keyboard": [[{"text": "Yes", "callback_data": "yes"}, {"text": "Site", "url": "https://example.com"}]]},
+                "disable_notification": true,
+                "protect_content": true,
+                "message_thread_id": 7,
+                "reply_parameters": {"message_id": 99},
+                "link_preview_options": {"is_disabled": true}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "result": {"message_id": 1}})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let ctx = send_ctx(&server.uri(), serde_json::json!({
+            "chat_id": 42,
+            "text": "*hi*",
+            "parse_mode": "MarkdownV2",
+            "reply_markup": {"inline_keyboard": [[{"text": "Yes", "callback_data": "yes"}, {"text": "Site", "url": "https://example.com"}]]},
+            "disable_notification": true,
+            "protect_content": true,
+            "message_thread_id": 7,
+            "reply_to_message_id": 99,
+            "disable_web_page_preview": true
+        }));
+        TelegramSendMessageNode.execute(&ctx).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn options_left_unset_are_not_sent() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(body_json(serde_json::json!({"chat_id": "1", "text": "plain"})))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "result": {}})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let ctx = send_ctx(&server.uri(), serde_json::json!({
+            "chat_id": "1", "text": "plain", "parse_mode": "", "reply_markup": null, "disable_notification": false, "message_thread_id": ""
+        }));
+        TelegramSendMessageNode.execute(&ctx).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_bot_token_never_goes_to_a_node_set_address() {
+        let attacker = MockServer::start().await;
+        Mock::given(wiremock::matchers::any()).respond_with(ResponseTemplate::new(200)).mount(&attacker).await;
+        let mut ctx = send_ctx("https://api.telegram.org", serde_json::json!({"chat_id": "1", "text": "hi"}));
+        ctx.parameters["api_base_url"] = serde_json::json!(attacker.uri());
+        let err = TelegramSendMessageNode.execute(&ctx).await.unwrap_err().to_string();
+        assert!(err.contains("api_base_url") && err.contains("credential"), "{err}");
+        assert!(attacker.received_requests().await.unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -212,15 +310,14 @@ mod tests {
 
         let credential_id = Uuid::new_v4();
         let mut credentials = std::collections::HashMap::new();
-        credentials.insert(credential_id, serde_json::json!({"bot_token": "123:ABC"}));
+        credentials.insert(credential_id, serde_json::json!({"bot_token": "123:ABC", "base_url": server.uri()}));
 
         let node = TelegramSendMessageNode;
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({
                 "chat_id": "999999",
                 "text": "hello",
-                "auth": {"credential_id": credential_id.to_string()},
-                "api_base_url": server.uri()
+                "auth": {"credential_id": credential_id.to_string()}
             }),
             input_items: vec![],
             credentials,
@@ -279,15 +376,14 @@ mod tests {
 
         let credential_id = Uuid::new_v4();
         let mut credentials = std::collections::HashMap::new();
-        credentials.insert(credential_id, serde_json::json!({"bot_token": "SECRET-BOT-TOKEN-VALUE"}));
+        credentials.insert(credential_id, serde_json::json!({"bot_token": "SECRET-BOT-TOKEN-VALUE", "base_url": dead_uri}));
 
         let node = TelegramSendMessageNode;
         let ctx = NodeExecutionContext {
             parameters: serde_json::json!({
                 "chat_id": "1",
                 "text": "hi",
-                "auth": {"credential_id": credential_id.to_string()},
-                "api_base_url": dead_uri
+                "auth": {"credential_id": credential_id.to_string()}
             }),
             input_items: vec![],
             credentials,
