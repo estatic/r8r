@@ -205,6 +205,31 @@ pub async fn execute_workflow(
         }
     };
 
+    // A Telegram trigger has no data of its own: as n8n's "Listen for test
+    // event", wait for the next message to the bot and run with it.
+    let start = crate::engine::start_node_id(&workflow).ok().and_then(|id| workflow.nodes.iter().find(|n| n.id == id));
+    let trigger_items = match start {
+        Some(node) if node.node_type == "telegram.trigger" => {
+            if workflow.active {
+                return (
+                    StatusCode::CONFLICT,
+                    "this workflow is active, so its Telegram poller receives the bot's messages; send the bot a message to run it, or deactivate it to test manually",
+                )
+                    .into_response();
+            }
+            tracing::info!(workflow_id = %workflow.id, "manual run: waiting for a Telegram message to the bot");
+            let wait = crate::telegram_poller::TEST_EVENT_WAIT;
+            match crate::telegram_poller::wait_for_test_update(state.storage.as_ref(), node, wait).await {
+                Ok(item) => Some(vec![item]),
+                Err(e @ crate::telegram_poller::TestUpdateError::TimedOut(_)) => {
+                    return (StatusCode::REQUEST_TIMEOUT, e.to_string()).into_response()
+                }
+                Err(e) => return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+            }
+        }
+        _ => None,
+    };
+
     // The run is a detached background task (Plan 8.7): respond at once;
     // the editor follows progress over the WebSocket.
     match crate::execution_runner::start_execution(
@@ -213,7 +238,7 @@ pub async fn execute_workflow(
         state.registry.clone(),
         workflow,
         ExecutionMode::Manual,
-        None,
+        trigger_items,
         resources,
     )
     .await

@@ -164,7 +164,18 @@ async fn get_updates(
     bot_token: &str,
     offset: Option<i64>,
 ) -> Result<Vec<serde_json::Value>, String> {
-    let mut url = format!("{base_url}/bot{bot_token}/getUpdates?timeout={GETUPDATES_TIMEOUT_SECS}");
+    get_updates_waiting(client, base_url, bot_token, offset, GETUPDATES_TIMEOUT_SECS).await
+}
+
+/// [`get_updates`] with its own long-poll wait (0 = answer at once).
+async fn get_updates_waiting(
+    client: &reqwest::Client,
+    base_url: &str,
+    bot_token: &str,
+    offset: Option<i64>,
+    wait_secs: u64,
+) -> Result<Vec<serde_json::Value>, String> {
+    let mut url = format!("{base_url}/bot{bot_token}/getUpdates?timeout={wait_secs}");
     if let Some(offset) = offset {
         url.push_str(&format!("&offset={offset}"));
     }
@@ -344,6 +355,121 @@ pub async fn activate_telegram_trigger(
     ));
     state.trigger_registry.record_telegram_poll(workflow_id, join_handle.abort_handle());
     Ok(())
+}
+
+/// How long a manual run of a Telegram-triggered workflow waits for its
+/// test message, as n8n's "Listen for test event".
+pub const TEST_EVENT_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// Why no test update came.
+#[derive(Debug, thiserror::Error)]
+pub enum TestUpdateError {
+    #[error("no Telegram message reached the bot within {0} seconds; send the bot a message after starting the run")]
+    TimedOut(u64),
+    #[error("{0}")]
+    Failed(String),
+}
+
+/// The test event for a manual run of a Telegram-triggered workflow: the
+/// next update sent to the bot after the run starts, as the item its
+/// poller would have seeded. Updates already queued are skipped, and the
+/// one used is confirmed so Telegram doesn't deliver it again.
+pub async fn wait_for_test_update(
+    storage: &dyn Storage,
+    trigger_node: &NodeInstance,
+    wait: std::time::Duration,
+) -> Result<Item, TestUpdateError> {
+    let bot_token = trigger_bot_token(storage, trigger_node).await.map_err(|e| TestUpdateError::Failed(e.to_string()))?;
+    let api_base_url = trigger_node.parameters.get("api_base_url").and_then(|v| v.as_str()).unwrap_or(DEFAULT_TELEGRAM_API_BASE_URL);
+    let client = build_client().map_err(TestUpdateError::Failed)?;
+    let update = next_update(&client, api_base_url, &bot_token, wait).await?;
+    Ok(Item { json: update, binary: serde_json::json!({}) })
+}
+
+async fn next_update(
+    client: &reqwest::Client,
+    base_url: &str,
+    bot_token: &str,
+    wait: std::time::Duration,
+) -> Result<serde_json::Value, TestUpdateError> {
+    let update_id = |u: &serde_json::Value| u.get("update_id").and_then(|v| v.as_i64());
+    // offset -1 returns only the newest queued update; starting after it
+    // skips everything sent before the run.
+    let queued = get_updates_waiting(client, base_url, bot_token, Some(-1), 0).await.map_err(TestUpdateError::Failed)?;
+    let mut offset = queued.last().and_then(update_id).map(|id| id + 1);
+    let deadline = tokio::time::Instant::now() + wait;
+    loop {
+        let left = deadline.saturating_duration_since(tokio::time::Instant::now()).as_secs();
+        if left == 0 {
+            return Err(TestUpdateError::TimedOut(wait.as_secs()));
+        }
+        let updates = get_updates_waiting(client, base_url, bot_token, offset, left.min(GETUPDATES_TIMEOUT_SECS))
+            .await
+            .map_err(TestUpdateError::Failed)?;
+        if let Some(update) = updates.into_iter().next() {
+            if let Some(id) = update_id(&update) {
+                offset = Some(id + 1);
+            }
+            // Confirm it; a failure here only risks a later redelivery.
+            if let Err(e) = get_updates_waiting(client, base_url, bot_token, offset, 0).await {
+                tracing::warn!(error = %e, "telegram test event: could not confirm the update");
+            }
+            return Ok(update);
+        }
+    }
+}
+
+#[cfg(test)]
+mod test_update_tests {
+    use super::*;
+    use wiremock::matchers::{method, path, query_param};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn ok(result: serde_json::Value) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "result": result}))
+    }
+
+    #[tokio::test]
+    async fn skips_queued_updates_and_returns_and_confirms_the_next_one() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/bot1:A/getUpdates")).and(query_param("offset", "-1"))
+            .respond_with(ok(serde_json::json!([{"update_id": 5, "message": {"text": "old"}}])))
+            .expect(1).mount(&server).await;
+        Mock::given(method("GET")).and(path("/bot1:A/getUpdates")).and(query_param("offset", "6"))
+            .respond_with(ok(serde_json::json!([{"update_id": 6, "message": {"text": "hi"}}])))
+            .expect(1).mount(&server).await;
+        Mock::given(method("GET")).and(path("/bot1:A/getUpdates")).and(query_param("offset", "7")).and(query_param("timeout", "0"))
+            .respond_with(ok(serde_json::json!([])))
+            .expect(1).mount(&server).await;
+
+        let client = build_client().unwrap();
+        let update = next_update(&client, &server.uri(), "1:A", std::time::Duration::from_secs(5)).await.unwrap();
+        assert_eq!(update["message"]["text"], "hi");
+    }
+
+    #[tokio::test]
+    async fn gives_up_after_the_wait_with_a_clear_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/bot1:A/getUpdates"))
+            .respond_with(ok(serde_json::json!([])).set_delay(std::time::Duration::from_millis(300)))
+            .mount(&server).await;
+
+        let client = build_client().unwrap();
+        let err = next_update(&client, &server.uri(), "1:A", std::time::Duration::from_secs(1)).await.unwrap_err();
+        assert!(matches!(err, TestUpdateError::TimedOut(1)), "{err:?}");
+    }
+
+    #[tokio::test]
+    async fn surfaces_telegrams_error_description() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/bot1:A/getUpdates"))
+            .respond_with(ResponseTemplate::new(409).set_body_json(serde_json::json!({"ok": false, "description": "Conflict: terminated by other getUpdates request"})))
+            .mount(&server).await;
+
+        let client = build_client().unwrap();
+        let err = next_update(&client, &server.uri(), "1:A", std::time::Duration::from_secs(1)).await.unwrap_err();
+        assert!(err.to_string().contains("Conflict: terminated by other getUpdates request"), "{err}");
+    }
 }
 
 /// The long-running poll loop for one activated `telegram.trigger`

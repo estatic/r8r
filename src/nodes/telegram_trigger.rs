@@ -7,10 +7,10 @@ use async_trait::async_trait;
 /// Like `ScheduleNode`/`WebhookNode`, this node's own `execute()` is a
 /// fallback stub — real incoming-update data reaches the workflow via the
 /// trigger item the engine seeds in from `telegram_poller::poll_telegram_updates`
-/// (see `src/telegram_poller.rs`), not from this method. `execute()` only
-/// runs if something re-executes this node directly outside a real trigger
-/// firing (e.g. a manual re-run), in which case an empty item is the only
-/// sane fallback — there is no "current Telegram update" to reproduce.
+/// (see `src/telegram_poller.rs`), not from this method; a manual run waits
+/// for the next message to the bot and seeds that (`wait_for_test_update`).
+/// `execute()` only runs if something executes this node without a seeded
+/// update, in which case an empty item is the only sane fallback.
 pub struct TelegramTriggerNode;
 
 #[async_trait]
