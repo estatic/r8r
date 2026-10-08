@@ -18,7 +18,8 @@ run() {
     echo "$name up"
 }
 
-postgres() { run r8r-bdd-postgres -p 127.0.0.1:5432:5432 -e POSTGRES_PASSWORD=postgres postgres:16; }
+# pgvector/pgvector is postgres:16 plus the `vector` extension (PGVector store).
+postgres() { run r8r-bdd-postgres -p 127.0.0.1:5432:5432 -e POSTGRES_PASSWORD=postgres pgvector/pgvector:pg16; }
 redis() { run r8r-bdd-redis -p 127.0.0.1:6379:6379 redis:7; }
 mailpit() { run r8r-bdd-mailpit -p 127.0.0.1:1025:1025 -p 127.0.0.1:8025:8025 axllent/mailpit; }
 mysql() { run r8r-bdd-mysql -p 127.0.0.1:3306:3306 -e MYSQL_ROOT_PASSWORD=mysql -e MYSQL_DATABASE=r8r mysql:8.4; }

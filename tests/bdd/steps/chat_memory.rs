@@ -38,6 +38,18 @@ async fn pg_messages(_w: &mut R8rWorld, table: String, session: String, step: &S
     assert_eq!(expected.as_array().map(Vec::len), actual.as_array().map(Vec::len), "rows: {}", pretty(&actual));
 }
 
+/// Doc string: the query's rows as JSON objects (`json_agg`), in order,
+/// matched as a subset.
+#[then(expr = "the Postgres query {string} returns:")]
+async fn pg_query(_w: &mut R8rWorld, sql: String, step: &Step) {
+    let mut c = pg().await;
+    let row = sqlx::query(&format!("SELECT coalesce(json_agg(t), '[]')::text AS r FROM ({sql}) t")).fetch_one(&mut c).await.expect("query");
+    let actual: Value = serde_json::from_str(&row.get::<String, _>("r")).unwrap();
+    let expected = parse_strict(docstring(step), "expected rows");
+    assert_matches(&expected, &actual, Mode::Subset).unwrap_or_else(|e| panic!("{e}\nrows: {}", pretty(&actual)));
+    assert_eq!(expected.as_array().map(Vec::len), actual.as_array().map(Vec::len), "rows: {}", pretty(&actual));
+}
+
 async fn redis() -> redis::aio::MultiplexedConnection {
     let host = std::env::var("R8R_BDD_REDIS_HOST").unwrap_or_else(|_| "127.0.0.1".into());
     let port = std::env::var("R8R_BDD_REDIS_PORT").unwrap_or_else(|_| "6379".into());

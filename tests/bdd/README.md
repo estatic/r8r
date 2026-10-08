@@ -34,7 +34,7 @@ the ports and logins listed below.
 | `R8R_BDD_CONCURRENCY` | 8 | Scenarios run in parallel |
 | `R8R_BDD_INCLUDE` | – | Opt-in tags to add: `perf`, `slow`, `requires-redis`, `requires-postgres`, `requires-mysql`, `requires-mongodb`, `requires-mssql`, `requires-python-runner`, `requires-mailpit`, `requires-ssh`, `requires-ftp`, `requires-imap`, `requires-rabbitmq`, `requires-mqtt`, `requires-kafka` |
 | `R8R_BDD_REDIS_HOST` / `_PORT` | 127.0.0.1 / 6379 | Redis for `@requires-redis` |
-| `R8R_BDD_POSTGRES_URL` | `postgres://postgres:postgres@127.0.0.1:5432/postgres` | PostgreSQL for `@requires-postgres` and `R8R_BDD_STORAGE=postgres` |
+| `R8R_BDD_POSTGRES_URL` | `postgres://postgres:postgres@127.0.0.1:5432/postgres` | PostgreSQL for `@requires-postgres` and `R8R_BDD_STORAGE=postgres`; needs the pgvector extension (Docker `r8r-bdd-postgres` runs `pgvector/pgvector:pg16`) |
 | — | 127.0.0.1:3306, root/mysql, db `r8r` (Docker `r8r-bdd-mysql`) | MySQL for `@requires-mysql` |
 | — | 127.0.0.1:1433, sa/`R8r_Passw0rd!`, db `r8r` (Docker `r8r-bdd-mssql`) | SQL Server for `@requires-mssql` |
 | — | 127.0.0.1:27017, no auth (Docker `r8r-bdd-mongo`) | MongoDB for `@requires-mongodb` |

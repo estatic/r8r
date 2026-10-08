@@ -44,3 +44,5 @@ Operations:
 ## [2026-10-08] query | Plan 2.7 started: OpenAI embeddings, Default Data Loader, text splitter sub-nodes, Simple Vector Store insert/load (scores bit-identical to n8n); full suite 980/980
 
 ## [2026-10-08] query | Retrieval (plan 2.7/2.6): Vector Store Retriever, Question and Answer Chain, vector store as agent tool; full suite 982/982
+
+## [2026-10-08] query | Plan 2.7: Postgres PGVector Store (insert/load/retrieve/tool, distance strategies, collections, metadata filters), BDD Postgres switched to pgvector/pgvector:pg16; full suite 982/982, pgvector feature 4/4 on r8r and n8n 2.35.7

@@ -40,6 +40,7 @@ pub fn default_type_version(node_type: &str) -> Value {
         "outputParserStructured" => json!(1.3),
         "embeddingsOpenAi" => json!(1.2),
         "vectorStoreInMemory" => json!(1.3),
+        "vectorStorePGVector" => json!(1.3),
         "documentDefaultDataLoader" => json!(1.1),
         "chainRetrievalQa" => json!(1.7),
         "toolCode" => json!(1.3),

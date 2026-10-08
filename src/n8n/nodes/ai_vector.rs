@@ -1,8 +1,10 @@
 //! Retrieval building blocks (spec §6.8, plan 2.7): the embeddings,
-//! document loader and text splitter sub-nodes, and the Simple Vector Store
-//! (`vectorStoreInMemory`), as n8n 2.35.7 runs them. Embedding requests,
-//! document shapes, cosine scores and ranking follow LangChain exactly
-//! (`OpenAIEmbeddings`, `MemoryVectorStore`, `ml-distance`'s cosine).
+//! document loader and text splitter sub-nodes, the Simple Vector Store
+//! (`vectorStoreInMemory`) and the Postgres PGVector Store
+//! (`vectorStorePGVector`), as n8n 2.35.7 runs them. Embedding requests,
+//! document shapes, scores and ranking follow LangChain exactly
+//! (`OpenAIEmbeddings`, `MemoryVectorStore`, `ml-distance`'s cosine,
+//! `@langchain/community` 1.1.27's `PGVectorStore`).
 
 use super::ai::record;
 use super::doc_loader::n8n_json_loader;
@@ -19,6 +21,7 @@ const LC: &str = "@n8n/n8n-nodes-langchain.";
 pub fn all() -> Vec<Box<dyn NodeType>> {
     vec![
         Box::new(VectorStoreInMemory),
+        Box::new(VectorStorePgVector),
         Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.embeddingsOpenAi")),
         Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.documentDefaultDataLoader")),
         Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.textSplitterRecursiveCharacterTextSplitter")),
@@ -352,8 +355,17 @@ async fn insert(ctx: &ExecCtx<'_>) -> NodeResult<NodeOutput> {
     Ok(vec![out])
 }
 
+/// `populateVectorStore` for one batch. PGVector (`PGVectorStore.fromDocuments`)
+/// ensures its table before embedding; the in-memory store embeds first.
 async fn populate(ctx: &ExecCtx<'_>, embeddings: &Embeddings<'_>, docs: &[Document], item: usize) -> NodeResult<()> {
     let texts: Vec<String> = docs.iter().map(|d| d.page_content.clone()).collect();
+    if is_pgvector(ctx.node) {
+        let store = PgVector::open(ctx, ctx.node, item).await?;
+        let vectors = embeddings.embed_documents(ctx, &texts).await?;
+        let result = store.add(docs, &vectors).await;
+        store.pool.close().await;
+        return result;
+    }
     let vectors = embeddings.embed_documents(ctx, &texts).await?;
     memory_add(&memory_key(ctx, item)?, docs, vectors, ctx.param_bool("clearStore", item, false)?);
     Ok(())
@@ -364,22 +376,371 @@ async fn load(ctx: &ExecCtx<'_>) -> NodeResult<NodeOutput> {
     let embeddings = load_embeddings(ctx, &ctx.node.name, 0).await?;
     let mut out = Vec::new();
     for i in 0..ctx.input().len() {
-        if ctx.raw_param("options").and_then(|o| o.get("metadata")).is_some() {
-            return Err(NodeError::new("Metadata filters on the Simple Vector Store are not supported natively yet"));
-        }
         let prompt = ctx.param_str("prompt", i, "")?;
         let k = ctx.param_f64("topK", i, 4.0)? as usize;
         let with_metadata = ctx.param_bool("includeDocumentMetadata", i, true)?;
-        let query = embeddings.embed_query(ctx, &prompt).await?;
-        for (doc, score) in memory_search(&memory_key(ctx, i)?, &query, k) {
-            let mut document = Map::from_iter([("pageContent".to_string(), json!(doc.page_content))]);
-            if with_metadata {
-                document.insert("metadata".into(), Value::Object(doc.metadata));
+        let hits = if is_pgvector(ctx.node) {
+            let filter = metadata_filter(ctx, ctx.node, i)?;
+            let store = PgVector::open(ctx, ctx.node, i).await?;
+            let result = match embeddings.embed_query(ctx, &prompt).await {
+                Ok(query) => store.search(&query, k, filter.as_ref()).await,
+                Err(e) => Err(e),
+            };
+            store.pool.close().await;
+            result?
+        } else {
+            if ctx.raw_param("options").and_then(|o| o.get("metadata")).is_some() {
+                return Err(NodeError::new("Metadata filters on the Simple Vector Store are not supported natively yet"));
             }
-            out.push(Item::new(Map::from_iter([("document".to_string(), Value::Object(document)), ("score".to_string(), json!(score))])).paired(i));
+            let query = embeddings.embed_query(ctx, &prompt).await?;
+            memory_search(&memory_key(ctx, i)?, &query, k).into_iter().map(|(doc, score)| Hit { doc, score, id: None }).collect()
+        };
+        for hit in hits {
+            let mut document = Map::from_iter([("pageContent".to_string(), json!(hit.doc.page_content))]);
+            if with_metadata {
+                document.insert("metadata".into(), Value::Object(hit.doc.metadata));
+            }
+            out.push(Item::new(Map::from_iter([("document".to_string(), Value::Object(document)), ("score".to_string(), json!(hit.score))])).paired(i));
         }
     }
     Ok(vec![out])
+}
+
+/// A search result: LangChain's `[Document, score]`, with the document's
+/// `id` (PGVector sets it to the row's ID; in-memory documents have none).
+pub(super) struct Hit {
+    pub doc: Document,
+    pub score: f64,
+    pub id: Option<String>,
+}
+
+impl Hit {
+    /// `JSON.stringify(document)`: `pageContent`, `metadata`, then `id` if set.
+    pub fn to_json(&self) -> Value {
+        let mut v = json!({"pageContent": self.doc.page_content, "metadata": self.doc.metadata});
+        if let Some(id) = &self.id {
+            v["id"] = json!(id);
+        }
+        v
+    }
+}
+
+/// `getMetadataFiltersValues`: the "Metadata Filter" option as a
+/// name → value object, else the `searchFilterJson` option.
+fn metadata_filter(ctx: &ExecCtx<'_>, node: &Node, item: usize) -> NodeResult<Option<Map<String, Value>>> {
+    let options = ctx.resolve_value(&node.parameters["options"], item)?;
+    if let Some(values) = options.pointer("/metadata/metadataValues").and_then(Value::as_array) {
+        if !values.is_empty() {
+            return Ok(Some(values.iter().filter_map(|v| Some((v["name"].as_str()?.to_string(), v["value"].clone()))).collect()));
+        }
+    }
+    match &options["searchFilterJson"] {
+        Value::Object(m) => Ok(Some(m.clone())),
+        Value::String(s) if !s.trim().is_empty() => match serde_json::from_str(s) {
+            Ok(Value::Object(m)) => Ok(Some(m)),
+            _ => Err(NodeError::new("Parameter 'options.searchFilterJson' could not be parsed as an object")),
+        },
+        _ => Ok(None),
+    }
+}
+
+// ---- Postgres PGVector store ----------------------------------------------------------
+
+struct VectorStorePgVector;
+
+const PGVECTOR: &str = "@n8n/n8n-nodes-langchain.vectorStorePGVector";
+
+fn is_pgvector(node: &Node) -> bool {
+    node.node_type == PGVECTOR
+}
+
+#[async_trait::async_trait]
+impl NodeType for VectorStorePgVector {
+    fn type_name(&self) -> &'static str {
+        PGVECTOR
+    }
+
+    async fn execute(&self, ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
+        let mode = ctx.param_str("mode", 0, "retrieve")?;
+        match mode.as_str() {
+            "insert" => insert(ctx).await,
+            "load" => load(ctx).await,
+            "retrieve" | "retrieve-as-tool" => Err(NodeError::new(format!("\"{}\" in {mode} mode is a sub-node: connect it to a chain, agent or retriever", ctx.node.name))),
+            other => Err(NodeError::new(format!("The vector store mode \"{other}\" is not supported natively yet"))),
+        }
+    }
+}
+
+/// A plain identifier, optionally schema-qualified (`qualified`). LangChain
+/// puts table and column names into its SQL as is; r8r only takes names it
+/// can't be injected through.
+fn check_identifier(what: &str, name: &str, qualified: bool) -> NodeResult<()> {
+    let re = if qualified { r"^[A-Za-z_][A-Za-z0-9_$]*(\.[A-Za-z_][A-Za-z0-9_$]*)?$" } else { r"^[A-Za-z_][A-Za-z0-9_$]*$" };
+    if regex::Regex::new(re).unwrap().is_match(name) {
+        Ok(())
+    } else {
+        Err(NodeError::new(format!("Invalid {what} \"{name}\"")).describe(if qualified { "Use letters, digits and underscores, optionally as schema.table" } else { "Use letters, digits and underscores" }))
+    }
+}
+
+/// `normalizeVectorStoreError`: a database error as a `NodeApiError`.
+fn pg_error(prefix: &str) -> impl Fn(sqlx::Error) -> NodeError + '_ {
+    move |e| {
+        let message = match &e {
+            sqlx::Error::Database(d) => d.message().to_string(),
+            other => other.to_string(),
+        };
+        let message = format!("{prefix}{message}");
+        NodeError::api(message.clone(), None, Some(message))
+    }
+}
+
+/// LangChain's `PGVectorStore` as n8n's `getVectorStoreClient` /
+/// `populateVectorStore` configure it.
+pub(super) struct PgVector {
+    pool: sqlx::PgPool,
+    table: String,
+    /// (collection name, collection table) when "Use Collection" is on.
+    collection: Option<(String, String)>,
+    id_col: String,
+    vector_col: String,
+    content_col: String,
+    metadata_col: String,
+    operator: &'static str,
+}
+
+impl PgVector {
+    /// Connects and runs `initialize`: the `vector` extension, the table
+    /// and (with a collection) the collection table.
+    async fn open(ctx: &ExecCtx<'_>, node: &Node, item: usize) -> NodeResult<PgVector> {
+        let table = match ctx.resolve_value(&node.parameters["tableName"], item)? {
+            Value::Null => "n8n_vectors".to_string(),
+            Value::Object(o) => o.get("value").and_then(Value::as_str).unwrap_or("").to_string(),
+            v => v.as_str().unwrap_or("").to_string(),
+        };
+        check_identifier("table name", &table, true)?;
+        // n8n reads the options from the first item.
+        let o = ctx.resolve_value(&node.parameters["options"], 0)?;
+        let c = &o["collection"]["values"];
+        let collection = if c["useCollection"].as_bool().unwrap_or(false) {
+            let name = c["collectionName"].as_str().unwrap_or("n8n").to_string();
+            let table = c["collectionTableName"].as_str().unwrap_or("n8n_vector_collections").to_string();
+            check_identifier("collection table name", &table, true)?;
+            Some((name, table))
+        } else {
+            None
+        };
+        let cols = &o["columnNames"]["values"];
+        let col = |key: &str, default: &str| -> NodeResult<String> {
+            let name = cols[key].as_str().unwrap_or(default).to_string();
+            check_identifier("column name", &name, false)?;
+            Ok(name)
+        };
+        let operator = match o["distanceStrategy"].as_str().unwrap_or("cosine") {
+            "cosine" => "<=>",
+            "innerProduct" => "<#>",
+            "euclidean" => "<->",
+            other => return Err(NodeError::new(format!("Unknown distance strategy: {other}"))),
+        };
+        let (_, cred) = ctx.credentials_for(node, "postgres").await?;
+        let store = PgVector {
+            pool: super::postgres::connect(&cred, 30).await?,
+            table,
+            collection,
+            id_col: col("idColumnName", "id")?,
+            vector_col: col("vectorColumnName", "embedding")?,
+            content_col: col("contentColumnName", "text")?,
+            metadata_col: col("metadataColumnName", "metadata")?,
+            operator,
+        };
+        if let Err(e) = store.ensure_tables().await {
+            store.pool.close().await;
+            return Err(e);
+        }
+        Ok(store)
+    }
+
+    /// `ensureTableInDatabase` + `ensureCollectionTableInDatabase`.
+    async fn ensure_tables(&self) -> NodeResult<()> {
+        sqlx::query("CREATE EXTENSION IF NOT EXISTS vector;").execute(&self.pool).await.map_err(pg_error(""))?;
+        let (t, id, content, metadata, vector) = (&self.table, &self.id_col, &self.content_col, &self.metadata_col, &self.vector_col);
+        sqlx::query(&format!("CREATE TABLE IF NOT EXISTS {t} (\"{id}\" uuid NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY, \"{content}\" text, \"{metadata}\" jsonb, \"{vector}\" vector);"))
+            .execute(&self.pool)
+            .await
+            .map_err(pg_error(""))?;
+        if let Some((_, ct)) = &self.collection {
+            // One multi-statement query, as LangChain sends it: on a second
+            // run the ALTER TABLE fails with "already exists", which is fine.
+            let index = ct.replace('.', "_");
+            let fkey = t.replace('.', "_");
+            let sql = format!(
+                "CREATE TABLE IF NOT EXISTS {ct} (uuid uuid NOT NULL DEFAULT gen_random_uuid() PRIMARY KEY, name character varying, cmetadata jsonb);\n\
+                 CREATE INDEX IF NOT EXISTS idx_{index}_name ON {ct}(name);\n\
+                 ALTER TABLE {t} ADD COLUMN collection_id uuid;\n\
+                 ALTER TABLE {t} ADD CONSTRAINT {fkey}_collection_id_fkey FOREIGN KEY (collection_id) REFERENCES {ct}(uuid) ON DELETE CASCADE;"
+            );
+            if let Err(e) = sqlx::raw_sql(&sql).execute(&self.pool).await {
+                let e = pg_error("Error adding column or creating index: ")(e);
+                if !e.message.contains("already exists") {
+                    return Err(e);
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// `getOrCreateCollection`: the collection's UUID, created if missing.
+    async fn collection_id(&self) -> NodeResult<Option<String>> {
+        let Some((name, ct)) = &self.collection else { return Ok(None) };
+        let found: Option<String> = sqlx::query_scalar(&format!("SELECT uuid::text from {ct} WHERE name = $1;")).bind(name).fetch_optional(&self.pool).await.map_err(pg_error(""))?;
+        if found.is_some() {
+            return Ok(found);
+        }
+        let created: Option<String> = sqlx::query_scalar(&format!("INSERT INTO {ct}(uuid, name, cmetadata) VALUES (gen_random_uuid(), $1, $2::jsonb) RETURNING uuid::text;"))
+            .bind(name)
+            .bind(None::<String>)
+            .fetch_optional(&self.pool)
+            .await
+            .map_err(pg_error(""))?;
+        Ok(created)
+    }
+
+    /// `addVectors`: rows of (content, vector, metadata[, collection_id]),
+    /// inserted 500 at a time.
+    async fn add(&self, docs: &[Document], vectors: &[Vec<f64>]) -> NodeResult<()> {
+        let collection = self.collection_id().await?;
+        let mut columns = vec![self.content_col.as_str(), self.vector_col.as_str(), self.metadata_col.as_str()];
+        let mut casts = vec!["", "::vector", "::jsonb"];
+        if collection.is_some() {
+            columns.push("collection_id");
+            casts.push("::uuid");
+        }
+        let rows: Vec<Vec<String>> = docs
+            .iter()
+            .zip(vectors)
+            .map(|(d, v)| {
+                let mut row = vec![d.page_content.replace('\0', ""), vector_literal(v).replace('\0', ""), Value::Object(d.metadata.clone()).to_string()];
+                row.extend(collection.clone());
+                row
+            })
+            .collect();
+        let quoted: Vec<String> = columns.iter().map(|c| format!("\"{c}\"")).collect();
+        for chunk in rows.chunks(500) {
+            let values: Vec<String> = (0..chunk.len())
+                .map(|j| format!("({})", casts.iter().enumerate().map(|(i, cast)| format!("${}{cast}", j * columns.len() + i + 1)).collect::<Vec<_>>().join(", ")))
+                .collect();
+            let sql = format!("INSERT INTO {}({}) VALUES {}", self.table, quoted.join(", "), values.join(", "));
+            let mut q = sqlx::query(&sql);
+            for v in chunk.iter().flatten() {
+                q = q.bind(v);
+            }
+            q.execute(&self.pool).await.map_err(pg_error("Error inserting: "))?;
+        }
+        Ok(())
+    }
+
+    /// `searchPostgres`: the `k` nearest rows by the distance operator,
+    /// scored with the raw distance (LangChain's default "distance"
+    /// normalization), nearest first.
+    async fn search(&self, query: &[f64], k: usize, filter: Option<&Map<String, Value>>) -> NodeResult<Vec<Hit>> {
+        let mut params: Vec<Option<String>> = Vec::new();
+        let mut clauses = Vec::new();
+        let mut n = 2;
+        if let Some(id) = self.collection_id().await? {
+            n = 3;
+            params.push(Some(id));
+            clauses.push("collection_id = $3::uuid".to_string());
+        }
+        if let Some(f) = filter {
+            filter_clauses(&self.metadata_col, f, &mut n, &mut clauses, &mut params);
+        }
+        let where_clause = if clauses.is_empty() { String::new() } else { format!("WHERE {}", clauses.join(" AND ")) };
+        let sql = format!(
+            "SELECT \"{c}\"::text AS _content, \"{m}\"::text AS _metadata, \"{i}\"::text AS _id, (\"{v}\" {op} $1::vector)::float8 AS \"_distance\" FROM {t} {where_clause} ORDER BY \"_distance\" ASC LIMIT $2",
+            c = self.content_col,
+            m = self.metadata_col,
+            i = self.id_col,
+            v = self.vector_col,
+            op = self.operator,
+            t = self.table,
+        );
+        let mut q = sqlx::query(&sql).bind(vector_literal(query)).bind(k as i64);
+        for p in &params {
+            q = q.bind(p);
+        }
+        let rows = q.fetch_all(&self.pool).await.map_err(pg_error(""))?;
+        use sqlx::Row as _;
+        Ok(rows
+            .iter()
+            .filter_map(|r| {
+                let content: Option<String> = r.try_get("_content").ok()?;
+                let distance: Option<f64> = r.try_get("_distance").ok()?;
+                let metadata: Option<String> = r.try_get("_metadata").ok()?;
+                let metadata = match metadata.and_then(|m| serde_json::from_str::<Value>(&m).ok()) {
+                    Some(Value::Object(m)) => m,
+                    _ => Map::new(),
+                };
+                Some(Hit { doc: Document { page_content: content?, metadata }, score: distance?, id: r.try_get::<Option<String>, _>("_id").ok().flatten() })
+            })
+            .collect())
+    }
+}
+
+/// `[x,y,...]`, the text form pgvector parses.
+fn vector_literal(v: &[f64]) -> String {
+    format!("[{}]", v.iter().map(|x| x.to_string()).collect::<Vec<_>>().join(","))
+}
+
+/// A filter value as node-postgres sends it: strings as is, others as text.
+fn param_text(v: &Value) -> Option<String> {
+    match v {
+        Value::Null => None,
+        Value::String(s) => Some(s.clone()),
+        other => Some(other.to_string()),
+    }
+}
+
+/// `buildFilterClauses`: equality on `metadata->>'key'`, or the `in`,
+/// `notIn`, `arrayContains`, `gt`/`gte`/`lt`/`lte` (numbers) and `neq`
+/// operators. Keys are escaped as SQL string literals.
+fn filter_clauses(column: &str, filter: &Map<String, Value>, n: &mut usize, clauses: &mut Vec<String>, params: &mut Vec<Option<String>>) {
+    let mut next = |params: &mut Vec<Option<String>>, v: Option<String>, cast: &str| {
+        *n += 1;
+        params.push(v);
+        format!("${}{cast}", *n)
+    };
+    for (key, value) in filter {
+        let key = key.replace('\'', "''");
+        let Value::Object(ops) = value else {
+            let p = next(params, param_text(value), "::text");
+            clauses.push(format!("{column}->>'{key}' = {p}"));
+            continue;
+        };
+        for (op, sql) in [("in", "IN"), ("notIn", "NOT IN")] {
+            if let Some(list) = ops.get(op).and_then(Value::as_array) {
+                let ps: Vec<String> = list.iter().map(|v| next(params, param_text(v), "::text")).collect();
+                clauses.push(format!("{column}->>'{key}' {sql} ({})", ps.join(",")));
+            }
+        }
+        if let Some(list) = ops.get("arrayContains").and_then(Value::as_array) {
+            let ps: Vec<String> = list.iter().map(|v| next(params, param_text(v), "::text")).collect();
+            clauses.push(format!("{column}->'{key}' ?| array[{}]", ps.join(",")));
+        }
+        for (op, sql) in [("gt", ">"), ("gte", ">="), ("lt", "<"), ("lte", "<=")] {
+            if let Some(v) = ops.get(op).filter(|v| v.is_number()) {
+                let p = next(params, param_text(v), "::numeric");
+                clauses.push(format!("({column}->>'{key}')::numeric {sql} {p}"));
+            }
+        }
+        if let Some(v) = ops.get("neq") {
+            let text = match v {
+                Value::String(s) => s.clone(),
+                other => other.to_string(),
+            };
+            let p = next(params, Some(text), "::text");
+            clauses.push(format!("({column}->>'{key}' IS NULL OR ({column}->>'{key}')::text != {p})"));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -410,15 +771,35 @@ mod tests {
 /// A similarity search on a vector store sub-node (retrieve modes): the
 /// query embedded with the store's own embeddings sub-node, recorded on
 /// the store like n8n's logWrapper.
-pub(super) async fn store_search(ctx: &ExecCtx<'_>, store: &Node, query: &str, k: usize, item: usize) -> NodeResult<Vec<(Document, f64)>> {
-    if store.node_type != format!("{LC}vectorStoreInMemory") {
-        return Err(NodeError::new(format!("The vector store \"{}\" ({}) is not supported natively yet", store.name, store.node_type)));
-    }
+pub(super) async fn store_search(ctx: &ExecCtx<'_>, store: &Node, query: &str, k: usize, item: usize) -> NodeResult<Vec<Hit>> {
     let started = now_ms();
-    let embeddings = load_embeddings(ctx, &store.name, item).await?;
-    let vector = embeddings.embed_query(ctx, query).await?;
-    let hits = memory_search(&memory_key_of(ctx, store, item)?, &vector, k);
-    let docs: Vec<Value> = hits.iter().map(|(d, _)| json!({"pageContent": d.page_content, "metadata": d.metadata})).collect();
+    let hits = if is_pgvector(store) {
+        let filter = metadata_filter(ctx, store, item)?;
+        let embeddings = load_embeddings(ctx, &store.name, item).await?;
+        let pg = PgVector::open(ctx, store, item).await;
+        let result = match pg {
+            Ok(pg) => {
+                let r = match embeddings.embed_query(ctx, query).await {
+                    Ok(vector) => pg.search(&vector, k, filter.as_ref()).await,
+                    Err(e) => Err(e),
+                };
+                pg.pool.close().await;
+                r
+            }
+            Err(e) => Err(e),
+        };
+        if let Err(e) = &result {
+            record(ctx, &store.name, "ai_vectorStore", json!({"query": query}), Err(e), started);
+        }
+        result?
+    } else if store.node_type == format!("{LC}vectorStoreInMemory") {
+        let embeddings = load_embeddings(ctx, &store.name, item).await?;
+        let vector = embeddings.embed_query(ctx, query).await?;
+        memory_search(&memory_key_of(ctx, store, item)?, &vector, k).into_iter().map(|(doc, score)| Hit { doc, score, id: None }).collect()
+    } else {
+        return Err(NodeError::new(format!("The vector store \"{}\" ({}) is not supported natively yet", store.name, store.node_type)));
+    };
+    let docs: Vec<Value> = hits.iter().map(Hit::to_json).collect();
     record(ctx, &store.name, "ai_vectorStore", json!({"query": query}), Ok(json!({"response": docs})), started);
     Ok(hits)
 }
@@ -432,5 +813,5 @@ pub(super) async fn retrieve(ctx: &ExecCtx<'_>, item: usize, query: &str) -> Nod
     }
     let k = ctx.resolve_value(&retriever.parameters["topK"], item)?.as_f64().unwrap_or(4.0) as usize;
     let store = sub_node(ctx, &retriever.name, "ai_vectorStore").ok_or_else(|| NodeError::new("A Vector Store sub-node must be connected to the retriever"))?;
-    Ok(store_search(ctx, store, query, k, item).await?.into_iter().map(|(d, _)| d).collect())
+    Ok(store_search(ctx, store, query, k, item).await?.into_iter().map(|h| h.doc).collect())
 }
