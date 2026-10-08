@@ -97,6 +97,11 @@ function apply() {
   }
   if (credentialId.value) {
     parsed.auth = { ...((parsed.auth as object) ?? {}), credential_id: credentialId.value }
+  } else if (parsed.auth && typeof parsed.auth === 'object') {
+    // "No credential": drop the stored one, or the JSON would bring it back.
+    const { credential_id: _dropped, ...rest } = parsed.auth as Record<string, unknown>
+    if (Object.keys(rest).length > 0) parsed.auth = rest
+    else delete parsed.auth
   }
   if (isAgent.value) {
     // The form is the source of truth for the fields it shows; everything

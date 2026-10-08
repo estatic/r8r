@@ -39,6 +39,18 @@ describe('NodeConfigPanel', () => {
     await buttons[buttons.length - 1].trigger('click')
   }
 
+  it('choosing "No credential" removes the stored credential on Apply', async () => {
+    const withCred: NodeInstance = {
+      ...node,
+      parameters: { foo: 'bar', auth: { credential_id: 'cred-1' } },
+    }
+    const wrapper = mount(NodeConfigPanel, { props: { node: withCred } })
+    await wrapper.find('select').setValue('')
+    await clickApply(wrapper)
+    const events = wrapper.emitted('update')
+    expect((events![0][0] as NodeInstance).parameters).toEqual({ foo: 'bar' })
+  })
+
   function emittedSettings(wrapper: ReturnType<typeof mount>): NodeSettings | undefined {
     const events = wrapper.emitted('update')
     return events ? (events[0][0] as NodeInstance).settings : undefined
