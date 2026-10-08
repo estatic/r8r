@@ -1,0 +1,12 @@
+{
+  "docs": [
+    {"topic": "office", "text": "Northwind Robotics' main office is on the 4th floor of the old tram depot at Kanalstrasse 12. Visitors sign in at the front desk with Greta, who also hands out the guest Wi-Fi password."},
+    {"topic": "coffee", "text": "The office espresso machine is called Bertha. Bertha is descaled every Tuesday at 8:00 by whoever lost the previous Friday's table-football match."},
+    {"topic": "deploys", "text": "Production deploys happen only Monday to Thursday, between 10:00 and 15:00. Friday deploys need written approval from the on-call lead, and nobody has ever received it."},
+    {"topic": "on-call", "text": "The on-call rotation changes every Wednesday at noon. The current on-call engineer wears the orange hoodie, which must be washed before it is handed over."},
+    {"topic": "robots", "text": "Northwind's flagship product is the Heron-7, a warehouse robot that sorts parcels by weight. Its firmware is written in Rust and it beeps the first bar of a sea shanty when its battery drops below 15%."},
+    {"topic": "expenses", "text": "Expenses under 50 euros need no approval. Anything above 50 euros must be filed in the Ledger app within 30 days, with a photo of the receipt."},
+    {"topic": "holidays", "text": "Every employee gets 28 vacation days a year, plus the company-wide Robot Day on 14 March, when the office closes and the team builds something silly together."},
+    {"topic": "security", "text": "Laptops must use full-disk encryption and lock after 5 minutes. Lost devices are reported to security@northwind.example within one hour."}
+  ]
+}
