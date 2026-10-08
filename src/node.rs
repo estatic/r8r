@@ -17,9 +17,9 @@ pub struct NodeExecutionContext {
     pub tool_executor: Option<std::sync::Arc<dyn ToolExecutor>>,
     /// Where an AI Agent keeps chat memory; None when nothing can be kept.
     pub memory: Option<std::sync::Arc<dyn MemoryStore>>,
-    /// Earlier nodes' first output item (`json`) by node id: `$node["id"]`
-    /// in a Code node.
-    pub upstream: std::collections::HashMap<String, serde_json::Value>,
+    /// Earlier nodes' output items (`json`, first output) by node id:
+    /// `$node["id"]` in a Code node.
+    pub upstream: std::collections::HashMap<String, Vec<serde_json::Value>>,
     /// The running workflow and this node, e.g. to key the agent's memory.
     pub workflow_id: Option<uuid::Uuid>,
     pub node_id: String,

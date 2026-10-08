@@ -67,10 +67,13 @@ function loadCode(parameters: Record<string, unknown>) {
   return { language, script, writtenIn: language }
 }
 
+const isLoop = computed(() => props.node?.node_type === 'core.loop')
+const batchSize = ref<number | string>(1)
+
 const isSet = computed(() => props.node?.node_type === 'core.set')
 const setRows = ref<SetFieldRow[]>([])
 // Nodes with their own form keep the raw JSON under "Advanced".
-const hasForm = computed(() => isAgent.value || isSet.value || isCode.value)
+const hasForm = computed(() => isAgent.value || isSet.value || isCode.value || isLoop.value)
 
 const isTelegramTrigger = computed(() => props.node?.node_type === 'telegram.trigger')
 // Nothing chosen yet means every update, as the trigger treats it.
@@ -123,6 +126,7 @@ const formSnapshot = computed(() =>
     agentFields.value,
     codeFields.value.language,
     codeFields.value.script,
+    batchSize.value,
     telegramUpdates.value,
     setRows.value,
   ]),
@@ -148,6 +152,7 @@ watch(
       telegramUpdates.value = loadTelegramUpdates(node.parameters ?? {})
       setRows.value = node.node_type === 'core.set' ? loadRows(node.parameters?.fields) : []
       if (node.node_type === 'core.code') codeFields.value = loadCode(node.parameters ?? {})
+      batchSize.value = typeof node.parameters?.batch_size === 'number' ? node.parameters.batch_size : 1
       loaded.value = formSnapshot.value
       // A new Code node shows its example: save it, so the node can run as shown.
       if (node.node_type === 'core.code' && typeof node.parameters?.script !== 'string') {
@@ -193,6 +198,11 @@ function build(): NodeInstance | string {
     const { credential_id: _dropped, ...rest } = parsed.auth as Record<string, unknown>
     if (Object.keys(rest).length > 0) parsed.auth = rest
     else delete parsed.auth
+  }
+  if (isLoop.value) {
+    const n = Number(batchSize.value)
+    if (!Number.isInteger(n) || n < 1) return 'Items per batch must be a whole number of at least 1.'
+    parsed.batch_size = n
   }
   if (isCode.value) {
     parsed.language = codeFields.value.language
@@ -341,6 +351,17 @@ onBeforeUnmount(() => {
       </fieldset>
       <AgentSettings v-if="isAgent" v-model="agentFields" :inline-tool-count="inlineToolCount" />
       <TelegramTriggerSettings v-if="isTelegramTrigger" v-model="telegramUpdates" />
+      <fieldset v-if="isLoop" class="border rounded p-2 space-y-1 min-w-0" data-testid="loop-settings">
+        <legend class="text-sm text-gray-600 px-1">Loop Over Items</legend>
+        <label class="block text-xs text-gray-600">
+          Items per batch
+          <input v-model="batchSize" aria-label="Items per batch" type="number" min="1" class="w-full border rounded px-2 py-1 text-sm" />
+        </label>
+        <p class="text-xs text-gray-500">
+          The nodes on <b>loop</b> run once per batch; link the last of them back into this node. When every batch is
+          done, <b>done</b> continues with everything they sent back.
+        </p>
+      </fieldset>
       <CodeSettings v-if="isCode" v-model="codeFields" :sources="inputSources" :node-labels="nodeLabels" />
       <SetFieldsEditor v-if="isSet" v-model="setRows" :sources="inputSources" :node-labels="nodeLabels" />
       <div>

@@ -424,6 +424,27 @@ describe('NodeConfigPanel', () => {
     })
   })
 
+  describe('Loop Over Items', () => {
+    const loopNode = (parameters: Record<string, unknown>): NodeInstance => ({ id: 'l1', node_type: 'core.loop', position: [0, 0], parameters, disabled: false })
+    const size = (w: ReturnType<typeof mount>) => w.find('input[aria-label="Items per batch"]')
+
+    it('starts at one item per batch and saves the size', async () => {
+      const wrapper = mount(NodeConfigPanel, { props: { node: loopNode({}) } })
+      expect((size(wrapper).element as HTMLInputElement).value).toBe('1')
+      await size(wrapper).setValue('10')
+      await clickApply(wrapper)
+      expect((wrapper.emitted('update')![0][0] as NodeInstance).parameters.batch_size).toBe(10)
+    })
+
+    it('refuses a size below 1', async () => {
+      const wrapper = mount(NodeConfigPanel, { props: { node: loopNode({ batch_size: 3 }) } })
+      expect((size(wrapper).element as HTMLInputElement).value).toBe('3')
+      await size(wrapper).setValue('0')
+      await clickApply(wrapper)
+      expect(wrapper.text()).toContain('Items per batch must be a whole number of at least 1.')
+    })
+  })
+
   describe('agent memory', () => {
     it('is off by default and adds nothing to an agent that never had it', async () => {
       const wrapper = mount(NodeConfigPanel, { props: { node: agent({ model: 'm', user_message: 'u' }) } })

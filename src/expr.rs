@@ -71,6 +71,9 @@ pub fn eval_js(script: &str, ctx: &EvalContext) -> Result<serde_json::Value, Exp
         rquickjs::Context::full(&runtime).map_err(|e| ExprError::Runtime(e.to_string()))?;
 
     js_context.with(|js| -> Result<serde_json::Value, ExprError> {
+        if crate::intl::is_used_by(script) {
+            crate::intl::install(&js).map_err(|e| ExprError::Runtime(format!("could not set up Intl: {e}")))?;
+        }
         let globals = js.globals();
 
         let json_val = json_to_js(&js, &ctx.json)?;

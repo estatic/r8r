@@ -89,7 +89,11 @@ async fn run_python(ctx: &NodeExecutionContext, script: &str) -> Result<serde_js
     let globals = serde_json::json!({
         "items": items,
         "_json": ctx.input_items.first().map(|i| i.json.clone()).unwrap_or_else(|| serde_json::json!({})),
-        "_node": ctx.upstream.iter().map(|(id, json)| (id.clone(), serde_json::json!({"json": json}))).collect::<serde_json::Map<_, _>>(),
+        "_node": ctx
+            .upstream
+            .iter()
+            .map(|(id, items)| (id.clone(), serde_json::json!({"json": items.first().cloned().unwrap_or_else(|| serde_json::json!({}))})))
+            .collect::<serde_json::Map<_, _>>(),
     });
     let (results, _console) = crate::n8n::nodes::python::run_process(script, &items, false, Some(globals), timeout).await.map_err(|e| {
         NodeError::ExecutionFailed(match e.hint {
@@ -106,7 +110,10 @@ impl CodeNode {
         let items_json: Vec<serde_json::Value> =
             ctx.input_items.iter().map(|i| i.json.clone()).collect();
         let first_json = ctx.input_items.first().map(|i| i.json.clone()).unwrap_or_else(|| serde_json::json!({}));
-        let wrapped_script = format!("{JS_PREFIX}{script} }})($items())");
+        // The n8n helpers go on the wrapper's line, so the user's lines keep their numbers.
+        let prefix = format!("{JS_PREFIX}{} ", n8n_helpers(&ctx.upstream));
+        let wrapped_script = format!("{prefix}{script} }})($items())");
+        let prefix_len = prefix.len();
         let script_text = script.clone();
 
         // `eval_js` is purely synchronous (no internal `.await` points), so
@@ -137,9 +144,12 @@ impl CodeNode {
         // blocking-pool thread after this outer timeout fires.
         // A library tool call's arguments, exposed to the script as `$args`.
         let tool_args = ctx.tool_args.clone();
-        let upstream = ctx.upstream.clone();
+        let node_json: HashMap<String, serde_json::Value> = ctx
+            .upstream
+            .iter()
+            .map(|(id, items)| (id.clone(), items.first().cloned().unwrap_or_else(|| serde_json::json!({}))))
+            .collect();
         let handle = tokio::task::spawn_blocking(move || {
-            let node_json: HashMap<String, serde_json::Value> = upstream;
             let eval_ctx = EvalContext {
                 json: first_json,
                 items: &items_json,
@@ -155,20 +165,33 @@ impl CodeNode {
             .map_err(|_| NodeError::ExecutionFailed(format!("core.code timed out after {CODE_TIMEOUT_SECS}s")))?
             .map_err(|e| NodeError::ExecutionFailed(format!("core.code script execution panicked: {e}")))?
             .map_err(|e| match e {
-                ExprError::Thrown { message, stack } => NodeError::ExecutionFailed(js_trace(&script_text, &message, stack.as_deref())),
+                ExprError::Thrown { message, stack } => NodeError::ExecutionFailed(js_trace(&script_text, &message, stack.as_deref(), prefix_len)),
                 other => NodeError::ExecutionFailed(other.to_string()),
             })?;
         Ok(result)
     }
 }
 
-/// Where the user's code is wrapped: `(function(items) { <script> })(...)`.
+/// Where the user's code is wrapped: `(function(items) { <helpers> <script> })(...)`.
 const JS_PREFIX: &str = "(function(items) { ";
+
+/// n8n's ways to reach data, on one line: `$node["id"]` (`.json`,
+/// `.item`, `.first()`, `.last()`, `.all()`), `$("id")`, and `$input`.
+fn n8n_helpers(upstream: &HashMap<String, Vec<serde_json::Value>>) -> String {
+    let all = serde_json::to_string(upstream).unwrap_or_else(|_| "{}".into());
+    format!(
+        "const __r8r_all = {all}; \
+         for (const __id of Object.keys(__r8r_all)) {{ const __its = __r8r_all[__id].map((j) => ({{ json: j }})); \
+         $node[__id] = {{ json: __its.length ? __its[0].json : {{}}, item: __its[0], first: () => __its[0], last: () => __its[__its.length - 1], all: () => __its }}; }} \
+         const $ = (id) => {{ if (!(id in $node)) throw new Error(`No node \"${{id}}\" ran before this one`); return $node[id]; }}; \
+         const $input = {{ item: items[0], first: () => items[0], last: () => items[items.length - 1], all: () => items }};"
+    )
+}
 
 /// The error, then each frame in the user's code, nearest first:
 /// `at f (line 3:20)    return x.missing.deep;`. Lines and columns count
 /// from the top of the code box; r8r's own wrapper frame is left out.
-fn js_trace(script: &str, message: &str, stack: Option<&str>) -> String {
+fn js_trace(script: &str, message: &str, stack: Option<&str>, prefix_len: usize) -> String {
     let lines: Vec<&str> = script.lines().collect();
     let mut out = message.to_string();
     for frame in stack.unwrap_or_default().lines() {
@@ -180,7 +203,7 @@ fn js_trace(script: &str, message: &str, stack: Option<&str>) -> String {
         let mut parts = place.trim_end_matches(')').rsplit(':');
         let column: usize = parts.next().and_then(|c| c.parse().ok()).unwrap_or(0);
         let Some(line) = parts.next().and_then(|l| l.parse::<usize>().ok()) else { continue };
-        let column = if line == 1 { column.saturating_sub(JS_PREFIX.len()) } else { column };
+        let column = if line == 1 { column.saturating_sub(prefix_len) } else { column };
         let name = if name == "<anonymous>" { "main code" } else { name };
         let source = lines.get(line.saturating_sub(1)).map(|l| l.trim()).unwrap_or("");
         out.push_str(&format!("\n  at {name} (line {line}:{column})    {source}"));
@@ -238,7 +261,7 @@ mod tests {
 
     fn upstream_ctx(language: &str, script: &str) -> NodeExecutionContext {
         NodeExecutionContext {
-            upstream: HashMap::from([("tg".to_string(), serde_json::json!({"message": {"chat": {"id": 42}, "text": "hi"}}))]),
+            upstream: HashMap::from([("tg".to_string(), vec![serde_json::json!({"message": {"chat": {"id": 42}, "text": "hi"}})])]),
             ..ctx_with(serde_json::json!({"language": language, "script": script}), vec![serde_json::json!({"response": "hello", "message": {"chat": {"id": 42}}})])
         }
     }
@@ -285,6 +308,56 @@ mod tests {
         assert!(err.contains("KeyError: 'missing'"), "{err}");
         assert!(err.contains("at pick (line 2)    return item.json['missing']"), "{err}");
         assert!(err.contains("(line 4)    return [pick(i) for i in items]"), "{err}");
+    }
+
+    fn n8n_ctx(script: &str) -> NodeExecutionContext {
+        NodeExecutionContext {
+            upstream: HashMap::from([(
+                "agent".to_string(),
+                vec![serde_json::json!({"output": "first answer"}), serde_json::json!({"output": "second answer"})],
+            )]),
+            ..ctx_with(serde_json::json!({"script": script}), vec![serde_json::json!({"n": 1}), serde_json::json!({"n": 2})])
+        }
+    }
+
+    async fn run_js(script: &str) -> serde_json::Value {
+        CodeNode.execute(&n8n_ctx(script)).await.unwrap()[0][0].json.clone()
+    }
+
+    #[tokio::test]
+    async fn javascript_accepts_n8n_style_node_access() {
+        assert_eq!(run_js("return [{json: {v: $node['agent'].first().json.output}}]").await, serde_json::json!({"v": "first answer"}));
+        assert_eq!(run_js("return [{json: {v: $node['agent'].last().json.output}}]").await, serde_json::json!({"v": "second answer"}));
+        assert_eq!(run_js("return [{json: {v: $node['agent'].all().length}}]").await, serde_json::json!({"v": 2}));
+        assert_eq!(run_js("return [{json: {v: $node['agent'].item.json.output}}]").await, serde_json::json!({"v": "first answer"}));
+        assert_eq!(run_js("return [{json: {v: $('agent').first().json.output}}]").await, serde_json::json!({"v": "first answer"}));
+        // The plain form keeps working.
+        assert_eq!(run_js("return [{json: {v: $node['agent'].json.output}}]").await, serde_json::json!({"v": "first answer"}));
+    }
+
+    #[tokio::test]
+    async fn javascript_accepts_n8n_style_input_access() {
+        assert_eq!(run_js("return [{json: {first: $input.first().json.n, last: $input.last().json.n, count: $input.all().length, item: $input.item.json.n}}]").await, serde_json::json!({"first": 1, "last": 2, "count": 2, "item": 1}));
+    }
+
+    #[tokio::test]
+    async fn an_unknown_node_says_so() {
+        let err = CodeNode.execute(&n8n_ctx("return [$('nope').first()]")).await.unwrap_err().to_string();
+        assert!(err.contains("No node \"nope\" ran before this one"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_n8n_helpers_do_not_shift_error_lines() {
+        let err = CodeNode.execute(&n8n_ctx("const a = 1;\nreturn null.x;")).await.unwrap_err().to_string();
+        assert!(err.contains("at main code (line 2:"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn code_can_use_intl() {
+        let script = "const text = $json.text;\nconst segmenter = new Intl.Segmenter('ru', {\n  granularity: 'word',\n});\nconst words = [...segmenter.segment(text)].filter((s) => s.isWordLike).map((s) => s.segment);\nreturn [{json: {words, count: new Intl.NumberFormat('ru').format(1234567), when: new Date(Date.UTC(2026, 9, 8)).toLocaleDateString('ru', {timeZone: 'UTC'})}}];";
+        let ctx = ctx_with(serde_json::json!({"script": script}), vec![serde_json::json!({"text": "Привет, как дела?"})]);
+        let out = CodeNode.execute(&ctx).await.unwrap();
+        assert_eq!(out[0][0].json, serde_json::json!({"words": ["Привет", "как", "дела"], "count": "1\u{a0}234\u{a0}567", "when": "08.10.2026"}));
     }
 
     #[tokio::test]

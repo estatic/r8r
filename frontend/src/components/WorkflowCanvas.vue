@@ -287,7 +287,7 @@ function outputTop(shape: string, index: number, total: number): string {
             v-else
             class="px-3 py-2 rounded border bg-white shadow text-xs"
             :class="{ 'min-w-[220px] py-3 text-center': data.aux.length > 0 }"
-            :style="glow(data.run)"
+            :style="{ ...glow(data.run), minHeight: `${(data.outputPorts.length + 2) * 14}px` }"
           >
             {{ label }}
           </div>

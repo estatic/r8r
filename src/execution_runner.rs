@@ -62,13 +62,30 @@ impl LiveExecutionTracker {
         }
     }
 
-    async fn persist_node_output(&self, node_id: &str, items: Vec<Item>, run: NodeRun) {
+    /// Records a node's output; returns what it now totals (items, counts).
+    async fn persist_node_output(&self, node_id: &str, items: Vec<Item>, run: NodeRun) -> (Vec<Item>, BTreeMap<String, usize>) {
         let mut execution = self.execution.lock().await;
+        // A node inside a loop runs once per batch: keep what all its runs sent.
+        let earlier = execution.node_runs.get(node_id).filter(|r| r.status == NodeRunStatus::Success && run.status == NodeRunStatus::Success).cloned();
+        let (items, run) = match earlier {
+            Some(earlier) => {
+                let mut all = execution.node_outputs.get(node_id).cloned().unwrap_or_default();
+                all.extend(items);
+                let mut counts = earlier.counts;
+                for (port, n) in run.counts {
+                    *counts.entry(port).or_default() += n;
+                }
+                (all, NodeRun { status: run.status, counts })
+            }
+            None => (items, run),
+        };
+        let totals = (items.clone(), run.counts.clone());
         execution.node_outputs.insert(node_id.to_string(), items);
         execution.node_runs.insert(node_id.to_string(), run);
         if let Err(e) = self.storage.update_execution(&execution).await {
             tracing::error!(error = %e, execution_id = %execution.id, node_id, "failed to persist incremental execution update");
         }
+        totals
     }
 
     fn emit(&self, kind: ExecutionEventKind) {
@@ -105,19 +122,19 @@ impl ExecutionObserver for LiveExecutionTracker {
     }
     async fn on_node_finished(&self, node_id: &str, items: &[Item]) {
         let counts = self.take_counts(node_id, items.len());
-        self.persist_node_output(node_id, items.to_vec(), NodeRun { status: NodeRunStatus::Success, counts: counts.clone() }).await;
-        self.emit(ExecutionEventKind::NodeFinished { node_id: node_id.to_string(), items: items.to_vec(), counts });
+        let (items, counts) = self.persist_node_output(node_id, items.to_vec(), NodeRun { status: NodeRunStatus::Success, counts }).await;
+        self.emit(ExecutionEventKind::NodeFinished { node_id: node_id.to_string(), items, counts });
     }
     async fn on_node_errored(&self, node_id: &str, error: &str) {
         let counts = self.take_counts(node_id, 0);
         let error_item = Item { json: serde_json::json!({ "error": error }), binary: serde_json::json!({}) };
-        self.persist_node_output(node_id, vec![error_item], NodeRun { status: NodeRunStatus::Error, counts: counts.clone() }).await;
+        let (_, counts) = self.persist_node_output(node_id, vec![error_item], NodeRun { status: NodeRunStatus::Error, counts }).await;
         self.emit(ExecutionEventKind::NodeErrored { node_id: node_id.to_string(), error: error.to_string(), counts });
     }
     async fn on_node_skipped(&self, node_id: &str, items: &[Item]) {
         let counts = self.take_counts(node_id, items.len());
-        self.persist_node_output(node_id, items.to_vec(), NodeRun { status: NodeRunStatus::Skipped, counts: counts.clone() }).await;
-        self.emit(ExecutionEventKind::NodeSkipped { node_id: node_id.to_string(), items: items.to_vec(), counts });
+        let (items, counts) = self.persist_node_output(node_id, items.to_vec(), NodeRun { status: NodeRunStatus::Skipped, counts }).await;
+        self.emit(ExecutionEventKind::NodeSkipped { node_id: node_id.to_string(), items, counts });
     }
 }
 
@@ -520,6 +537,31 @@ mod tests {
             }
         }
         assert_eq!(event_counts, Some(split.counts.clone()));
+    }
+
+    #[tokio::test]
+    async fn a_loop_bodys_output_and_counts_add_up_over_all_batches() {
+        let storage = memory_storage().await;
+        let (events, _rx) = tokio::sync::broadcast::channel(64);
+        let node = |id: &str, t: &str, p: serde_json::Value| NodeInstance { id: id.into(), node_type: t.into(), position: (0.0, 0.0), parameters: p, disabled: false, settings: Default::default() };
+        let link = |f: &str, o: usize, t: &str| Connection { from_node: f.into(), from_output: o, to_node: t.into(), to_input: 0, error: false };
+        let mut wf = linear_workflow();
+        wf.nodes = vec![
+            node("trigger", "core.manualTrigger", serde_json::json!({})),
+            node("make", "core.code", serde_json::json!({"script": "return [1,2,3,4,5].map(n => ({json: {n}}))"})),
+            node("loop", "core.loop", serde_json::json!({"batch_size": 2})),
+            node("mark", "core.set", serde_json::json!({"fields": {"seen": true}})),
+            node("after", "core.noop", serde_json::json!({})),
+        ];
+        wf.connections = vec![link("trigger", 0, "make"), link("make", 0, "loop"), link("loop", 1, "mark"), link("mark", 0, "loop"), link("loop", 0, "after")];
+        storage.create_workflow(&wf).await.unwrap();
+        let (started, handle) = start_execution(storage.clone(), events, registry(), wf, ExecutionMode::Manual, None, Default::default()).await.unwrap();
+        assert_eq!(handle.await.unwrap().status, ExecutionStatus::Success);
+        let stored = storage.get_execution(started.id).await.unwrap().unwrap();
+        assert_eq!(stored.node_outputs["mark"].len(), 5, "all three batches' items");
+        assert_eq!(stored.node_runs["mark"].counts, BTreeMap::from([("0".to_string(), 5)]));
+        assert_eq!(stored.node_runs["loop"].counts, BTreeMap::from([("0".to_string(), 5), ("1".to_string(), 5)]));
+        assert_eq!(stored.node_outputs["after"].len(), 5);
     }
 
     #[tokio::test]

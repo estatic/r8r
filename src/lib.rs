@@ -8,6 +8,7 @@ pub mod domain;
 pub mod engine;
 pub mod execution_runner;
 pub mod expr;
+pub mod intl;
 pub mod llm;
 pub mod logging;
 pub mod n8n;

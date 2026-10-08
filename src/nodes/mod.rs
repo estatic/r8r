@@ -3,6 +3,7 @@ pub mod code;
 pub mod filter;
 pub mod http_request;
 pub mod if_node;
+pub mod loop_node;
 pub mod manual_trigger;
 pub mod merge;
 pub mod noop;
@@ -20,6 +21,7 @@ pub fn register_all(registry: &mut NodeRegistry) {
     registry.register(Box::new(manual_trigger::ManualTriggerNode));
     registry.register(Box::new(set::SetNode));
     registry.register(Box::new(if_node::IfNode));
+    registry.register(Box::new(loop_node::LoopNode));
     registry.register(Box::new(code::CodeNode));
     registry.register(Box::new(switch::SwitchNode));
     registry.register(Box::new(merge::MergeNode));

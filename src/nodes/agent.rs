@@ -274,7 +274,8 @@ pub(crate) async fn run_agent_loop(
                     memory.remember(&user_message, &text).await?;
                 }
                 return Ok(vec![vec![Item {
-                    json: serde_json::json!({"response": text, "tool_calls_made": tool_calls_made}),
+                    // `output` is n8n's name for the answer; `response` is kept for existing workflows.
+                    json: serde_json::json!({"output": text, "response": text, "tool_calls_made": tool_calls_made}),
                     binary: serde_json::json!({}),
                 }]]);
             }
@@ -448,7 +449,6 @@ impl Node for AgentNode {
             }));
         }
         let api_base_url = ctx.parameters.get("api_base_url").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
-
         // A key goes only where its credential says: anyone who can edit the
         // workflow can set `api_base_url`, which must never receive a
         // credential's key. It is for keyless servers (Ollama, ...) only.
@@ -457,6 +457,7 @@ impl Node for AgentNode {
                 "ai.agent: api_base_url can't be used with a credential's API key; set the server address (Base URL) on the credential instead".into(),
             ));
         }
+
         match provider_name {
             "anthropic" => {
                 let base_url = credential_data
@@ -575,6 +576,15 @@ mod tests {
 
     async fn ask(provider: &RecordingProvider, ctx: &NodeExecutionContext, text: &str) {
         run_agent_loop(provider, "m", "", "", text.to_string(), &serde_json::json!([]), 5, None, ctx).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn the_answer_is_also_output_as_n8n_names_it() {
+        let provider = RecordingProvider { seen: Mutex::new(Vec::new()) };
+        let ctx = ctx_with_tool_executor(std::sync::Arc::new(SpyToolExecutor { calls: Mutex::new(Vec::new()), result: Ok(vec![vec![]]) }));
+        let out = run_agent_loop(&provider, "m", "", "", "hi".into(), &serde_json::json!([]), 5, None, &ctx).await.unwrap();
+        assert_eq!(out[0][0].json["output"], "answer 1");
+        assert_eq!(out[0][0].json["response"], "answer 1");
     }
 
     #[tokio::test]
@@ -1125,16 +1135,6 @@ mod tests {
         assert!(requests[0].headers.get("authorization").is_none());
     }
 
-    #[tokio::test]
-    async fn anthropic_without_a_credential_says_it_needs_one() {
-        let ctx = NodeExecutionContext {
-            parameters: serde_json::json!({"provider": "anthropic", "model": "claude", "user_message": "hi"}),
-            input_items: vec![Item { json: serde_json::json!({}), binary: serde_json::json!({}) }],
-            ..Default::default()
-        };
-        let err = AgentNode.execute(&ctx).await.unwrap_err().to_string();
-        assert!(err.contains("Anthropic provider needs a credential"), "{err}");
-    }
     /// An agent with a credential holding `credential`, and `params`.
     fn keyed_ctx(credential_type: &str, credential: serde_json::Value, params: serde_json::Value) -> NodeExecutionContext {
         let id = uuid::Uuid::new_v4();
@@ -1184,4 +1184,14 @@ mod tests {
         AgentNode.execute(&ctx).await.unwrap();
     }
 
+    #[tokio::test]
+    async fn anthropic_without_a_credential_says_it_needs_one() {
+        let ctx = NodeExecutionContext {
+            parameters: serde_json::json!({"provider": "anthropic", "model": "claude", "user_message": "hi"}),
+            input_items: vec![Item { json: serde_json::json!({}), binary: serde_json::json!({}) }],
+            ..Default::default()
+        };
+        let err = AgentNode.execute(&ctx).await.unwrap_err().to_string();
+        assert!(err.contains("Anthropic provider needs a credential"), "{err}");
+    }
 }

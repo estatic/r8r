@@ -74,6 +74,12 @@ lapin = { version = "4.12.0", default-features = false, features = ["tokio", "ru
 rumqttc = { version = "0.25.1", features = ["use-rustls"] }
 rskafka = { version = "0.6.0", default-features = false, features = ["compression-gzip", "transport-tls"] }
 rustls-pemfile = "2.2.0"
+icu = { version = "1.5", features = ["experimental"] }
+fixed_decimal = { version = "0.5", features = ["ryu"] }
+icu_experimental = "0.1"
+tinystr = "0.7"
+writeable = "0.5"
+icu_provider = "1.5"
 
 [dev-dependencies]
 cucumber = "0.23"

@@ -1,4 +1,4 @@
-use crate::domain::{Item, NodeInstance, Workflow};
+use crate::domain::{Connection, Item, NodeInstance, Workflow};
 use crate::node::{NodeExecutionContext, NodeRegistry};
 use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
@@ -127,6 +127,10 @@ async fn run_node_with_policy(
     }
 }
 
+/// Loop Over Items: its body is what its "loop" output (1) leads to, up to
+/// the links back into it; "done" (0) gets everything that came back.
+pub const LOOP_TYPE: &str = "core.loop";
+
 pub async fn execute_workflow_seeded(
     workflow: &Workflow,
     registry: &std::sync::Arc<NodeRegistry>,
@@ -135,29 +139,140 @@ pub async fn execute_workflow_seeded(
     observer: &dyn ExecutionObserver,
 ) -> anyhow::Result<HashMap<String, Vec<Item>>> {
     let order = topological_order(workflow)?;
-    let start_id = order.first().map(|n| n.id.clone());
-    let mut produced: HashMap<String, crate::node::NodeOutput> = HashMap::new();
-    let mut error_produced: HashMap<String, Vec<Item>> = HashMap::new();
-    let tool_executor: std::sync::Arc<dyn crate::node::ToolExecutor> =
-        std::sync::Arc::new(EngineToolExecutor::new(registry.clone(), resources.credentials.clone()));
+    let back = back_edges(workflow);
+    let owner = loop_owners(workflow, &back);
+    let mut run = Run {
+        workflow,
+        registry,
+        resources,
+        observer,
+        start_id: order.first().map(|n| n.id.clone()),
+        trigger_items,
+        produced: HashMap::new(),
+        error_produced: HashMap::new(),
+        tool_executor: std::sync::Arc::new(EngineToolExecutor::new(registry.clone(), resources.credentials.clone())),
+        back,
+        owner,
+        order: order.clone(),
+    };
+    // Nodes inside a loop run from it, once per batch.
+    let top: Vec<NodeInstance> = order.iter().filter(|n| !run.owner.contains_key(&n.id)).cloned().collect();
+    run.run_list(&top).await?;
 
-    for node_instance in &order {
+    // Persist/return only each node's primary (port 0) output, flattened
+    // into the pre-existing HashMap<String, Vec<Item>> shape.
+    let flattened = order
+        .into_iter()
+        .map(|n| {
+            let items = run.produced.get(&n.id).and_then(|ports| ports.first()).cloned().unwrap_or_default();
+            (n.id, items)
+        })
+        .collect();
+    Ok(flattened)
+}
+
+/// One run's state: what each node produced so far, and the loop layout.
+struct Run<'a> {
+    workflow: &'a Workflow,
+    registry: &'a std::sync::Arc<NodeRegistry>,
+    resources: &'a crate::credentials::RunResources,
+    observer: &'a dyn ExecutionObserver,
+    start_id: Option<String>,
+    trigger_items: Option<Vec<Item>>,
+    produced: HashMap<String, crate::node::NodeOutput>,
+    error_produced: HashMap<String, Vec<Item>>,
+    tool_executor: std::sync::Arc<dyn crate::node::ToolExecutor>,
+    /// Indexes of connections that lead back into a loop node.
+    back: HashSet<usize>,
+    /// Node id -> the (innermost) loop whose body it is in.
+    owner: HashMap<String, String>,
+    order: Vec<NodeInstance>,
+}
+
+impl<'a> Run<'a> {
+    fn run_list<'b>(&'b mut self, list: &'b [NodeInstance]) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'b>>
+    where
+        'a: 'b,
+    {
+        Box::pin(async move {
+            for node in list {
+                self.run_node(node).await?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Sends `input` through the loop's body a batch at a time, then out of
+    /// "done" with everything the body sent back.
+    async fn run_loop(&mut self, lp: &NodeInstance, input: Vec<Item>) -> anyhow::Result<()> {
+        let batch_size = lp.parameters.get("batch_size").and_then(|v| v.as_u64()).filter(|n| *n > 0).unwrap_or(1) as usize;
+        let body: Vec<NodeInstance> = self.order.iter().filter(|n| self.owner.get(&n.id) == Some(&lp.id)).cloned().collect();
+        let returns: Vec<Connection> = self
+            .workflow
+            .connections
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| c.to_node == lp.id && self.back.contains(i))
+            .map(|(_, c)| c.clone())
+            .collect();
+        let mut queue: VecDeque<Item> = input.into();
+        let (mut done, mut looped) = (Vec::new(), 0usize);
+        // What each body node sent over all batches, kept as its output.
+        let mut totals: HashMap<String, crate::node::NodeOutput> = HashMap::new();
+        self.observer.on_node_started(&lp.id).await;
+        while !queue.is_empty() {
+            let batch: Vec<Item> = queue.drain(..batch_size.min(queue.len())).collect();
+            looped += batch.len();
+            for node in &body {
+                self.produced.remove(&node.id);
+                self.error_produced.remove(&node.id);
+            }
+            self.produced.insert(lp.id.clone(), vec![vec![], batch]);
+            self.run_list(&body).await?;
+            for node in &body {
+                if let Some(ports) = self.produced.get(&node.id) {
+                    let total = totals.entry(node.id.clone()).or_default();
+                    total.resize(total.len().max(ports.len()), Vec::new());
+                    for (i, items) in ports.iter().enumerate() {
+                        total[i].extend(items.iter().cloned());
+                    }
+                }
+            }
+            for c in &returns {
+                let back_items = if c.error {
+                    self.error_produced.get(&c.from_node).cloned().unwrap_or_default()
+                } else {
+                    self.produced.get(&c.from_node).and_then(|ports| ports.get(c.from_output)).cloned().unwrap_or_default()
+                };
+                done.extend(back_items);
+            }
+        }
+        self.observer
+            .on_node_counts(&lp.id, &BTreeMap::from([("0".to_string(), done.len()), ("1".to_string(), looped)]))
+            .await;
+        self.observer.on_node_finished(&lp.id, &done).await;
+        self.produced.extend(totals);
+        self.produced.insert(lp.id.clone(), vec![done, vec![]]);
+        Ok(())
+    }
+
+    async fn run_node(&mut self, node_instance: &NodeInstance) -> anyhow::Result<()> {
         // Aggregate this node's input items from every incoming connection,
         // pulling each upstream node's items from the SPECIFIC from_output
         // port index that connection names (not just port 0). A connection
-        // marked `error` is routed via the separate error_produced side-map
+        // marked `error` is routed via the separate self.error_produced side-map
         // instead, since error output isn't a real port index into a
         // NodeOutput.
         let mut input_items: Vec<Item> = Vec::new();
-        for conn in &workflow.connections {
-            if conn.to_node != node_instance.id {
+        for (index, conn) in self.workflow.connections.iter().enumerate() {
+            if conn.to_node != node_instance.id || self.back.contains(&index) {
                 continue;
             }
             if conn.error {
-                if let Some(items) = error_produced.get(&conn.from_node) {
+                if let Some(items) = self.error_produced.get(&conn.from_node) {
                     input_items.extend(items.iter().cloned());
                 }
-            } else if let Some(outputs) = produced.get(&conn.from_node) {
+            } else if let Some(outputs) = self.produced.get(&conn.from_node) {
                 if let Some(port_items) = outputs.get(conn.from_output) {
                     input_items.extend(port_items.iter().cloned());
                 }
@@ -167,31 +282,31 @@ pub async fn execute_workflow_seeded(
         if node_instance.disabled {
             // A disabled node is a no-op passthrough: its input items flow
             // through unchanged as its (single-port) output, and it is never
-            // handed to the registry, executed, or given resolved parameters.
-            observer.on_node_counts(&node_instance.id, &port_counts(&[input_items.len()])).await;
-            observer.on_node_skipped(&node_instance.id, &input_items).await;
-            produced.insert(node_instance.id.clone(), vec![input_items]);
-            continue;
+            // handed to the self.registry, executed, or given resolved parameters.
+            self.observer.on_node_counts(&node_instance.id, &port_counts(&[input_items.len()])).await;
+            self.observer.on_node_skipped(&node_instance.id, &input_items).await;
+            self.produced.insert(node_instance.id.clone(), vec![input_items]);
+            return Ok(());
         }
 
-        // Seeded start node — inject trigger_items and skip execute() entirely
+        // Seeded start node — inject self.trigger_items and skip execute() entirely
         // for this node only. Must come after the disabled check (a disabled start
         // node keeps its existing passthrough semantics, not the seed) and before
-        // the registry lookup / empty-input skip (the seed always "counts" as
-        // having produced real output, regardless of what input_items ended up
+        // the self.registry lookup / empty-input skip (the seed always "counts" as
+        // having self.produced real output, regardless of what input_items ended up
         // being — a start node has no incoming connections, so input_items is
         // always empty anyway; the seed replaces it, not merges with it).
-        if let (Some(items), Some(start)) = (&trigger_items, &start_id) {
+        if let (Some(items), Some(start)) = (&self.trigger_items, &self.start_id) {
             if &node_instance.id == start {
-                observer.on_node_started(&node_instance.id).await;
-                observer.on_node_counts(&node_instance.id, &port_counts(&[items.len()])).await;
-                observer.on_node_finished(&node_instance.id, items).await;
-                produced.insert(node_instance.id.clone(), vec![items.clone()]);
-                continue;
+                self.observer.on_node_started(&node_instance.id).await;
+                self.observer.on_node_counts(&node_instance.id, &port_counts(&[items.len()])).await;
+                self.observer.on_node_finished(&node_instance.id, items).await;
+                self.produced.insert(node_instance.id.clone(), vec![items.clone()]);
+                return Ok(());
             }
         }
 
-        let node = registry
+        let node = self.registry
             .get(&node_instance.node_type)
             .ok_or_else(|| anyhow::anyhow!("unknown node type: {}", node_instance.node_type))?;
 
@@ -205,11 +320,16 @@ pub async fn execute_workflow_seeded(
         // order guarantees at most one node (the start node) has zero
         // incoming connections, so this can't accidentally skip a real start
         // node.
-        let has_incoming_connection = workflow.connections.iter().any(|c| c.to_node == node_instance.id);
+        let has_incoming_connection =
+            self.workflow.connections.iter().enumerate().any(|(i, c)| c.to_node == node_instance.id && !self.back.contains(&i));
         if has_incoming_connection && input_items.is_empty() {
-            observer.on_node_skipped(&node_instance.id, &[]).await;
-            produced.insert(node_instance.id.clone(), vec![]);
-            continue;
+            self.observer.on_node_skipped(&node_instance.id, &[]).await;
+            self.produced.insert(node_instance.id.clone(), vec![]);
+            return Ok(());
+        }
+
+        if node_instance.node_type == LOOP_TYPE {
+            return self.run_loop(node_instance, input_items).await;
         }
 
         // Resolve this node's parameters via the expression engine before
@@ -220,7 +340,7 @@ pub async fn execute_workflow_seeded(
         // interpolate).
         let parameters = if node.resolves_parameters() {
             let items_json: Vec<serde_json::Value> = input_items.iter().map(|i| i.json.clone()).collect();
-            let node_json: HashMap<String, serde_json::Value> = produced
+            let node_json: HashMap<String, serde_json::Value> = self.produced
                 .iter()
                 .filter_map(|(id, ports)| {
                     let first_item_json = ports.first().and_then(|p| p.first()).map(|item| item.json.clone());
@@ -231,7 +351,7 @@ pub async fn execute_workflow_seeded(
                 json: input_items.first().map(|i| i.json.clone()).unwrap_or_else(|| serde_json::json!({})),
                 items: &items_json,
                 node_json: &node_json,
-                workflow_name: &workflow.name,
+                workflow_name: &self.workflow.name,
                 args: None,
             };
             match crate::expr::resolve_parameters(&node_instance.parameters, &eval_ctx) {
@@ -239,9 +359,9 @@ pub async fn execute_workflow_seeded(
                 Err(e) => {
                     // Report it on the node, so the editor marks which one failed.
                     let message = format!("parameter resolution failed: {e}");
-                    observer.on_node_started(&node_instance.id).await;
-                    observer.on_node_counts(&node_instance.id, &BTreeMap::new()).await;
-                    observer.on_node_errored(&node_instance.id, &message).await;
+                    self.observer.on_node_started(&node_instance.id).await;
+                    self.observer.on_node_counts(&node_instance.id, &BTreeMap::new()).await;
+                    self.observer.on_node_errored(&node_instance.id, &message).await;
                     return Err(anyhow::anyhow!("node {} {message}", node_instance.id));
                 }
             }
@@ -252,34 +372,34 @@ pub async fn execute_workflow_seeded(
         let ctx = NodeExecutionContext {
             parameters,
             input_items,
-            credentials: resources.credentials.clone(),
-            credential_types: resources.credential_types.clone(),
-            tools: resources.tools.clone(),
+            credentials: self.resources.credentials.clone(),
+            credential_types: self.resources.credential_types.clone(),
+            tools: self.resources.tools.clone(),
             tool_args: None,
-            tool_executor: Some(tool_executor.clone()),
-            memory: resources.memory.0.clone(),
-            upstream: produced
+            tool_executor: Some(self.tool_executor.clone()),
+            memory: self.resources.memory.0.clone(),
+            upstream: self.produced
                 .iter()
-                .filter_map(|(id, ports)| ports.first().and_then(|p| p.first()).map(|item| (id.clone(), item.json.clone())))
+                .filter_map(|(id, ports)| ports.first().map(|items| (id.clone(), items.iter().map(|i| i.json.clone()).collect())))
                 .collect(),
-            workflow_id: Some(workflow.id),
+            workflow_id: Some(self.workflow.id),
             node_id: node_instance.id.clone(),
         };
-        observer.on_node_started(&node_instance.id).await;
+        self.observer.on_node_started(&node_instance.id).await;
         match run_node_with_policy(node, &ctx, &node_instance.settings).await {
             Ok(output) => {
                 let output = if node.keeps_input_fields() { with_input_fields(output, &ctx.input_items) } else { output };
                 let primary = output.first().cloned().unwrap_or_default();
                 let lens: Vec<usize> = output.iter().map(Vec::len).collect();
-                observer.on_node_counts(&node_instance.id, &port_counts(&lens)).await;
-                observer.on_node_finished(&node_instance.id, &primary).await;
-                produced.insert(node_instance.id.clone(), output);
+                self.observer.on_node_counts(&node_instance.id, &port_counts(&lens)).await;
+                self.observer.on_node_finished(&node_instance.id, &primary).await;
+                self.produced.insert(node_instance.id.clone(), output);
             }
             Err(e) => {
                 // Precedence (spec §4): an error connection wins, then
                 // continue_on_fail (error item on port 0 only), else the
                 // whole run fails.
-                let has_error_route = workflow
+                let has_error_route = self.workflow
                     .connections
                     .iter()
                     .any(|c| c.from_node == node_instance.id && c.error);
@@ -290,38 +410,83 @@ pub async fn execute_workflow_seeded(
                 } else {
                     BTreeMap::new()
                 };
-                observer.on_node_counts(&node_instance.id, &counts).await;
-                observer.on_node_errored(&node_instance.id, &e.to_string()).await;
+                self.observer.on_node_counts(&node_instance.id, &counts).await;
+                self.observer.on_node_errored(&node_instance.id, &e.to_string()).await;
                 let error_item = Item {
                     json: serde_json::json!({ "error": e.to_string() }),
                     binary: serde_json::json!({}),
                 };
                 if has_error_route {
-                    error_produced.insert(node_instance.id.clone(), vec![error_item]);
-                    produced.insert(node_instance.id.clone(), vec![]);
+                    self.error_produced.insert(node_instance.id.clone(), vec![error_item]);
+                    self.produced.insert(node_instance.id.clone(), vec![]);
                 } else if node_instance.settings.continue_on_fail {
-                    produced.insert(node_instance.id.clone(), vec![vec![error_item]]);
+                    self.produced.insert(node_instance.id.clone(), vec![vec![error_item]]);
                 } else {
                     return Err(anyhow::anyhow!("node {} failed: {e}", node_instance.id));
                 }
             }
         }
+        Ok(())
     }
+}
 
-    // Persist/return only each node's primary (port 0) output, flattened
-    // into the pre-existing HashMap<String, Vec<Item>> shape.
-    let flattened = order
-        .into_iter()
-        .map(|n| {
-            let items = produced
-                .get(&n.id)
-                .and_then(|ports| ports.first())
-                .cloned()
-                .unwrap_or_default();
-            (n.id, items)
-        })
-        .collect();
-    Ok(flattened)
+/// Connections from a loop's body back into the loop node (by index).
+fn back_edges(workflow: &Workflow) -> HashSet<usize> {
+    let mut back = HashSet::new();
+    for lp in workflow.nodes.iter().filter(|n| n.node_type == LOOP_TYPE) {
+        // Only what the "loop" output leads to can come back: following
+        // "done" too would reach the nodes that feed the loop.
+        let mut reach: HashSet<&str> = HashSet::new();
+        let mut queue: VecDeque<&str> = VecDeque::new();
+        for c in workflow.connections.iter().filter(|c| c.from_node == lp.id && c.from_output == 1 && !c.error) {
+            if c.to_node != lp.id && reach.insert(c.to_node.as_str()) {
+                queue.push_back(c.to_node.as_str());
+            }
+        }
+        while let Some(id) = queue.pop_front() {
+            for c in workflow.connections.iter().filter(|c| c.from_node == id) {
+                if c.to_node != lp.id && reach.insert(c.to_node.as_str()) {
+                    queue.push_back(c.to_node.as_str());
+                }
+            }
+        }
+        for (i, c) in workflow.connections.iter().enumerate() {
+            if c.to_node == lp.id && reach.contains(c.from_node.as_str()) {
+                back.insert(i);
+            }
+        }
+    }
+    back
+}
+
+/// Each node inside a loop's body -> that loop (the innermost, when nested).
+/// A body is everything the loop's "loop" output (1) leads to.
+fn loop_owners(workflow: &Workflow, back: &HashSet<usize>) -> HashMap<String, String> {
+    let mut bodies: Vec<(&str, HashSet<&str>)> = Vec::new();
+    for lp in workflow.nodes.iter().filter(|n| n.node_type == LOOP_TYPE) {
+        let mut body: HashSet<&str> = HashSet::new();
+        let mut queue: VecDeque<&str> = VecDeque::new();
+        for (i, c) in workflow.connections.iter().enumerate() {
+            if c.from_node == lp.id && c.from_output == 1 && !c.error && !back.contains(&i) && body.insert(c.to_node.as_str()) {
+                queue.push_back(c.to_node.as_str());
+            }
+        }
+        while let Some(id) = queue.pop_front() {
+            for (i, c) in workflow.connections.iter().enumerate() {
+                if c.from_node == id && !back.contains(&i) && c.to_node != lp.id && body.insert(c.to_node.as_str()) {
+                    queue.push_back(c.to_node.as_str());
+                }
+            }
+        }
+        bodies.push((lp.id.as_str(), body));
+    }
+    let mut owner = HashMap::new();
+    for n in &workflow.nodes {
+        if let Some((lp, _)) = bodies.iter().filter(|(_, body)| body.contains(n.id.as_str())).min_by_key(|(_, body)| body.len()) {
+            owner.insert(n.id.clone(), lp.to_string());
+        }
+    }
+    owner
 }
 
 /// Lays each output item over the input item it answers: the one at the
@@ -365,7 +530,10 @@ fn topological_order(workflow: &Workflow) -> anyhow::Result<Vec<NodeInstance>> {
         }
     }
 
-    let targets: HashSet<&str> = workflow.connections.iter().map(|c| c.to_node.as_str()).collect();
+    // Links back into a loop node are what make a loop, not a cycle.
+    let back = back_edges(workflow);
+    let forward: Vec<&Connection> = workflow.connections.iter().enumerate().filter(|(i, _)| !back.contains(i)).map(|(_, c)| c).collect();
+    let targets: HashSet<&str> = forward.iter().map(|c| c.to_node.as_str()).collect();
     let start_candidates: Vec<&str> = workflow
         .nodes
         .iter()
@@ -384,7 +552,7 @@ fn topological_order(workflow: &Workflow) -> anyhow::Result<Vec<NodeInstance>> {
     let mut in_degree: HashMap<&str, usize> = workflow.nodes.iter().map(|n| (n.id.as_str(), 0)).collect();
     let mut adjacency: HashMap<&str, Vec<&str>> = HashMap::new();
     let mut seen_edges: HashSet<(&str, &str)> = HashSet::new();
-    for conn in &workflow.connections {
+    for conn in &forward {
         if seen_edges.insert((conn.from_node.as_str(), conn.to_node.as_str())) {
             adjacency.entry(conn.from_node.as_str()).or_default().push(conn.to_node.as_str());
             *in_degree.entry(conn.to_node.as_str()).or_insert(0) += 1;
@@ -653,6 +821,176 @@ mod tests {
         let seed = vec![Item { json: serde_json::json!({"message": {"chat": {"id": 42}}}), binary: serde_json::json!({}) }];
         let outputs = execute_workflow_seeded(&reply_workflow("test.reply"), &std::sync::Arc::new(r), Some(seed), &Default::default(), &NoopObserver).await.unwrap();
         assert_eq!(outputs["set1"][0].json, serde_json::json!({"reply": "hi", "chat": "replaced"}));
+    }
+
+    // ---- Loop Over Items ---------------------------------------------------
+
+    /// Counts its runs and the items it saw; tags each item with `tag`.
+    struct Counter {
+        name: &'static str,
+        runs: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        seen: std::sync::Arc<std::sync::Mutex<Vec<usize>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::node::Node for Counter {
+        fn type_name(&self) -> &'static str {
+            self.name
+        }
+        fn display_name(&self) -> &'static str {
+            "Counter"
+        }
+        fn description(&self) -> &'static str {
+            "Test-only node."
+        }
+        fn category(&self) -> crate::node::NodeCategory {
+            crate::node::NodeCategory::Action
+        }
+        async fn execute(&self, ctx: &NodeExecutionContext) -> Result<crate::node::NodeOutput, crate::node::NodeError> {
+            self.runs.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            self.seen.lock().unwrap().push(ctx.input_items.len());
+            Ok(vec![ctx
+                .input_items
+                .iter()
+                .map(|i| {
+                    let mut json = i.json.clone();
+                    json[self.name] = serde_json::json!(true);
+                    Item { json, binary: serde_json::json!({}) }
+                })
+                .collect()])
+        }
+    }
+
+    type Probe = (std::sync::Arc<std::sync::atomic::AtomicUsize>, std::sync::Arc<std::sync::Mutex<Vec<usize>>>);
+
+    fn loop_registry(names: &[&'static str]) -> (std::sync::Arc<NodeRegistry>, Vec<Probe>) {
+        let mut r = NodeRegistry::new();
+        crate::nodes::register_all(&mut r);
+        let mut probes = Vec::new();
+        for name in names {
+            let probe: Probe = Default::default();
+            r.register(Box::new(Counter { name, runs: probe.0.clone(), seen: probe.1.clone() }));
+            probes.push(probe);
+        }
+        (std::sync::Arc::new(r), probes)
+    }
+
+    fn node(id: &str, node_type: &str, parameters: serde_json::Value) -> NodeInstance {
+        NodeInstance { id: id.into(), node_type: node_type.into(), position: (0.0, 0.0), parameters, disabled: false, settings: Default::default() }
+    }
+
+    fn link(from: &str, from_output: usize, to: &str) -> Connection {
+        Connection { from_node: from.into(), from_output, to_node: to.into(), to_input: 0, error: false }
+    }
+
+    fn graph(nodes: Vec<NodeInstance>, connections: Vec<Connection>) -> Workflow {
+        Workflow { id: Uuid::new_v4(), name: "loop".into(), active: false, nodes, connections, created_at: chrono::Utc::now(), updated_at: chrono::Utc::now() }
+    }
+
+    fn items(n: usize) -> Vec<Item> {
+        (0..n).map(|i| Item { json: serde_json::json!({"i": i}), binary: serde_json::json!({}) }).collect()
+    }
+
+    /// trigger -> loop; loop.loop -> body -> back to loop; loop.done -> after
+    fn simple_loop(batch_size: usize) -> Workflow {
+        graph(
+            vec![
+                node("trigger", "core.manualTrigger", serde_json::json!({})),
+                node("loop", "core.loop", serde_json::json!({"batch_size": batch_size})),
+                node("body", "test.body", serde_json::json!({})),
+                node("after", "test.after", serde_json::json!({})),
+            ],
+            vec![link("trigger", 0, "loop"), link("loop", 1, "body"), link("body", 0, "loop"), link("loop", 0, "after")],
+        )
+    }
+
+    #[tokio::test]
+    async fn loop_over_items_runs_the_body_per_item_then_continues_with_all_of_them() {
+        let (registry, probes) = loop_registry(&["test.body", "test.after"]);
+        let outputs = execute_workflow_seeded(&simple_loop(1), &registry, Some(items(3)), &Default::default(), &NoopObserver).await.unwrap();
+        assert_eq!(probes[0].0.load(std::sync::atomic::Ordering::SeqCst), 3, "the body runs once per item");
+        assert_eq!(*probes[0].1.lock().unwrap(), vec![1, 1, 1]);
+        assert_eq!(probes[1].0.load(std::sync::atomic::Ordering::SeqCst), 1, "after the loop: once, with everything");
+        let after: Vec<_> = outputs["after"].iter().map(|i| i.json.clone()).collect();
+        assert_eq!(after, vec![
+            serde_json::json!({"i": 0, "test.body": true, "test.after": true}),
+            serde_json::json!({"i": 1, "test.body": true, "test.after": true}),
+            serde_json::json!({"i": 2, "test.body": true, "test.after": true}),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn loop_over_items_takes_batches() {
+        let (registry, probes) = loop_registry(&["test.body", "test.after"]);
+        let outputs = execute_workflow_seeded(&simple_loop(2), &registry, Some(items(5)), &Default::default(), &NoopObserver).await.unwrap();
+        assert_eq!(*probes[0].1.lock().unwrap(), vec![2, 2, 1]);
+        assert_eq!(outputs["after"].len(), 5);
+    }
+
+    #[tokio::test]
+    async fn a_loop_with_nothing_to_do_ends_at_once() {
+        let (registry, probes) = loop_registry(&["test.body", "test.after"]);
+        let mut wf = simple_loop(1);
+        // An If that sends nothing to the loop.
+        wf.nodes.insert(1, node("gate", "core.if", serde_json::json!({"condition": false})));
+        wf.connections[0] = link("trigger", 0, "gate");
+        wf.connections.push(link("gate", 0, "loop"));
+        execute_workflow_seeded(&wf, &registry, Some(items(2)), &Default::default(), &NoopObserver).await.unwrap();
+        assert_eq!(probes[0].0.load(std::sync::atomic::Ordering::SeqCst), 0);
+        assert_eq!(probes[1].0.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
+
+    #[tokio::test]
+    async fn items_the_body_drops_do_not_come_out_of_the_loop() {
+        let (registry, _) = loop_registry(&["test.after"]);
+        let mut wf = simple_loop(1);
+        wf.nodes[2] = node("body", "core.filter", serde_json::json!({"condition": "{{ $json.i != 1 }}"}));
+        let outputs = execute_workflow_seeded(&wf, &registry, Some(items(3)), &Default::default(), &NoopObserver).await.unwrap();
+        let kept: Vec<_> = outputs["after"].iter().map(|i| i.json["i"].clone()).collect();
+        assert_eq!(kept, vec![serde_json::json!(0), serde_json::json!(2)]);
+    }
+
+    #[tokio::test]
+    async fn loops_nest() {
+        // outer over 2 items; per outer item, `fan` makes 3, the inner loop walks them.
+        let (registry, probes) = loop_registry(&["test.inner", "test.after"]);
+        let wf = graph(
+            vec![
+                node("trigger", "core.manualTrigger", serde_json::json!({})),
+                node("outer", "core.loop", serde_json::json!({"batch_size": 1})),
+                node("fan", "core.code", serde_json::json!({"script": "return [1, 2, 3].map(k => ({json: {...items[0].json, k}}))"})),
+                node("inner", "core.loop", serde_json::json!({"batch_size": 1})),
+                node("work", "test.inner", serde_json::json!({})),
+                node("after", "test.after", serde_json::json!({})),
+            ],
+            vec![
+                link("trigger", 0, "outer"),
+                link("outer", 1, "fan"),
+                link("fan", 0, "inner"),
+                link("inner", 1, "work"),
+                link("work", 0, "inner"),
+                link("inner", 0, "outer"),
+                link("outer", 0, "after"),
+            ],
+        );
+        let outputs = execute_workflow_seeded(&wf, &registry, Some(items(2)), &Default::default(), &NoopObserver).await.unwrap();
+        assert_eq!(probes[0].0.load(std::sync::atomic::Ordering::SeqCst), 6, "2 outer x 3 inner");
+        assert_eq!(outputs["after"].len(), 6);
+    }
+
+    #[tokio::test]
+    async fn a_cycle_without_a_loop_node_is_still_refused() {
+        let (registry, _) = loop_registry(&["test.body"]);
+        let wf = graph(
+            vec![
+                node("trigger", "core.manualTrigger", serde_json::json!({})),
+                node("a", "core.noop", serde_json::json!({})),
+                node("b", "core.noop", serde_json::json!({})),
+            ],
+            vec![link("trigger", 0, "a"), link("a", 0, "b"), link("b", 0, "a")],
+        );
+        let err = execute_workflow_seeded(&wf, &registry, Some(items(1)), &Default::default(), &NoopObserver).await.unwrap_err().to_string();
+        assert!(err.contains("cycle"), "{err}");
     }
 
     #[tokio::test]
