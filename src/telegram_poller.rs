@@ -30,6 +30,52 @@ const RETRY_BACKOFF_SECS: u64 = 5;
 /// spawns a fresh one on that chat's next update.
 const CHAT_WORKER_IDLE: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// The update types a Telegram Trigger can listen for, as n8n's "Trigger On".
+pub const UPDATE_TYPES: [&str; 8] = [
+    "message",
+    "edited_message",
+    "channel_post",
+    "edited_channel_post",
+    "inline_query",
+    "callback_query",
+    "poll",
+    "pre_checkout_query",
+];
+
+/// The update types chosen in the trigger's `updates` parameter; empty
+/// means all (nothing chosen, or "*").
+pub fn trigger_updates(trigger_node: &NodeInstance) -> Vec<String> {
+    let chosen: Vec<String> = trigger_node
+        .parameters
+        .get("updates")
+        .and_then(|v| v.as_array())
+        .map(|a| a.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+        .unwrap_or_default();
+    if chosen.iter().any(|u| u == "*") {
+        return Vec::new();
+    }
+    chosen
+}
+
+/// Rejects an update type Telegram doesn't have, so a typo can't silently
+/// leave the trigger deaf.
+pub fn validate_updates(trigger_node: &NodeInstance) -> anyhow::Result<()> {
+    match trigger_updates(trigger_node).into_iter().find(|u| !UPDATE_TYPES.contains(&u.as_str())) {
+        Some(bad) => Err(anyhow::anyhow!("telegram.trigger: unknown update type \"{bad}\" (expected \"*\" or one of {})", UPDATE_TYPES.join(", "))),
+        None => Ok(()),
+    }
+}
+
+/// An update's type: its one field besides `update_id`.
+fn update_type(update: &serde_json::Value) -> Option<&str> {
+    update.as_object()?.keys().map(String::as_str).find(|k| *k != "update_id")
+}
+
+/// Whether the trigger listens for this update (`allowed` empty = all).
+fn wanted(update: &serde_json::Value, allowed: &[String]) -> bool {
+    allowed.is_empty() || update_type(update).is_some_and(|t| allowed.iter().any(|a| a == t))
+}
+
 /// Chat id an update belongs to, from whichever update type carries one.
 /// `None` for updates with no chat (polls, inline queries, ...), which
 /// share one queue.
@@ -163,8 +209,9 @@ async fn get_updates(
     base_url: &str,
     bot_token: &str,
     offset: Option<i64>,
+    allowed: &[String],
 ) -> Result<Vec<serde_json::Value>, String> {
-    get_updates_waiting(client, base_url, bot_token, offset, GETUPDATES_TIMEOUT_SECS).await
+    get_updates_waiting(client, base_url, bot_token, offset, allowed, GETUPDATES_TIMEOUT_SECS).await
 }
 
 /// [`get_updates`] with its own long-poll wait (0 = answer at once).
@@ -173,15 +220,20 @@ async fn get_updates_waiting(
     base_url: &str,
     bot_token: &str,
     offset: Option<i64>,
+    allowed: &[String],
     wait_secs: u64,
 ) -> Result<Vec<serde_json::Value>, String> {
     let mut url = format!("{base_url}/bot{bot_token}/getUpdates?timeout={wait_secs}");
     if let Some(offset) = offset {
         url.push_str(&format!("&offset={offset}"));
     }
+    // Always sent: Telegram keeps the last list it was given, so "all" must
+    // be asked for explicitly ([] = every type) after a narrower one.
+    let allowed_updates = serde_json::to_string(allowed).unwrap_or_else(|_| "[]".into());
 
     let response = client
         .get(&url)
+        .query(&[("allowed_updates", allowed_updates)])
         .send()
         .await
         .map_err(|_| "request to Telegram getUpdates failed".to_string())?;
@@ -198,6 +250,108 @@ async fn get_updates_waiting(
     }
 
     Ok(body.get("result").and_then(|v| v.as_array()).cloned().unwrap_or_default())
+}
+
+#[cfg(test)]
+mod last_update_tests {
+    use super::*;
+    use crate::domain::{Execution, ExecutionStatus};
+    use crate::storage::sqlite::SqliteStorage;
+
+    fn run(workflow_id: Uuid, minutes_ago: i64, trigger_output: Option<serde_json::Value>) -> Execution {
+        Execution {
+            id: Uuid::new_v4(),
+            workflow_id,
+            status: ExecutionStatus::Success,
+            mode: ExecutionMode::Telegram,
+            node_outputs: trigger_output
+                .map(|json| HashMap::from([("tg".to_string(), vec![Item { json, binary: serde_json::json!({}) }])]))
+                .unwrap_or_default(),
+            node_runs: Default::default(),
+            started_at: chrono::Utc::now() - chrono::Duration::minutes(minutes_ago),
+            finished_at: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn finds_the_newest_message_the_trigger_handled() {
+        let storage = SqliteStorage::new("sqlite::memory:", [0u8; 32]).await.unwrap();
+        let wf = Workflow {
+            id: Uuid::new_v4(),
+            name: "bot".into(),
+            active: true,
+            nodes: vec![],
+            connections: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        storage.create_workflow(&wf).await.unwrap();
+        assert!(last_received_update(&storage, wf.id, "tg").await.unwrap().is_none());
+
+        storage.create_execution(&run(wf.id, 10, Some(serde_json::json!({"update_id": 1, "message": {"text": "older"}})))).await.unwrap();
+        storage.create_execution(&run(wf.id, 5, Some(serde_json::json!({"update_id": 2, "message": {"text": "newest"}})))).await.unwrap();
+        // A newer run without a Telegram update (e.g. a failed manual run) is skipped.
+        storage.create_execution(&run(wf.id, 1, Some(serde_json::json!({})))).await.unwrap();
+        storage.create_execution(&run(wf.id, 0, None)).await.unwrap();
+
+        let item = last_received_update(&storage, wf.id, "tg").await.unwrap().unwrap();
+        assert_eq!(item.json["message"]["text"], "newest");
+    }
+}
+
+#[cfg(test)]
+mod update_type_tests {
+    use super::*;
+
+    fn trigger(params: serde_json::Value) -> NodeInstance {
+        NodeInstance {
+            id: "tg".into(),
+            node_type: "telegram.trigger".into(),
+            position: (0.0, 0.0),
+            parameters: params,
+            disabled: false,
+            settings: Default::default(),
+        }
+    }
+
+    #[test]
+    fn all_updates_unless_a_choice_is_made() {
+        assert!(trigger_updates(&trigger(serde_json::json!({}))).is_empty());
+        assert!(trigger_updates(&trigger(serde_json::json!({"updates": []}))).is_empty());
+        assert!(trigger_updates(&trigger(serde_json::json!({"updates": ["*", "message"]}))).is_empty());
+        assert_eq!(
+            trigger_updates(&trigger(serde_json::json!({"updates": ["message", "callback_query"]}))),
+            vec!["message".to_string(), "callback_query".to_string()]
+        );
+    }
+
+    #[test]
+    fn an_unknown_update_type_is_rejected_at_activation() {
+        let err = validate_updates(&trigger(serde_json::json!({"updates": ["message", "messages"]}))).unwrap_err();
+        assert!(err.to_string().contains("\"messages\""), "{err}");
+        assert!(validate_updates(&trigger(serde_json::json!({"updates": UPDATE_TYPES}))).is_ok());
+    }
+
+    #[test]
+    fn each_update_is_matched_by_its_type() {
+        let kinds = [
+            ("message", serde_json::json!({"update_id": 1, "message": {"text": "hi"}})),
+            ("edited_message", serde_json::json!({"update_id": 1, "edited_message": {}})),
+            ("channel_post", serde_json::json!({"update_id": 1, "channel_post": {}})),
+            ("edited_channel_post", serde_json::json!({"update_id": 1, "edited_channel_post": {}})),
+            ("inline_query", serde_json::json!({"update_id": 1, "inline_query": {}})),
+            ("callback_query", serde_json::json!({"update_id": 1, "callback_query": {}})),
+            ("poll", serde_json::json!({"update_id": 1, "poll": {}})),
+            ("pre_checkout_query", serde_json::json!({"update_id": 1, "pre_checkout_query": {}})),
+        ];
+        for (kind, update) in &kinds {
+            assert_eq!(update_type(update), Some(*kind));
+            assert!(wanted(update, &[]), "everything is wanted by default");
+            assert!(wanted(update, &[kind.to_string()]));
+            assert!(!wanted(update, &["shipping_query".to_string()]) || *kind == "shipping_query");
+        }
+        assert!(!wanted(&kinds[0].1, &["callback_query".to_string()]));
+    }
 }
 
 #[cfg(test)]
@@ -219,7 +373,7 @@ mod get_updates_tests {
             .await;
 
         let client = build_client().unwrap();
-        let updates = get_updates(&client, &server.uri(), "111:AAA", None).await.unwrap();
+        let updates = get_updates(&client, &server.uri(), "111:AAA", None, &[]).await.unwrap();
         assert_eq!(updates, vec![serde_json::json!({"update_id": 5, "message": {"text": "hi"}})]);
     }
 
@@ -233,7 +387,7 @@ mod get_updates_tests {
             .await;
 
         let client = build_client().unwrap();
-        let updates = get_updates(&client, &server.uri(), "111:AAA", None).await.unwrap();
+        let updates = get_updates(&client, &server.uri(), "111:AAA", None, &[]).await.unwrap();
         assert!(updates.is_empty());
     }
 
@@ -250,7 +404,7 @@ mod get_updates_tests {
             .await;
 
         let client = build_client().unwrap();
-        let result = get_updates(&client, &server.uri(), "111:AAA", None).await;
+        let result = get_updates(&client, &server.uri(), "111:AAA", None, &[]).await;
         let err = result.unwrap_err();
         assert!(err.contains("Unauthorized"));
         assert!(!err.contains("111:AAA"));
@@ -267,7 +421,7 @@ mod get_updates_tests {
             .await;
 
         let client = build_client().unwrap();
-        let updates = get_updates(&client, &server.uri(), "111:AAA", Some(42)).await.unwrap();
+        let updates = get_updates(&client, &server.uri(), "111:AAA", Some(42), &[]).await.unwrap();
         assert!(updates.is_empty());
     }
 
@@ -282,7 +436,7 @@ mod get_updates_tests {
         drop(server);
 
         let client = build_client().unwrap();
-        let result = get_updates(&client, &uri, "111:AAA", None).await;
+        let result = get_updates(&client, &uri, "111:AAA", None, &[]).await;
         let err = result.unwrap_err();
         assert!(!err.contains("111:AAA"));
         assert!(!err.contains(&uri));
@@ -325,6 +479,7 @@ pub async fn activate_telegram_trigger(
     workflow: &Workflow,
     trigger_node: &NodeInstance,
 ) -> anyhow::Result<()> {
+    validate_updates(trigger_node)?;
     let bot_token = trigger_bot_token(state.storage.as_ref(), trigger_node).await?;
 
     let api_base_url = trigger_node
@@ -357,6 +512,20 @@ pub async fn activate_telegram_trigger(
     Ok(())
 }
 
+/// The last Telegram update this workflow's trigger (`trigger_id`) handled,
+/// from its recent runs: what a manual run of an *active* workflow replays,
+/// since its poller owns the bot's updates. None before any message.
+pub async fn last_received_update(storage: &dyn Storage, workflow_id: Uuid, trigger_id: &str) -> anyhow::Result<Option<Item>> {
+    let runs = storage.list_executions_for_workflow(workflow_id, 50).await?;
+    Ok(runs.into_iter().find_map(|run| {
+        run.node_outputs
+            .get(trigger_id)
+            .and_then(|items| items.first())
+            .filter(|item| item.json.get("update_id").is_some())
+            .cloned()
+    }))
+}
+
 /// How long a manual run of a Telegram-triggered workflow waits for its
 /// test message, as n8n's "Listen for test event".
 pub const TEST_EVENT_WAIT: std::time::Duration = std::time::Duration::from_secs(120);
@@ -382,7 +551,8 @@ pub async fn wait_for_test_update(
     let bot_token = trigger_bot_token(storage, trigger_node).await.map_err(|e| TestUpdateError::Failed(e.to_string()))?;
     let api_base_url = trigger_node.parameters.get("api_base_url").and_then(|v| v.as_str()).unwrap_or(DEFAULT_TELEGRAM_API_BASE_URL);
     let client = build_client().map_err(TestUpdateError::Failed)?;
-    let update = next_update(&client, api_base_url, &bot_token, wait).await?;
+    let allowed = trigger_updates(trigger_node);
+    let update = next_update(&client, api_base_url, &bot_token, &allowed, wait).await?;
     Ok(Item { json: update, binary: serde_json::json!({}) })
 }
 
@@ -390,12 +560,13 @@ async fn next_update(
     client: &reqwest::Client,
     base_url: &str,
     bot_token: &str,
+    allowed: &[String],
     wait: std::time::Duration,
 ) -> Result<serde_json::Value, TestUpdateError> {
     let update_id = |u: &serde_json::Value| u.get("update_id").and_then(|v| v.as_i64());
     // offset -1 returns only the newest queued update; starting after it
     // skips everything sent before the run.
-    let queued = get_updates_waiting(client, base_url, bot_token, Some(-1), 0).await.map_err(TestUpdateError::Failed)?;
+    let queued = get_updates_waiting(client, base_url, bot_token, Some(-1), allowed, 0).await.map_err(TestUpdateError::Failed)?;
     let mut offset = queued.last().and_then(update_id).map(|id| id + 1);
     let deadline = tokio::time::Instant::now() + wait;
     loop {
@@ -403,15 +574,18 @@ async fn next_update(
         if left == 0 {
             return Err(TestUpdateError::TimedOut(wait.as_secs()));
         }
-        let updates = get_updates_waiting(client, base_url, bot_token, offset, left.min(GETUPDATES_TIMEOUT_SECS))
+        let updates = get_updates_waiting(client, base_url, bot_token, offset, allowed, left.min(GETUPDATES_TIMEOUT_SECS))
             .await
             .map_err(TestUpdateError::Failed)?;
-        if let Some(update) = updates.into_iter().next() {
+        for update in updates {
             if let Some(id) = update_id(&update) {
                 offset = Some(id + 1);
             }
+            if !wanted(&update, allowed) {
+                continue;
+            }
             // Confirm it; a failure here only risks a later redelivery.
-            if let Err(e) = get_updates_waiting(client, base_url, bot_token, offset, 0).await {
+            if let Err(e) = get_updates_waiting(client, base_url, bot_token, offset, allowed, 0).await {
                 tracing::warn!(error = %e, "telegram test event: could not confirm the update");
             }
             return Ok(update);
@@ -422,7 +596,7 @@ async fn next_update(
 #[cfg(test)]
 mod test_update_tests {
     use super::*;
-    use wiremock::matchers::{method, path, query_param};
+    use wiremock::matchers::{method, path, query_param, query_param_is_missing};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     fn ok(result: serde_json::Value) -> ResponseTemplate {
@@ -443,8 +617,31 @@ mod test_update_tests {
             .expect(1).mount(&server).await;
 
         let client = build_client().unwrap();
-        let update = next_update(&client, &server.uri(), "1:A", std::time::Duration::from_secs(5)).await.unwrap();
+        let update = next_update(&client, &server.uri(), "1:A", &[], std::time::Duration::from_secs(5)).await.unwrap();
         assert_eq!(update["message"]["text"], "hi");
+    }
+
+    #[tokio::test]
+    async fn asks_telegram_only_for_the_chosen_updates_and_skips_others() {
+        let server = MockServer::start().await;
+        let allowed = r#"["callback_query"]"#;
+        Mock::given(method("GET")).and(path("/bot1:A/getUpdates")).and(query_param("offset", "-1")).and(query_param("allowed_updates", allowed))
+            .respond_with(ok(serde_json::json!([])))
+            .expect(1).mount(&server).await;
+        // A message slips through (sent before the filter applied): skipped, not run.
+        Mock::given(method("GET")).and(path("/bot1:A/getUpdates")).and(query_param_is_missing("offset")).and(query_param("allowed_updates", allowed))
+            .respond_with(ok(serde_json::json!([{"update_id": 1, "message": {"text": "ignored"}}])))
+            .expect(1).mount(&server).await;
+        Mock::given(method("GET")).and(path("/bot1:A/getUpdates")).and(query_param("offset", "2")).and(query_param("allowed_updates", allowed))
+            .respond_with(ok(serde_json::json!([{"update_id": 2, "callback_query": {"data": "yes"}}])))
+            .mount(&server).await;
+        Mock::given(method("GET")).and(path("/bot1:A/getUpdates")).and(query_param("offset", "3"))
+            .respond_with(ok(serde_json::json!([])))
+            .mount(&server).await;
+
+        let client = build_client().unwrap();
+        let update = next_update(&client, &server.uri(), "1:A", &["callback_query".to_string()], std::time::Duration::from_secs(5)).await.unwrap();
+        assert_eq!(update["callback_query"]["data"], "yes");
     }
 
     #[tokio::test]
@@ -455,7 +652,7 @@ mod test_update_tests {
             .mount(&server).await;
 
         let client = build_client().unwrap();
-        let err = next_update(&client, &server.uri(), "1:A", std::time::Duration::from_secs(1)).await.unwrap_err();
+        let err = next_update(&client, &server.uri(), "1:A", &[], std::time::Duration::from_secs(1)).await.unwrap_err();
         assert!(matches!(err, TestUpdateError::TimedOut(1)), "{err:?}");
     }
 
@@ -467,7 +664,7 @@ mod test_update_tests {
             .mount(&server).await;
 
         let client = build_client().unwrap();
-        let err = next_update(&client, &server.uri(), "1:A", std::time::Duration::from_secs(1)).await.unwrap_err();
+        let err = next_update(&client, &server.uri(), "1:A", &[], std::time::Duration::from_secs(1)).await.unwrap_err();
         assert!(err.to_string().contains("Conflict: terminated by other getUpdates request"), "{err}");
     }
 }
@@ -552,7 +749,13 @@ pub async fn poll_telegram_updates(
         }
         first_iteration = false;
 
-        let updates = match get_updates(&client, &api_base_url, &bot_token, offset).await {
+        // Re-read like the token, so editing "Trigger on" applies on the next poll.
+        let allowed = crate::engine::start_node_id(&current_workflow)
+            .ok()
+            .and_then(|id| current_workflow.nodes.iter().find(|n| n.id == id))
+            .map(trigger_updates)
+            .unwrap_or_default();
+        let updates = match get_updates(&client, &api_base_url, &bot_token, offset, &allowed).await {
             Ok(updates) => updates,
             Err(e) => {
                 tracing::warn!(error = %e, workflow_id = %current_workflow.id, "telegram poller: getUpdates failed, retrying after backoff");
@@ -565,6 +768,18 @@ pub async fn poll_telegram_updates(
             // Nothing to process — skip the credential resolution DB
             // round-trip below entirely on every idle poll.
             continue;
+        }
+
+        // The poll can wait 30s: run the workflow as saved now, so an edit
+        // made meanwhile applies to the messages that ended the wait.
+        match storage.get_workflow(current_workflow.id).await {
+            Ok(Some(wf)) if wf.active => current_workflow = wf,
+            Ok(_) => {
+                // Deactivated meanwhile: leave the batch unconfirmed for whoever polls next.
+                tracing::info!(workflow_id = %current_workflow.id, "telegram poller: workflow no longer active or found, stopping");
+                return;
+            }
+            Err(e) => tracing::warn!(error = %e, workflow_id = %current_workflow.id, "telegram poller: failed to re-read the workflow, running the copy from before the poll"),
         }
 
         // Resolve credentials for any downstream node ONCE per batch,
@@ -590,6 +805,10 @@ pub async fn poll_telegram_updates(
         for update in updates {
             if let Some(update_id) = update.get("update_id").and_then(|v| v.as_i64()) {
                 offset = Some(update_id + 1);
+            }
+            // Sent before the filter took effect: confirmed above, never run.
+            if !wanted(&update, &allowed) {
+                continue;
             }
 
             let trigger_item = Item { json: update, binary: serde_json::json!({}) };
@@ -843,6 +1062,83 @@ mod poller_tests {
             recorded.iter().any(|e| e.mode == ExecutionMode::Telegram && e.status == ExecutionStatus::Success),
             "expected at least one persisted Execution with mode=Telegram, status=Success; recorded: {modes_and_statuses:?}"
         );
+    }
+
+    #[tokio::test]
+    async fn a_message_runs_the_workflow_as_saved_when_it_arrives() {
+        // The first poll waits (as a real long-poll does) while the workflow
+        // is edited; the message that ends it must run the saved edit.
+        let telegram = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/bot111:AAA/getUpdates"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true, "result": [{"update_id": 1, "message": {"text": "hi"}}]}))
+                    .set_delay(std::time::Duration::from_millis(500)),
+            )
+            .up_to_n_times(1)
+            .mount(&telegram)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/bot111:AAA/getUpdates"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "result": []})))
+            .mount(&telegram)
+            .await;
+
+        let inner = SqliteStorage::new("sqlite::memory:", [0u8; 32]).await.unwrap();
+        let recorded: Arc<Mutex<Vec<Execution>>> = Arc::new(Mutex::new(Vec::new()));
+        let storage: Arc<dyn Storage> = Arc::new(RecordingStorage { inner, recorded: recorded.clone() });
+        let mut registry = NodeRegistry::new();
+        crate::nodes::register_all(&mut registry);
+        let owner_id = Uuid::new_v4();
+        storage
+            .create_user(&User { id: owner_id, email: "o@example.com".into(), password_hash: "x".into(), role: UserRole::Owner, created_at: chrono::Utc::now() })
+            .await
+            .unwrap();
+        let credential_id = Uuid::new_v4();
+        storage
+            .create_credential(&Credential {
+                id: credential_id,
+                name: "bot".into(),
+                credential_type: "telegramApi".into(),
+                data: serde_json::json!({"bot_token": "111:AAA"}),
+                owner_id,
+                created_at: chrono::Utc::now(),
+                updated_at: chrono::Utc::now(),
+            })
+            .await
+            .unwrap();
+        let set = |tag: &str| NodeInstance {
+            id: "set".into(),
+            node_type: "core.set".into(),
+            position: (1.0, 0.0),
+            parameters: serde_json::json!({"fields": {"tag": tag}}),
+            disabled: false,
+            settings: Default::default(),
+        };
+        let wf = trigger_workflow(credential_id, &telegram.uri(), set("old"), "set");
+        storage.create_workflow(&wf).await.unwrap();
+
+        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        let poll = tokio::spawn(poll_telegram_updates(storage.clone(), Arc::new(registry), events, wf.clone(), "111:AAA".into(), telegram.uri()));
+        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
+        let mut edited = wf.clone();
+        edited.nodes[1] = set("new");
+        storage.update_workflow(&edited).await.unwrap();
+
+        let tag = tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                let done = recorded.lock().unwrap().iter().find(|e| e.status == ExecutionStatus::Success).cloned();
+                if let Some(e) = done {
+                    break e.node_outputs["set"][0].json["tag"].clone();
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .expect("the message should run within 5s");
+        poll.abort();
+        assert_eq!(tag, "new");
     }
 
     #[tokio::test]

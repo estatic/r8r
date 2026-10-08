@@ -91,8 +91,28 @@ pub struct Execution {
     pub status: ExecutionStatus,
     pub mode: ExecutionMode,
     pub node_outputs: HashMap<String, Vec<Item>>,
+    /// How each node that ran ended, and how many items left each output.
+    #[serde(default)]
+    pub node_runs: HashMap<String, NodeRun>,
     pub started_at: DateTime<Utc>,
     pub finished_at: Option<DateTime<Utc>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum NodeRunStatus {
+    Success,
+    Error,
+    Skipped,
+}
+
+/// One node's outcome in a run.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct NodeRun {
+    pub status: NodeRunStatus,
+    /// Items sent per output, keyed like the editor's handles: "0", "1",
+    /// ..., and "error" for the error output.
+    pub counts: std::collections::BTreeMap<String, usize>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

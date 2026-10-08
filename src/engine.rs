@@ -1,6 +1,6 @@
 use crate::domain::{Item, NodeInstance, Workflow};
 use crate::node::{NodeExecutionContext, NodeRegistry};
-use std::collections::{HashMap, HashSet, VecDeque};
+use std::collections::{BTreeMap, HashMap, HashSet, VecDeque};
 
 #[async_trait::async_trait]
 pub trait ExecutionObserver: Send + Sync {
@@ -8,6 +8,9 @@ pub trait ExecutionObserver: Send + Sync {
     async fn on_node_finished(&self, node_id: &str, items: &[Item]);
     async fn on_node_errored(&self, node_id: &str, error: &str);
     async fn on_node_skipped(&self, node_id: &str, items: &[Item]);
+    /// Items the node sent per output ("0", "1", ..., "error"); called just
+    /// before its finished/errored/skipped event.
+    async fn on_node_counts(&self, _node_id: &str, _counts: &BTreeMap<String, usize>) {}
 }
 
 pub struct NoopObserver;
@@ -68,6 +71,7 @@ impl crate::node::ToolExecutor for EngineToolExecutor {
             credential_types: Default::default(),
             tool_args,
             tool_executor: None,
+            ..Default::default()
         };
         node.execute(&ctx).await
     }
@@ -164,6 +168,7 @@ pub async fn execute_workflow_seeded(
             // A disabled node is a no-op passthrough: its input items flow
             // through unchanged as its (single-port) output, and it is never
             // handed to the registry, executed, or given resolved parameters.
+            observer.on_node_counts(&node_instance.id, &port_counts(&[input_items.len()])).await;
             observer.on_node_skipped(&node_instance.id, &input_items).await;
             produced.insert(node_instance.id.clone(), vec![input_items]);
             continue;
@@ -179,6 +184,7 @@ pub async fn execute_workflow_seeded(
         if let (Some(items), Some(start)) = (&trigger_items, &start_id) {
             if &node_instance.id == start {
                 observer.on_node_started(&node_instance.id).await;
+                observer.on_node_counts(&node_instance.id, &port_counts(&[items.len()])).await;
                 observer.on_node_finished(&node_instance.id, items).await;
                 produced.insert(node_instance.id.clone(), vec![items.clone()]);
                 continue;
@@ -228,8 +234,17 @@ pub async fn execute_workflow_seeded(
                 workflow_name: &workflow.name,
                 args: None,
             };
-            crate::expr::resolve_parameters(&node_instance.parameters, &eval_ctx)
-                .map_err(|e| anyhow::anyhow!("node {} parameter resolution failed: {e}", node_instance.id))?
+            match crate::expr::resolve_parameters(&node_instance.parameters, &eval_ctx) {
+                Ok(parameters) => parameters,
+                Err(e) => {
+                    // Report it on the node, so the editor marks which one failed.
+                    let message = format!("parameter resolution failed: {e}");
+                    observer.on_node_started(&node_instance.id).await;
+                    observer.on_node_counts(&node_instance.id, &BTreeMap::new()).await;
+                    observer.on_node_errored(&node_instance.id, &message).await;
+                    return Err(anyhow::anyhow!("node {} {message}", node_instance.id));
+                }
+            }
         } else {
             node_instance.parameters.clone()
         };
@@ -242,11 +257,21 @@ pub async fn execute_workflow_seeded(
             tools: resources.tools.clone(),
             tool_args: None,
             tool_executor: Some(tool_executor.clone()),
+            memory: resources.memory.0.clone(),
+            upstream: produced
+                .iter()
+                .filter_map(|(id, ports)| ports.first().and_then(|p| p.first()).map(|item| (id.clone(), item.json.clone())))
+                .collect(),
+            workflow_id: Some(workflow.id),
+            node_id: node_instance.id.clone(),
         };
         observer.on_node_started(&node_instance.id).await;
         match run_node_with_policy(node, &ctx, &node_instance.settings).await {
             Ok(output) => {
+                let output = if node.keeps_input_fields() { with_input_fields(output, &ctx.input_items) } else { output };
                 let primary = output.first().cloned().unwrap_or_default();
+                let lens: Vec<usize> = output.iter().map(Vec::len).collect();
+                observer.on_node_counts(&node_instance.id, &port_counts(&lens)).await;
                 observer.on_node_finished(&node_instance.id, &primary).await;
                 produced.insert(node_instance.id.clone(), output);
             }
@@ -258,6 +283,14 @@ pub async fn execute_workflow_seeded(
                     .connections
                     .iter()
                     .any(|c| c.from_node == node_instance.id && c.error);
+                let counts = if has_error_route {
+                    BTreeMap::from([("error".to_string(), 1)])
+                } else if node_instance.settings.continue_on_fail {
+                    port_counts(&[1])
+                } else {
+                    BTreeMap::new()
+                };
+                observer.on_node_counts(&node_instance.id, &counts).await;
                 observer.on_node_errored(&node_instance.id, &e.to_string()).await;
                 let error_item = Item {
                     json: serde_json::json!({ "error": e.to_string() }),
@@ -289,6 +322,33 @@ pub async fn execute_workflow_seeded(
         })
         .collect();
     Ok(flattened)
+}
+
+/// Lays each output item over the input item it answers: the one at the
+/// same position, or the only one. Non-object items are left as they are.
+fn with_input_fields(output: crate::node::NodeOutput, input: &[Item]) -> crate::node::NodeOutput {
+    output
+        .into_iter()
+        .map(|port| {
+            let paired = |i: usize| if input.len() == 1 { input.first() } else if input.len() == port.len() { input.get(i) } else { None };
+            port.iter()
+                .enumerate()
+                .map(|(i, item)| match (paired(i).and_then(|p| p.json.as_object()), item.json.as_object()) {
+                    (Some(base), Some(own)) => {
+                        let mut json = base.clone();
+                        json.extend(own.clone());
+                        Item { json: serde_json::Value::Object(json), binary: item.binary.clone() }
+                    }
+                    _ => item.clone(),
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// Item counts keyed by output index, as the editor's handles are.
+fn port_counts(lens: &[usize]) -> BTreeMap<String, usize> {
+    lens.iter().enumerate().map(|(i, n)| (i.to_string(), *n)).collect()
 }
 
 fn topological_order(workflow: &Workflow) -> anyhow::Result<Vec<NodeInstance>> {
@@ -534,6 +594,65 @@ mod tests {
         wf.connections.clear();
         let order = topological_order(&wf).unwrap();
         assert!(order.is_empty());
+    }
+
+    /// Answers each input item with a fresh `{reply}` item, keeping the
+    /// input's fields as the AI Agent / HTTP Request do.
+    struct ReplyNode {
+        keep: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::node::Node for ReplyNode {
+        fn type_name(&self) -> &'static str {
+            if self.keep { "test.replyKeep" } else { "test.reply" }
+        }
+        fn display_name(&self) -> &'static str {
+            "Reply"
+        }
+        fn description(&self) -> &'static str {
+            "Test-only node."
+        }
+        fn category(&self) -> crate::node::NodeCategory {
+            crate::node::NodeCategory::Action
+        }
+        fn keeps_input_fields(&self) -> bool {
+            self.keep
+        }
+        async fn execute(&self, ctx: &NodeExecutionContext) -> Result<crate::node::NodeOutput, crate::node::NodeError> {
+            Ok(vec![ctx
+                .input_items
+                .iter()
+                .map(|_| Item { json: serde_json::json!({"reply": "hi", "chat": "replaced"}), binary: serde_json::json!({}) })
+                .collect()])
+        }
+    }
+
+    fn reply_workflow(node_type: &str) -> Workflow {
+        let mut wf = linear_workflow();
+        wf.nodes[1].node_type = node_type.into();
+        wf
+    }
+
+    #[tokio::test]
+    async fn a_node_that_keeps_input_fields_adds_its_result_on_top_of_its_input() {
+        let mut r = NodeRegistry::new();
+        crate::nodes::register_all(&mut r);
+        r.register(Box::new(ReplyNode { keep: true }));
+        let seed = vec![Item { json: serde_json::json!({"message": {"chat": {"id": 42}}, "chat": "from input"}), binary: serde_json::json!({}) }];
+        let outputs = execute_workflow_seeded(&reply_workflow("test.replyKeep"), &std::sync::Arc::new(r), Some(seed), &Default::default(), &NoopObserver).await.unwrap();
+        // The input's chat id is still there; the node's own fields win.
+        assert_eq!(outputs["set1"][0].json, serde_json::json!({"message": {"chat": {"id": 42}}, "chat": "replaced", "reply": "hi"}));
+    }
+
+    #[tokio::test]
+    async fn other_nodes_output_exactly_what_they_return() {
+        let mut r = NodeRegistry::new();
+        crate::nodes::register_all(&mut r);
+        r.register(Box::new(ReplyNode { keep: false }));
+        let seed = vec![Item { json: serde_json::json!({"message": {"chat": {"id": 42}}}), binary: serde_json::json!({}) }];
+        let outputs = execute_workflow_seeded(&reply_workflow("test.reply"), &std::sync::Arc::new(r), Some(seed), &Default::default(), &NoopObserver).await.unwrap();
+        assert_eq!(outputs["set1"][0].json, serde_json::json!({"reply": "hi", "chat": "replaced"}));
     }
 
     #[tokio::test]

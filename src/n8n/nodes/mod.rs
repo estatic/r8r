@@ -35,7 +35,7 @@ mod mysql;
 mod notion;
 mod openai;
 mod postgres;
-mod python;
+pub(crate) mod python;
 pub mod rabbitmq;
 mod redis;
 mod routing;

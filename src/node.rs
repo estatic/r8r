@@ -15,6 +15,21 @@ pub struct NodeExecutionContext {
     /// arguments, which core.code exposes to its script as `$args`.
     pub tool_args: Option<serde_json::Value>,
     pub tool_executor: Option<std::sync::Arc<dyn ToolExecutor>>,
+    /// Where an AI Agent keeps chat memory; None when nothing can be kept.
+    pub memory: Option<std::sync::Arc<dyn MemoryStore>>,
+    /// Earlier nodes' first output item (`json`) by node id: `$node["id"]`
+    /// in a Code node.
+    pub upstream: std::collections::HashMap<String, serde_json::Value>,
+    /// The running workflow and this node, e.g. to key the agent's memory.
+    pub workflow_id: Option<uuid::Uuid>,
+    pub node_id: String,
+}
+
+/// Remembered conversations (`[{role, content}]`) by key.
+#[async_trait::async_trait]
+pub trait MemoryStore: Send + Sync {
+    async fn load(&self, key: &str) -> anyhow::Result<Vec<serde_json::Value>>;
+    async fn save(&self, key: &str, messages: &[serde_json::Value]) -> anyhow::Result<()>;
 }
 
 impl std::fmt::Debug for NodeExecutionContext {
@@ -86,6 +101,13 @@ pub trait Node: Send + Sync {
     /// `{{ }}` text with no relation to r8r's expression syntax.
     fn resolves_parameters(&self) -> bool {
         true
+    }
+    /// Whether each output item keeps the fields of the input item it
+    /// answers, with the node's own fields on top: true for nodes whose
+    /// result replaces their input (AI Agent, HTTP Request, ...), so later
+    /// nodes still see e.g. the Telegram message's chat id in `$json`.
+    fn keeps_input_fields(&self) -> bool {
+        false
     }
 
     /// Human-readable name shown in the canvas and add-node menu, e.g.

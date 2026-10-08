@@ -9,6 +9,14 @@ pub trait Storage: Send + Sync {
     async fn create_workflow(&self, workflow: &Workflow) -> anyhow::Result<()>;
     async fn update_workflow(&self, workflow: &Workflow) -> anyhow::Result<()>;
     async fn delete_workflow(&self, id: Uuid) -> anyhow::Result<()>;
+    /// An AI Agent's remembered conversation (`[{role, content}]`) by key.
+    /// Storages without memory remember nothing.
+    async fn get_agent_memory(&self, _key: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+        Ok(Vec::new())
+    }
+    async fn put_agent_memory(&self, _key: &str, _messages: &[serde_json::Value]) -> anyhow::Result<()> {
+        Ok(())
+    }
     async fn get_workflow(&self, id: Uuid) -> anyhow::Result<Option<Workflow>>;
     async fn list_workflows(&self) -> anyhow::Result<Vec<Workflow>>;
 
@@ -42,4 +50,17 @@ pub trait Storage: Send + Sync {
     async fn update_tool(&self, tool: &crate::domain::Tool) -> anyhow::Result<bool>;
     /// `Ok(false)` if no such tool.
     async fn delete_tool(&self, id: Uuid) -> anyhow::Result<bool>;
+}
+
+/// Lets nodes keep chat memory in a [`Storage`].
+pub struct StorageMemory(pub std::sync::Arc<dyn Storage>);
+
+#[async_trait]
+impl crate::node::MemoryStore for StorageMemory {
+    async fn load(&self, key: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+        self.0.get_agent_memory(key).await
+    }
+    async fn save(&self, key: &str, messages: &[serde_json::Value]) -> anyhow::Result<()> {
+        self.0.put_agent_memory(key, messages).await
+    }
 }

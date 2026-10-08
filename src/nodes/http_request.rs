@@ -47,6 +47,9 @@ impl Node for HttpRequestNode {
     fn category(&self) -> crate::node::NodeCategory {
         crate::node::NodeCategory::Action
     }
+    fn keeps_input_fields(&self) -> bool {
+        true
+    }
     fn icon(&self) -> &'static str {
         "🌐"
     }
@@ -222,6 +225,7 @@ mod tests {
             credential_types: Default::default(),
             tool_args: None,
             tool_executor: None,
+            ..Default::default()
         };
         let result = node.execute(&ctx).await.unwrap();
         assert_eq!(result[0][0].json, serde_json::json!({"authed": true}));

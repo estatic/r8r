@@ -141,6 +141,85 @@ async fn trim_to_budget(
     }
 }
 
+/// Exchanges remembered per conversation unless the node says otherwise.
+const DEFAULT_MEMORY_WINDOW: usize = 5;
+
+/// The agent's chat memory for one run (`memory: {enabled, session_key,
+/// window}`): the last `window` exchanges of the conversation, kept per
+/// workflow, node and session. The session is `session_key`, else the
+/// Telegram chat the input came from, else one shared conversation.
+struct ChatMemory {
+    store: std::sync::Arc<dyn crate::node::MemoryStore>,
+    key: String,
+    window: usize,
+    past: Vec<serde_json::Value>,
+}
+
+impl ChatMemory {
+    async fn for_run(ctx: &NodeExecutionContext) -> Result<Option<Self>, NodeError> {
+        let settings = ctx.parameters.get("memory");
+        if !settings.and_then(|m| m.get("enabled")).and_then(|v| v.as_bool()).unwrap_or(false) {
+            return Ok(None);
+        }
+        let Some(store) = ctx.memory.clone() else { return Ok(None) };
+        let window = settings
+            .and_then(|m| m.get("window"))
+            .and_then(|v| v.as_u64())
+            .map(|n| n as usize)
+            .filter(|n| *n > 0)
+            .unwrap_or(DEFAULT_MEMORY_WINDOW);
+        let session = match settings.and_then(|m| m.get("session_key")) {
+            Some(serde_json::Value::String(s)) if !s.trim().is_empty() => s.trim().to_string(),
+            Some(serde_json::Value::Number(n)) => n.to_string(),
+            _ => telegram_chat_id(ctx).unwrap_or_else(|| "default".into()),
+        };
+        let workflow = ctx.workflow_id.map(|id| id.to_string()).unwrap_or_default();
+        let key = format!("{workflow}:{}:{session}", ctx.node_id);
+        let past = store
+            .load(&key)
+            .await
+            .map_err(|e| NodeError::ExecutionFailed(format!("ai.agent: could not read chat memory: {e}")))?;
+        Ok(Some(Self { store, key, window, past }))
+    }
+
+    fn history(&self) -> Vec<LlmMessage> {
+        self.past
+            .iter()
+            .filter_map(|m| {
+                let content = m.get("content")?.as_str()?.to_string();
+                match m.get("role")?.as_str()? {
+                    "user" => Some(LlmMessage::User { content }),
+                    "assistant" => Some(LlmMessage::Assistant { content: Some(content), tool_calls: vec![] }),
+                    _ => None,
+                }
+            })
+            .collect()
+    }
+
+    async fn remember(&self, question: &str, answer: &str) -> Result<(), NodeError> {
+        let mut all = self.past.clone();
+        all.push(serde_json::json!({"role": "user", "content": question}));
+        all.push(serde_json::json!({"role": "assistant", "content": answer}));
+        let keep = self.window * 2;
+        let recent = &all[all.len().saturating_sub(keep)..];
+        self.store
+            .save(&self.key, recent)
+            .await
+            .map_err(|e| NodeError::ExecutionFailed(format!("ai.agent: could not save chat memory: {e}")))
+    }
+}
+
+/// The chat a Telegram update came from, if the input is one.
+fn telegram_chat_id(ctx: &NodeExecutionContext) -> Option<String> {
+    let json = &ctx.input_items.first()?.json;
+    ["message", "edited_message", "channel_post", "edited_channel_post"]
+        .iter()
+        .find_map(|k| json.get(k))
+        .or_else(|| json.get("callback_query").and_then(|c| c.get("message")))
+        .and_then(|m| m.pointer("/chat/id"))
+        .map(|id| id.to_string())
+}
+
 pub(crate) async fn run_agent_loop(
     provider: &dyn ProviderClient,
     model: &str,
@@ -182,13 +261,18 @@ pub(crate) async fn run_agent_loop(
         .as_ref()
         .ok_or_else(|| NodeError::ExecutionFailed("ai.agent: no tool_executor available in this execution context".into()))?;
 
-    let mut messages = vec![LlmMessage::User { content: user_message }];
+    let memory = ChatMemory::for_run(ctx).await?;
+    let mut messages = memory.as_ref().map(|m| m.history()).unwrap_or_default();
+    messages.push(LlmMessage::User { content: user_message.clone() });
     let mut tool_calls_made: u64 = 0;
 
     for _ in 0..max_iterations {
         trim_to_budget(provider, system_prompt, &mut messages, model, api_key, max_context_tokens).await?;
         match provider.send_message(system_prompt, &messages, &tool_definitions, model, api_key).await? {
             ProviderResponse::Text(text) => {
+                if let Some(memory) = &memory {
+                    memory.remember(&user_message, &text).await?;
+                }
                 return Ok(vec![vec![Item {
                     json: serde_json::json!({"response": text, "tool_calls_made": tool_calls_made}),
                     binary: serde_json::json!({}),
@@ -290,6 +374,9 @@ impl Node for AgentNode {
     }
     fn category(&self) -> crate::node::NodeCategory {
         crate::node::NodeCategory::Ai
+    }
+    fn keeps_input_fields(&self) -> bool {
+        true
     }
     fn icon(&self) -> &'static str {
         "🤖"
@@ -421,6 +508,101 @@ mod tests {
         async fn count_tokens(&self, _: &str, _: &[LlmMessage], _: &str, _: &str) -> Result<usize, NodeError> {
             Ok(0) // never trims in these tests -- token-budget behavior is a separate test
         }
+    }
+
+    /// Answers "answer N" to its Nth call, recording the messages it was sent.
+    struct RecordingProvider {
+        seen: Mutex<Vec<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl ProviderClient for RecordingProvider {
+        async fn send_message(&self, _: &str, messages: &[LlmMessage], _: &[ToolDefinition], _: &str, _: &str) -> Result<ProviderResponse, NodeError> {
+            let mut seen = self.seen.lock().unwrap();
+            seen.push(
+                messages
+                    .iter()
+                    .map(|m| match m {
+                        LlmMessage::User { content } => format!("user: {content}"),
+                        LlmMessage::Assistant { content, .. } => format!("assistant: {}", content.clone().unwrap_or_default()),
+                        LlmMessage::ToolResult { content, .. } => format!("tool: {content}"),
+                    })
+                    .collect(),
+            );
+            Ok(ProviderResponse::Text(format!("answer {}", seen.len())))
+        }
+        async fn count_tokens(&self, _: &str, _: &[LlmMessage], _: &str, _: &str) -> Result<usize, NodeError> {
+            Ok(0)
+        }
+    }
+
+    #[derive(Default)]
+    struct MapMemory(Mutex<std::collections::HashMap<String, Vec<serde_json::Value>>>);
+
+    #[async_trait::async_trait]
+    impl crate::node::MemoryStore for MapMemory {
+        async fn load(&self, key: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+            Ok(self.0.lock().unwrap().get(key).cloned().unwrap_or_default())
+        }
+        async fn save(&self, key: &str, messages: &[serde_json::Value]) -> anyhow::Result<()> {
+            self.0.lock().unwrap().insert(key.to_string(), messages.to_vec());
+            Ok(())
+        }
+    }
+
+    fn memory_ctx(memory: std::sync::Arc<MapMemory>, params: serde_json::Value, chat_id: i64) -> NodeExecutionContext {
+        NodeExecutionContext {
+            parameters: params,
+            input_items: vec![Item { json: serde_json::json!({"message": {"chat": {"id": chat_id}}}), binary: serde_json::json!({}) }],
+            memory: Some(memory),
+            workflow_id: Some(uuid::Uuid::nil()),
+            node_id: "agent".into(),
+            ..ctx_with_tool_executor(std::sync::Arc::new(SpyToolExecutor { calls: Mutex::new(Vec::new()), result: Ok(vec![vec![]]) }))
+        }
+    }
+
+    async fn ask(provider: &RecordingProvider, ctx: &NodeExecutionContext, text: &str) {
+        run_agent_loop(provider, "m", "", "", text.to_string(), &serde_json::json!([]), 5, None, ctx).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn with_memory_the_agent_remembers_each_chats_conversation() {
+        let memory = std::sync::Arc::new(MapMemory::default());
+        let provider = RecordingProvider { seen: Mutex::new(Vec::new()) };
+        let on = serde_json::json!({"memory": {"enabled": true}});
+        ask(&provider, &memory_ctx(memory.clone(), on.clone(), 1), "my name is Ivan").await;
+        ask(&provider, &memory_ctx(memory.clone(), on.clone(), 2), "hello from chat 2").await;
+        ask(&provider, &memory_ctx(memory.clone(), on.clone(), 1), "what is my name?").await;
+        let seen = provider.seen.lock().unwrap();
+        // Chat 2 starts fresh; chat 1's second question comes after its first exchange.
+        assert_eq!(seen[1], vec!["user: hello from chat 2"]);
+        assert_eq!(seen[2], vec!["user: my name is Ivan", "assistant: answer 1", "user: what is my name?"]);
+    }
+
+    #[tokio::test]
+    async fn memory_keeps_only_the_last_exchanges() {
+        let memory = std::sync::Arc::new(MapMemory::default());
+        let provider = RecordingProvider { seen: Mutex::new(Vec::new()) };
+        let on = serde_json::json!({"memory": {"enabled": true, "window": 2}});
+        for q in ["q1", "q2", "q3", "q4"] {
+            ask(&provider, &memory_ctx(memory.clone(), on.clone(), 1), q).await;
+        }
+        let seen = provider.seen.lock().unwrap();
+        assert_eq!(seen[3], vec!["user: q2", "assistant: answer 2", "user: q3", "assistant: answer 3", "user: q4"]);
+    }
+
+    #[tokio::test]
+    async fn a_session_key_groups_runs_and_memory_is_off_by_default() {
+        let memory = std::sync::Arc::new(MapMemory::default());
+        let provider = RecordingProvider { seen: Mutex::new(Vec::new()) };
+        let shared = serde_json::json!({"memory": {"enabled": true, "session_key": "team"}});
+        ask(&provider, &memory_ctx(memory.clone(), shared.clone(), 1), "from chat 1").await;
+        ask(&provider, &memory_ctx(memory.clone(), shared, 2), "from chat 2").await;
+        ask(&provider, &memory_ctx(memory.clone(), serde_json::json!({}), 1), "no memory").await;
+        let seen = provider.seen.lock().unwrap();
+        assert_eq!(seen[1], vec!["user: from chat 1", "assistant: answer 1", "user: from chat 2"]);
+        assert_eq!(seen[2], vec!["user: no memory"]);
+        assert_eq!(memory.0.lock().unwrap().len(), 1, "nothing is stored without memory");
     }
 
     /// Always returns the same tool result (or error), recording every

@@ -211,20 +211,35 @@ pub async fn execute_workflow(
     let trigger_items = match start {
         Some(node) if node.node_type == "telegram.trigger" => {
             if workflow.active {
-                return (
-                    StatusCode::CONFLICT,
-                    "this workflow is active, so its Telegram poller receives the bot's messages; send the bot a message to run it, or deactivate it to test manually",
-                )
-                    .into_response();
-            }
-            tracing::info!(workflow_id = %workflow.id, "manual run: waiting for a Telegram message to the bot");
-            let wait = crate::telegram_poller::TEST_EVENT_WAIT;
-            match crate::telegram_poller::wait_for_test_update(state.storage.as_ref(), node, wait).await {
-                Ok(item) => Some(vec![item]),
-                Err(e @ crate::telegram_poller::TestUpdateError::TimedOut(_)) => {
-                    return (StatusCode::REQUEST_TIMEOUT, e.to_string()).into_response()
+                // Its poller owns the bot's updates (Telegram allows one
+                // reader), so run again with the last message it handled.
+                match crate::telegram_poller::last_received_update(state.storage.as_ref(), workflow.id, &node.id).await {
+                    Ok(Some(item)) => {
+                        tracing::info!(workflow_id = %workflow.id, "manual run of an active workflow: replaying the last Telegram message");
+                        Some(vec![item])
+                    }
+                    Ok(None) => {
+                        return (
+                            StatusCode::CONFLICT,
+                            "This workflow is active, so the bot's messages run it by themselves. Send the bot a message: after that, Execute re-runs the workflow with the last one.",
+                        )
+                            .into_response()
+                    }
+                    Err(e) => {
+                        tracing::error!(error = %e, "failed to find the last Telegram message");
+                        return StatusCode::INTERNAL_SERVER_ERROR.into_response();
+                    }
                 }
-                Err(e) => return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+            } else {
+                tracing::info!(workflow_id = %workflow.id, "manual run: waiting for a Telegram message to the bot");
+                let wait = crate::telegram_poller::TEST_EVENT_WAIT;
+                match crate::telegram_poller::wait_for_test_update(state.storage.as_ref(), node, wait).await {
+                    Ok(item) => Some(vec![item]),
+                    Err(e @ crate::telegram_poller::TestUpdateError::TimedOut(_)) => {
+                        return (StatusCode::REQUEST_TIMEOUT, e.to_string()).into_response()
+                    }
+                    Err(e) => return (StatusCode::BAD_GATEWAY, e.to_string()).into_response(),
+                }
             }
         }
         _ => None,

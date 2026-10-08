@@ -1,4 +1,5 @@
-use crate::domain::{Execution, ExecutionMode, ExecutionStatus, Item, Workflow};
+use crate::domain::{Execution, ExecutionMode, ExecutionStatus, Item, NodeRun, NodeRunStatus, Workflow};
+use std::collections::{BTreeMap, HashMap};
 use crate::engine::ExecutionObserver;
 use crate::node::NodeRegistry;
 use crate::storage::Storage;
@@ -18,9 +19,9 @@ pub const EXECUTION_EVENTS_CAPACITY: usize = 256;
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExecutionEventKind {
     NodeStarted { node_id: String },
-    NodeFinished { node_id: String, items: Vec<Item> },
-    NodeErrored { node_id: String, error: String },
-    NodeSkipped { node_id: String, items: Vec<Item> },
+    NodeFinished { node_id: String, items: Vec<Item>, counts: BTreeMap<String, usize> },
+    NodeErrored { node_id: String, error: String, counts: BTreeMap<String, usize> },
+    NodeSkipped { node_id: String, items: Vec<Item>, counts: BTreeMap<String, usize> },
     ExecutionFinished { status: ExecutionStatus },
 }
 
@@ -43,6 +44,8 @@ struct LiveExecutionTracker {
     execution_id: Uuid,
     workflow_id: Uuid,
     execution: Mutex<Execution>,
+    /// Counts reported by `on_node_counts`, until the node's own event.
+    pending_counts: std::sync::Mutex<HashMap<String, BTreeMap<String, usize>>>,
     storage: Arc<dyn Storage>,
     events: broadcast::Sender<ExecutionEvent>,
 }
@@ -53,14 +56,16 @@ impl LiveExecutionTracker {
             execution_id: execution.id,
             workflow_id: execution.workflow_id,
             execution: Mutex::new(execution),
+            pending_counts: Default::default(),
             storage,
             events,
         }
     }
 
-    async fn persist_node_output(&self, node_id: &str, items: Vec<Item>) {
+    async fn persist_node_output(&self, node_id: &str, items: Vec<Item>, run: NodeRun) {
         let mut execution = self.execution.lock().await;
         execution.node_outputs.insert(node_id.to_string(), items);
+        execution.node_runs.insert(node_id.to_string(), run);
         if let Err(e) = self.storage.update_execution(&execution).await {
             tracing::error!(error = %e, execution_id = %execution.id, node_id, "failed to persist incremental execution update");
         }
@@ -77,6 +82,14 @@ impl LiveExecutionTracker {
         });
     }
 
+    fn take_counts(&self, node_id: &str, default_port0: usize) -> BTreeMap<String, usize> {
+        self.pending_counts
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(node_id)
+            .unwrap_or_else(|| BTreeMap::from([("0".to_string(), default_port0)]))
+    }
+
     fn into_execution(self) -> Execution {
         self.execution.into_inner()
     }
@@ -87,18 +100,24 @@ impl ExecutionObserver for LiveExecutionTracker {
     async fn on_node_started(&self, node_id: &str) {
         self.emit(ExecutionEventKind::NodeStarted { node_id: node_id.to_string() });
     }
+    async fn on_node_counts(&self, node_id: &str, counts: &BTreeMap<String, usize>) {
+        self.pending_counts.lock().unwrap_or_else(|e| e.into_inner()).insert(node_id.to_string(), counts.clone());
+    }
     async fn on_node_finished(&self, node_id: &str, items: &[Item]) {
-        self.persist_node_output(node_id, items.to_vec()).await;
-        self.emit(ExecutionEventKind::NodeFinished { node_id: node_id.to_string(), items: items.to_vec() });
+        let counts = self.take_counts(node_id, items.len());
+        self.persist_node_output(node_id, items.to_vec(), NodeRun { status: NodeRunStatus::Success, counts: counts.clone() }).await;
+        self.emit(ExecutionEventKind::NodeFinished { node_id: node_id.to_string(), items: items.to_vec(), counts });
     }
     async fn on_node_errored(&self, node_id: &str, error: &str) {
+        let counts = self.take_counts(node_id, 0);
         let error_item = Item { json: serde_json::json!({ "error": error }), binary: serde_json::json!({}) };
-        self.persist_node_output(node_id, vec![error_item]).await;
-        self.emit(ExecutionEventKind::NodeErrored { node_id: node_id.to_string(), error: error.to_string() });
+        self.persist_node_output(node_id, vec![error_item], NodeRun { status: NodeRunStatus::Error, counts: counts.clone() }).await;
+        self.emit(ExecutionEventKind::NodeErrored { node_id: node_id.to_string(), error: error.to_string(), counts });
     }
     async fn on_node_skipped(&self, node_id: &str, items: &[Item]) {
-        self.persist_node_output(node_id, items.to_vec()).await;
-        self.emit(ExecutionEventKind::NodeSkipped { node_id: node_id.to_string(), items: items.to_vec() });
+        let counts = self.take_counts(node_id, items.len());
+        self.persist_node_output(node_id, items.to_vec(), NodeRun { status: NodeRunStatus::Skipped, counts: counts.clone() }).await;
+        self.emit(ExecutionEventKind::NodeSkipped { node_id: node_id.to_string(), items: items.to_vec(), counts });
     }
 }
 
@@ -121,6 +140,7 @@ pub async fn start_execution(
         status: ExecutionStatus::Running,
         mode,
         node_outputs: Default::default(),
+        node_runs: Default::default(),
         started_at: chrono::Utc::now(),
         finished_at: None,
     };
@@ -134,6 +154,10 @@ pub async fn start_execution(
     );
 
     let started = execution.clone();
+    let mut resources = resources;
+    if resources.memory.0.is_none() {
+        resources.memory = crate::credentials::MemoryHandle(Some(Arc::new(crate::storage::StorageMemory(storage.clone()))));
+    }
     let cancel = tokio_util::sync::CancellationToken::new();
     running().lock().unwrap_or_else(|e| e.into_inner()).insert(execution.id, cancel.clone());
     let handle = tokio::spawn(async move {
@@ -439,6 +463,83 @@ mod tests {
     }
 
     use super::start_execution;
+    use crate::domain::{Item, NodeRunStatus};
+    use std::collections::BTreeMap;
+
+    /// Sends its input to output 0 and two copies of it to output 1.
+    struct SplitNode;
+
+    #[async_trait::async_trait]
+    impl crate::node::Node for SplitNode {
+        fn type_name(&self) -> &'static str {
+            "test.split"
+        }
+        fn display_name(&self) -> &'static str {
+            "Split"
+        }
+        fn description(&self) -> &'static str {
+            "Test-only node with two outputs."
+        }
+        fn category(&self) -> crate::node::NodeCategory {
+            crate::node::NodeCategory::Action
+        }
+        async fn execute(&self, ctx: &crate::node::NodeExecutionContext) -> Result<crate::node::NodeOutput, crate::node::NodeError> {
+            let twice: Vec<Item> = ctx.input_items.iter().chain(ctx.input_items.iter()).cloned().collect();
+            Ok(vec![ctx.input_items.clone(), twice])
+        }
+    }
+
+    #[tokio::test]
+    async fn records_each_nodes_status_and_items_per_output() {
+        let storage = memory_storage().await;
+        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+        let mut r = NodeRegistry::new();
+        crate::nodes::register_all(&mut r);
+        r.register(Box::new(SplitNode));
+        let mut wf = linear_workflow();
+        wf.nodes[1].node_type = "test.split".into();
+        storage.create_workflow(&wf).await.unwrap();
+
+        let (started, handle) = start_execution(storage.clone(), events, Arc::new(r), wf, ExecutionMode::Manual, None, Default::default())
+            .await
+            .unwrap();
+        handle.await.unwrap();
+
+        let stored = storage.get_execution(started.id).await.unwrap().unwrap();
+        let split = &stored.node_runs["set1"];
+        assert_eq!(split.status, NodeRunStatus::Success);
+        assert_eq!(split.counts, BTreeMap::from([("0".to_string(), 1), ("1".to_string(), 2)]));
+        assert_eq!(stored.node_runs["trigger"].counts, BTreeMap::from([("0".to_string(), 1)]));
+        // The live event carries the same counts.
+        let mut event_counts = None;
+        while let Ok(event) = rx.try_recv() {
+            if let ExecutionEventKind::NodeFinished { node_id, counts, .. } = event.kind {
+                if node_id == "set1" {
+                    event_counts = Some(counts);
+                }
+            }
+        }
+        assert_eq!(event_counts, Some(split.counts.clone()));
+    }
+
+    #[tokio::test]
+    async fn a_parameter_that_fails_to_resolve_marks_its_node_as_errored() {
+        let storage = memory_storage().await;
+        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        let mut wf = linear_workflow();
+        wf.nodes[1].parameters = serde_json::json!({"fields": {"text": "{{ $json.message.text }}"}});
+        storage.create_workflow(&wf).await.unwrap();
+
+        let (started, handle) = start_execution(storage.clone(), events, registry(), wf, ExecutionMode::Manual, None, Default::default())
+            .await
+            .unwrap();
+        assert_eq!(handle.await.unwrap().status, ExecutionStatus::Error);
+
+        let stored = storage.get_execution(started.id).await.unwrap().unwrap();
+        assert_eq!(stored.node_runs["set1"].status, NodeRunStatus::Error);
+        let error = stored.node_outputs["set1"][0].json["error"].as_str().unwrap().to_string();
+        assert!(error.contains("TypeError"), "{error}");
+    }
 
     /// Sleeps `ms` before passing its input through.
     struct SleepNode {

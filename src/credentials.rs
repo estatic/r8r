@@ -14,6 +14,18 @@ pub struct RunResources {
     /// infer settings the credential already implies.
     pub credential_types: HashMap<Uuid, String>,
     pub tools: HashMap<Uuid, crate::domain::Tool>,
+    /// Chat memory for AI Agents in this run.
+    pub memory: MemoryHandle,
+}
+
+/// An optional [`crate::node::MemoryStore`], debuggable and defaultable.
+#[derive(Clone, Default)]
+pub struct MemoryHandle(pub Option<std::sync::Arc<dyn crate::node::MemoryStore>>);
+
+impl std::fmt::Debug for MemoryHandle {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(if self.0.is_some() { "MemoryHandle(Some)" } else { "MemoryHandle(None)" })
+    }
 }
 
 fn credential_ref(parameters: &serde_json::Value) -> Option<&str> {
@@ -57,7 +69,7 @@ pub async fn resolve_run_resources(storage: &dyn Storage, workflow: &Workflow) -
         credential_types.insert(id, credential.credential_type);
         credentials.insert(id, credential.data);
     }
-    Ok(RunResources { credentials, credential_types, tools })
+    Ok(RunResources { credentials, credential_types, tools, memory: Default::default() })
 }
 
 /// The field schema for a credential type, if it is one of the known types.

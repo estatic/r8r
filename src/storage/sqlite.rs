@@ -40,6 +40,28 @@ impl SqliteStorage {
 
 #[async_trait]
 impl Storage for SqliteStorage {
+    async fn get_agent_memory(&self, key: &str) -> anyhow::Result<Vec<serde_json::Value>> {
+        let row: Option<(String,)> = sqlx::query_as("SELECT messages FROM agent_memory WHERE key = ?")
+            .bind(key)
+            .fetch_optional(&self.pool)
+            .await?;
+        Ok(match row {
+            Some((json,)) => serde_json::from_str(&json)?,
+            None => Vec::new(),
+        })
+    }
+    async fn put_agent_memory(&self, key: &str, messages: &[serde_json::Value]) -> anyhow::Result<()> {
+        sqlx::query(
+            "INSERT INTO agent_memory (key, messages, updated_at) VALUES (?, ?, ?)
+             ON CONFLICT (key) DO UPDATE SET messages = excluded.messages, updated_at = excluded.updated_at",
+        )
+        .bind(key)
+        .bind(serde_json::to_string(messages)?)
+        .bind(chrono::Utc::now().to_rfc3339())
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
     async fn create_workflow(&self, workflow: &Workflow) -> anyhow::Result<()> {
         let definition = serde_json::json!({
             "nodes": workflow.nodes,
@@ -114,13 +136,14 @@ impl Storage for SqliteStorage {
     async fn create_execution(&self, execution: &Execution) -> anyhow::Result<()> {
         let data = serde_json::to_string(&execution.node_outputs)?;
         sqlx::query(
-            "INSERT INTO executions (id, workflow_id, status, mode, data, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?)"
+            "INSERT INTO executions (id, workflow_id, status, mode, data, node_runs, started_at, finished_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(execution.id.to_string())
         .bind(execution.workflow_id.to_string())
         .bind(serde_json::to_string(&execution.status)?)
         .bind(serde_json::to_string(&execution.mode)?)
         .bind(data)
+        .bind(serde_json::to_string(&execution.node_runs)?)
         .bind(execution.started_at.to_rfc3339())
         .bind(execution.finished_at.map(|t| t.to_rfc3339()))
         .execute(&self.pool)
@@ -129,9 +152,10 @@ impl Storage for SqliteStorage {
     }
     async fn update_execution(&self, execution: &Execution) -> anyhow::Result<()> {
         let data = serde_json::to_string(&execution.node_outputs)?;
-        sqlx::query("UPDATE executions SET status = ?, data = ?, finished_at = ? WHERE id = ?")
+        sqlx::query("UPDATE executions SET status = ?, data = ?, node_runs = ?, finished_at = ? WHERE id = ?")
             .bind(serde_json::to_string(&execution.status)?)
             .bind(data)
+            .bind(serde_json::to_string(&execution.node_runs)?)
             .bind(execution.finished_at.map(|t| t.to_rfc3339()))
             .bind(execution.id.to_string())
             .execute(&self.pool)
@@ -139,8 +163,8 @@ impl Storage for SqliteStorage {
         Ok(())
     }
     async fn get_execution(&self, id: Uuid) -> anyhow::Result<Option<Execution>> {
-        let row = sqlx::query_as::<_, (String, String, String, String, String, String, Option<String>)>(
-            "SELECT id, workflow_id, status, mode, data, started_at, finished_at FROM executions WHERE id = ?"
+        let row = sqlx::query_as::<_, (String, String, String, String, String, String, String, Option<String>)>(
+            "SELECT id, workflow_id, status, mode, data, node_runs, started_at, finished_at FROM executions WHERE id = ?"
         )
         .bind(id.to_string())
         .fetch_optional(&self.pool)
@@ -152,8 +176,8 @@ impl Storage for SqliteStorage {
         workflow_id: Uuid,
         limit: i64,
     ) -> anyhow::Result<Vec<Execution>> {
-        let rows = sqlx::query_as::<_, (String, String, String, String, String, String, Option<String>)>(
-            "SELECT id, workflow_id, status, mode, data, started_at, finished_at \
+        let rows = sqlx::query_as::<_, (String, String, String, String, String, String, String, Option<String>)>(
+            "SELECT id, workflow_id, status, mode, data, node_runs, started_at, finished_at \
              FROM executions WHERE workflow_id = ? ORDER BY started_at DESC LIMIT ?"
         )
         .bind(workflow_id.to_string())
@@ -374,15 +398,16 @@ fn row_to_workflow(
 }
 
 fn row_to_execution(
-    row: (String, String, String, String, String, String, Option<String>),
+    row: (String, String, String, String, String, String, String, Option<String>),
 ) -> anyhow::Result<Execution> {
-    let (id, workflow_id, status, mode, data, started_at, finished_at) = row;
+    let (id, workflow_id, status, mode, data, node_runs, started_at, finished_at) = row;
     Ok(Execution {
         id: Uuid::parse_str(&id)?,
         workflow_id: Uuid::parse_str(&workflow_id)?,
         status: serde_json::from_str(&status)?,
         mode: serde_json::from_str(&mode)?,
         node_outputs: serde_json::from_str(&data)?,
+        node_runs: serde_json::from_str(&node_runs)?,
         started_at: chrono::DateTime::parse_from_rfc3339(&started_at)?.with_timezone(&chrono::Utc),
         finished_at: finished_at
             .map(|t| chrono::DateTime::parse_from_rfc3339(&t).map(|d| d.with_timezone(&chrono::Utc)))
@@ -472,6 +497,7 @@ mod tests {
             status: ExecutionStatus::Running,
             mode: ExecutionMode::Manual,
             node_outputs: HashMap::new(),
+            node_runs: HashMap::new(),
             started_at: Utc::now(),
             finished_at: None,
         }
@@ -488,6 +514,18 @@ mod tests {
         let fetched = storage.get_execution(exec.id).await.unwrap().unwrap();
         assert_eq!(fetched.id, exec.id);
         assert_eq!(fetched.status, ExecutionStatus::Running);
+    }
+
+    #[tokio::test]
+    async fn agent_memory_round_trips_and_is_replaced_per_key() {
+        let storage = SqliteStorage::new("sqlite::memory:", [0u8; 32]).await.unwrap();
+        assert!(storage.get_agent_memory("w:n:1").await.unwrap().is_empty());
+        let first = vec![serde_json::json!({"role": "user", "content": "hi"})];
+        storage.put_agent_memory("w:n:1", &first).await.unwrap();
+        let second = vec![serde_json::json!({"role": "user", "content": "hi"}), serde_json::json!({"role": "assistant", "content": "hello"})];
+        storage.put_agent_memory("w:n:1", &second).await.unwrap();
+        assert_eq!(storage.get_agent_memory("w:n:1").await.unwrap(), second);
+        assert!(storage.get_agent_memory("w:n:2").await.unwrap().is_empty());
     }
 
     #[tokio::test]
