@@ -1,8 +1,12 @@
 // Intl for r8r's QuickJS scripts, over the native helpers in globalThis.__r8r_intl
 // (see src/intl.rs). Evaluated once per script context.
 (() => {
+  // Kept private: scripts reach the natives only through the checks below.
   const native = globalThis.__r8r_intl;
-  Object.defineProperty(globalThis, '__r8r_intl', { enumerable: false });
+  delete globalThis.__r8r_intl;
+  const MAX_SEGMENT_TEXT = 1000000;
+  const MAX_LIST_ITEMS = 100000;
+  const MAX_LIST_TEXT = 2000000;
 
   const DEFAULT_LOCALE = 'en-US';
 
@@ -42,6 +46,9 @@
     }
     segment(input) {
       const text = String(input);
+      if (text.length > MAX_SEGMENT_TEXT) {
+        throw new RangeError(`text too long for Intl.Segmenter in r8r (${text.length} characters, at most ${MAX_SEGMENT_TEXT})`);
+      }
       const granularity = this.#granularity;
       const segments = JSON.parse(native.segment(text, granularity)).map(([start, end, wordLike]) => {
         const s = { segment: text.slice(start, end), index: start, input: text };
@@ -284,10 +291,16 @@
       this.#style = option(options, 'style', ['long', 'short', 'narrow'], 'long');
     }
     format(list) {
-      const items = Array.from(list ?? [], (x) => {
+      const items = [];
+      let chars = 0;
+      for (const x of list ?? []) {
         if (typeof x !== 'string') throw new TypeError('Iterable yielded a non-String value');
-        return x;
-      });
+        chars += x.length;
+        items.push(x);
+        if (items.length > MAX_LIST_ITEMS || chars > MAX_LIST_TEXT) {
+          throw new RangeError(`list too long for Intl.ListFormat in r8r (at most ${MAX_LIST_ITEMS} items, ${MAX_LIST_TEXT} characters)`);
+        }
+      }
       return native.formatList(JSON.stringify(items), this.#locale, this.#type, this.#style);
     }
     resolvedOptions() {

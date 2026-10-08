@@ -51,15 +51,34 @@ fn canonical_locale_js(tag: String) -> String {
     canonical_locale(&tag)
 }
 
+/// The most text one call may segment (UTF-16 units). The natives allocate
+/// outside QuickJS's memory cap, so their inputs are capped here instead.
+pub const MAX_SEGMENT_TEXT: usize = 1_000_000;
+/// The most items, and characters in all, one list may format.
+pub const MAX_LIST_ITEMS: usize = 100_000;
+pub const MAX_LIST_TEXT: usize = 2_000_000;
+
 /// Segments of `text` as JSON `[[start, end, isWordLike], ...]`, with
 /// UTF-16 offsets as JavaScript strings use. `isWordLike` is null except
-/// for words.
-pub fn segment(text: &str, granularity: &str) -> String {
+/// for words. Written straight into one string to stay small.
+pub fn segment(text: &str, granularity: &str) -> Result<String, String> {
     let utf16: Vec<u16> = text.encode_utf16().collect();
-    let mut out: Vec<serde_json::Value> = Vec::new();
+    if utf16.len() > MAX_SEGMENT_TEXT {
+        return Err(format!("text too long for Intl.Segmenter in r8r ({} characters, at most {MAX_SEGMENT_TEXT})", utf16.len()));
+    }
+    use std::fmt::Write;
+    let mut out = String::from("[");
     let mut push = |start: usize, end: usize, word_like: Option<bool>| {
         if end > start {
-            out.push(serde_json::json!([start, end, word_like]));
+            if out.len() > 1 {
+                out.push(',');
+            }
+            let w = match word_like {
+                Some(true) => "true",
+                Some(false) => "false",
+                None => "null",
+            };
+            let _ = write!(out, "[{start},{end},{w}]");
         }
     };
     match granularity {
@@ -91,11 +110,12 @@ pub fn segment(text: &str, granularity: &str) -> String {
             }
         }
     }
-    serde_json::Value::Array(out).to_string()
+    out.push(']');
+    Ok(out)
 }
 
-fn segment_js(text: String, granularity: String) -> String {
-    segment(&text, &granularity)
+fn segment_js(text: String, granularity: String) -> rquickjs::Result<String> {
+    segment(&text, &granularity).map_err(|e| rquickjs::Error::new_from_js_message("text", "segments", e))
 }
 
 /// `tag` as an ICU locale; the prelude has already canonicalized it.
@@ -380,6 +400,10 @@ fn format_relative_js(value: f64, unit: String, tag: String, style: String, auto
 /// "a, b, and c" / "a, b или c": `items` joined as Intl.ListFormat.
 pub fn format_list(items: &[String], tag: &str, kind: &str, style: &str) -> Result<String, String> {
     use icu::list::{ListFormatter, ListLength};
+    let chars: usize = items.iter().map(|i| i.len()).sum();
+    if items.len() > MAX_LIST_ITEMS || chars > MAX_LIST_TEXT {
+        return Err(format!("list too long for Intl.ListFormat in r8r (at most {MAX_LIST_ITEMS} items, {MAX_LIST_TEXT} characters)"));
+    }
     let loc: icu_provider::DataLocale = (&locale(tag)).into();
     let length = match style {
         "short" => ListLength::Short,
@@ -396,6 +420,9 @@ pub fn format_list(items: &[String], tag: &str, kind: &str, style: &str) -> Resu
 }
 
 fn format_list_js(items: String, tag: String, kind: String, style: String) -> rquickjs::Result<String> {
+    if items.len() > MAX_LIST_TEXT * 2 {
+        return Err(rquickjs::Error::new_from_js_message("list", "string", "list too long for Intl.ListFormat in r8r".to_string()));
+    }
     let items: Vec<String> = serde_json::from_str(&items).map_err(|e| rquickjs::Error::new_from_js_message("list", "string", e.to_string()))?;
     format_list(&items, &tag, &kind, &style).map_err(|e| rquickjs::Error::new_from_js_message("list", "string", e))
 }
@@ -638,5 +665,28 @@ mod tests {
         assert!(js_err("new Intl.RelativeTimeFormat('en').format(1, 'fortnight')").contains("RangeError"));
         assert_eq!(js("new Intl.ListFormat('ru').format(['a', 'b', 'c'])"), serde_json::json!("a, b и c"));
         assert_eq!(js("new Intl.ListFormat('en', {type: 'disjunction'}).format(['x', 'y'])"), serde_json::json!("x or y"));
+    }
+
+    #[test]
+    fn huge_inputs_are_refused_instead_of_escaping_the_memory_cap() {
+        // QuickJS caps a script at 64 MB, but natives allocate outside it:
+        // a near-limit string must not turn into gigabytes of segments.
+        let err = js_err("new Intl.Segmenter().segment('a'.repeat(1_000_001))");
+        assert!(err.contains("RangeError") && err.contains("too long"), "{err}");
+        let err = js_err("new Intl.ListFormat('en').format(Array(200_001).fill('x'))");
+        assert!(err.contains("RangeError") && err.contains("too long"), "{err}");
+        // Large-but-sane inputs still work.
+        assert_eq!(js("[...new Intl.Segmenter().segment('ab'.repeat(50_000))].length"), serde_json::json!(100_000));
+    }
+
+    #[test]
+    fn scripts_cannot_reach_the_natives_directly() {
+        assert_eq!(js("typeof Intl.Segmenter === 'function' && typeof globalThis.__r8r_intl"), serde_json::json!("undefined"));
+    }
+
+    #[test]
+    fn segment_output_stays_compact() {
+        // Built as one string, not a JSON value per segment.
+        assert_eq!(super::segment("ab", "grapheme").unwrap(), "[[0,1,null],[1,2,null]]");
     }
 }
