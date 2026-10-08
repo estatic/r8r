@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { nextTick, ref } from 'vue'
+import { effectScope, nextTick, ref } from 'vue'
 import { useUnsavedChanges } from './useUnsavedChanges'
 import type { Workflow } from '../types/domain'
 
@@ -51,5 +51,23 @@ describe('useUnsavedChanges', () => {
     workflow.value = { ...workflow.value!, updated_at: 'later' }
     await nextTick()
     expect(changes.dirty.value).toBe(false)
+  })
+
+  it('asks the browser to confirm leaving the page while there are unsaved changes', async () => {
+    const workflow = ref<Workflow | null>(wf('a'))
+    const scope = effectScope()
+    const changes = scope.run(() => useUnsavedChanges(workflow))!
+    changes.markSaved()
+    const leave = () => {
+      const event = new Event('beforeunload', { cancelable: true })
+      window.dispatchEvent(event)
+      return event.defaultPrevented
+    }
+    expect(leave()).toBe(false)
+    workflow.value!.nodes[0] = { ...workflow.value!.nodes[0], parameters: { model: 'qwen' } }
+    await nextTick()
+    expect(leave()).toBe(true)
+    scope.stop()
+    expect(leave()).toBe(false)
   })
 })
