@@ -2157,7 +2157,7 @@ async fn agent_node_calls_a_tool_then_returns_a_final_response_end_to_end() {
                 .header("content-type", "application/json")
                 .header("authorization", format!("Bearer {token}"))
                 .body(Body::from(
-                    serde_json::json!({"name": "test-anthropic", "credential_type": "anthropicApi", "data": {"api_key": "test-key"}}).to_string(),
+                    serde_json::json!({"name": "test-anthropic", "credential_type": "anthropicApi", "data": {"api_key": "test-key", "base_url": anthropic_server.uri()}}).to_string(),
                 ))
                 .unwrap(),
         )
@@ -2180,7 +2180,6 @@ async fn agent_node_calls_a_tool_then_returns_a_final_response_end_to_end() {
                     "system_prompt": "You are a status-checking assistant.",
                     "user_message": "What is the status?",
                     "auth": {"credential_id": credential_id},
-                    "api_base_url": anthropic_server.uri(),
                     "max_iterations": 5,
                     "tools": [{
                         "name": "fetch_status",

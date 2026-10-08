@@ -40,7 +40,11 @@ pub fn known_credential_types() -> &'static [CredentialTypeSchema] {
             credential_type: "anthropicApi",
             display_name: "Anthropic API",
             generic: false,
-            fields: &[CredentialField { name: "api_key", label: "API Key", field_type: FieldType::Password, required: true }],
+            fields: &[
+                CredentialField { name: "api_key", label: "API Key", field_type: FieldType::Password, required: true },
+                // Where the key may be sent; only the credential's owner sets it.
+                CredentialField { name: "base_url", label: "Base URL (optional)", field_type: FieldType::Text, required: false },
+            ],
         },
         CredentialTypeSchema {
             credential_type: "openaiApi",
@@ -121,7 +125,9 @@ mod tests {
     fn anthropic_api_requires_api_key() {
         let schema = find("anthropicApi");
         assert!(!schema.generic);
-        assert_eq!(schema.fields.len(), 1);
+        assert_eq!(schema.fields.len(), 2);
+        assert_eq!(schema.fields[1].name, "base_url");
+        assert!(!schema.fields[1].required);
         assert_eq!(schema.fields[0].name, "api_key");
         assert_eq!(schema.fields[0].field_type, FieldType::Password);
         assert!(schema.fields[0].required);

@@ -449,9 +449,21 @@ impl Node for AgentNode {
         }
         let api_base_url = ctx.parameters.get("api_base_url").and_then(|v| v.as_str()).filter(|s| !s.is_empty());
 
+        // A key goes only where its credential says: anyone who can edit the
+        // workflow can set `api_base_url`, which must never receive a
+        // credential's key. It is for keyless servers (Ollama, ...) only.
+        if api_base_url.is_some() && !api_key.is_empty() {
+            return Err(NodeError::ExecutionFailed(
+                "ai.agent: api_base_url can't be used with a credential's API key; set the server address (Base URL) on the credential instead".into(),
+            ));
+        }
         match provider_name {
             "anthropic" => {
-                let base_url = api_base_url;
+                let base_url = credential_data
+                    .and_then(|c| c.get("base_url"))
+                    .and_then(|v| v.as_str())
+                    .filter(|s| !s.is_empty())
+                    .or(api_base_url);
                 let client = match base_url {
                     Some(url) => crate::llm::anthropic::AnthropicClient::with_base_url_for_node(url.to_string())?,
                     None => crate::llm::anthropic::AnthropicClient::new()?,
@@ -1123,4 +1135,53 @@ mod tests {
         let err = AgentNode.execute(&ctx).await.unwrap_err().to_string();
         assert!(err.contains("Anthropic provider needs a credential"), "{err}");
     }
+    /// An agent with a credential holding `credential`, and `params`.
+    fn keyed_ctx(credential_type: &str, credential: serde_json::Value, params: serde_json::Value) -> NodeExecutionContext {
+        let id = uuid::Uuid::new_v4();
+        let mut parameters = params;
+        parameters["auth"] = serde_json::json!({"credential_id": id.to_string()});
+        NodeExecutionContext {
+            parameters,
+            input_items: vec![Item { json: serde_json::json!({}), binary: serde_json::json!({}) }],
+            credentials: std::collections::HashMap::from([(id, credential)]),
+            credential_types: std::collections::HashMap::from([(id, credential_type.to_string())]),
+            ..ctx_with_tool_executor(std::sync::Arc::new(SpyToolExecutor { calls: Mutex::new(Vec::new()), result: Ok(vec![vec![]]) }))
+        }
+    }
+
+    #[tokio::test]
+    async fn a_credentials_api_key_is_never_sent_to_a_node_supplied_address() {
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let attacker = MockServer::start().await;
+        Mock::given(wiremock::matchers::any()).respond_with(ResponseTemplate::new(200)).mount(&attacker).await;
+        for (provider, credential_type) in [("openai", "openaiApi"), ("anthropic", "anthropicApi")] {
+            let ctx = keyed_ctx(
+                credential_type,
+                serde_json::json!({"api_key": "sk-secret"}),
+                serde_json::json!({"provider": provider, "model": "m", "user_message": "hi", "api_base_url": attacker.uri()}),
+            );
+            let err = AgentNode.execute(&ctx).await.unwrap_err().to_string();
+            assert!(err.contains("api_base_url"), "{provider}: {err}");
+        }
+        assert!(attacker.received_requests().await.unwrap().is_empty(), "the key must not leave for the node's address");
+    }
+
+    #[tokio::test]
+    async fn a_credentials_own_base_url_still_carries_its_key() {
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/chat/completions"))
+            .and(header("authorization", "Bearer sk-secret"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"role": "assistant", "content": "ok"}, "finish_reason": "stop"}]
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let ctx = keyed_ctx("openaiApi", serde_json::json!({"api_key": "sk-secret", "base_url": server.uri()}), serde_json::json!({"provider": "openai", "model": "m", "user_message": "hi"}));
+        AgentNode.execute(&ctx).await.unwrap();
+    }
+
 }
