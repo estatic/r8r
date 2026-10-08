@@ -1019,7 +1019,7 @@ fn load_tools<'a>(ctx: &'a ExecCtx<'_>, item: usize) -> NodeResult<Vec<Tool<'a>>
                 return Err(NodeError::new(format!("The Code Tool \"{}\" uses Python, which is not supported natively yet", node.name)));
             }
             ToolKind::Code { description: p["description"].as_str().unwrap_or("").to_string(), code: node.parameters["jsCode"].as_str().unwrap_or("").to_string(), schema: code_tool_schema(node, &p)? }
-        } else if [format!("{LC}vectorStoreInMemory"), format!("{LC}vectorStorePGVector"), format!("{LC}vectorStoreQdrant")].contains(&node.node_type) && node.parameters["mode"].as_str() == Some("retrieve-as-tool") {
+        } else if [format!("{LC}vectorStoreInMemory"), format!("{LC}vectorStorePGVector"), format!("{LC}vectorStoreQdrant"), format!("{LC}vectorStorePinecone")].contains(&node.node_type) && node.parameters["mode"].as_str() == Some("retrieve-as-tool") {
             let p = ctx.resolve_value(&node.parameters, item)?;
             if node.type_version < 1.3 {
                 name = p["toolName"].as_str().unwrap_or("").to_string();

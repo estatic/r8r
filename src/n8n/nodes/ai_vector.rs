@@ -1,12 +1,13 @@
 //! Retrieval building blocks (spec §6.8, plan 2.7): the embeddings,
 //! document loader and text splitter sub-nodes, the Simple Vector Store
 //! (`vectorStoreInMemory`), the Postgres PGVector Store
-//! (`vectorStorePGVector`) and the Qdrant Vector Store (`vectorStoreQdrant`),
-//! as n8n 2.35.7 runs them. Embedding requests,
+//! (`vectorStorePGVector`), the Qdrant Vector Store (`vectorStoreQdrant`)
+//! and the Pinecone Vector Store (`vectorStorePinecone`), as n8n 2.35.7
+//! runs them. Embedding requests,
 //! document shapes, scores and ranking follow LangChain exactly
 //! (`OpenAIEmbeddings`, `MemoryVectorStore`, `ml-distance`'s cosine,
 //! `@langchain/community` 1.1.27's `PGVectorStore`, `@langchain/qdrant`
-//! 1.0.1's `QdrantVectorStore`).
+//! 1.0.1's `QdrantVectorStore`, `@langchain/pinecone` 1.0.1's `PineconeStore`).
 
 use super::ai::record;
 use super::doc_loader::n8n_json_loader;
@@ -25,6 +26,7 @@ pub fn all() -> Vec<Box<dyn NodeType>> {
         Box::new(VectorStoreInMemory),
         Box::new(VectorStorePgVector),
         Box::new(VectorStoreQdrant),
+        Box::new(VectorStorePinecone),
         Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.embeddingsOpenAi")),
         Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.documentDefaultDataLoader")),
         Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.textSplitterRecursiveCharacterTextSplitter")),
@@ -382,6 +384,12 @@ async fn populate(ctx: &ExecCtx<'_>, embeddings: &Embeddings<'_>, docs: &[Docume
         store.ensure_collection(ctx, embeddings).await?;
         return store.add(ctx, docs, vectors).await;
     }
+    if ctx.node.node_type == PINECONE {
+        let store = Pinecone::open(ctx, ctx.node, item).await?;
+        store.prepare_insert(ctx).await?;
+        let vectors = embeddings.embed_documents(ctx, &texts).await?;
+        return store.add(ctx, docs, vectors).await;
+    }
     let vectors = embeddings.embed_documents(ctx, &texts).await?;
     memory_add(&memory_key(ctx, item)?, docs, vectors, ctx.param_bool("clearStore", item, false)?);
     Ok(())
@@ -421,6 +429,7 @@ enum Store {
     Memory(String),
     Pg(PgVector),
     Qdrant(Qdrant),
+    Pinecone(Pinecone),
 }
 
 impl Store {
@@ -433,6 +442,8 @@ impl Store {
             let q = Qdrant::open(ctx, node, item).await?;
             q.ensure_collection(ctx, embeddings).await?;
             Ok(Store::Qdrant(q))
+        } else if node.node_type == PINECONE {
+            Ok(Store::Pinecone(Pinecone::open(ctx, node, item).await?))
         } else if node.node_type == format!("{LC}vectorStoreInMemory") {
             Ok(Store::Memory(memory_key_of(ctx, node, item)?))
         } else {
@@ -449,6 +460,7 @@ impl Store {
                 q.ensure_collection(ctx, embeddings).await?;
                 q.search(ctx, query, k, filter).await
             }
+            Store::Pinecone(p) => p.search(ctx, query, k, filter).await,
         }
     }
 
@@ -990,6 +1002,242 @@ impl Qdrant {
                 Hit { doc: Document { page_content, metadata }, score: p["score"].as_f64().unwrap_or(0.0), id: Some(p["id"].clone()) }
             })
             .collect())
+    }
+}
+
+// ---- Pinecone store --------------------------------------------------------------------
+
+struct VectorStorePinecone;
+
+const PINECONE: &str = "@n8n/n8n-nodes-langchain.vectorStorePinecone";
+
+#[async_trait::async_trait]
+impl NodeType for VectorStorePinecone {
+    fn type_name(&self) -> &'static str {
+        PINECONE
+    }
+
+    async fn execute(&self, ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
+        let mode = ctx.param_str("mode", 0, "retrieve")?;
+        match mode.as_str() {
+            "insert" => insert(ctx).await,
+            "load" => load(ctx).await,
+            "retrieve" | "retrieve-as-tool" => Err(NodeError::new(format!("\"{}\" in {mode} mode is a sub-node: connect it to a chain, agent or retriever", ctx.node.name))),
+            other => Err(NodeError::new(format!("The vector store mode \"{other}\" is not supported natively yet"))),
+        }
+    }
+}
+
+/// `IndexHostSingleton`: index hosts by `{apiKey}-{index}`, process-wide.
+fn pinecone_hosts() -> &'static Mutex<HashMap<String, String>> {
+    static S: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    S.get_or_init(|| Mutex::new(HashMap::new()))
+}
+
+/// LangChain's `PineconeStore` on the `@pinecone-database/pinecone` 5.1.2
+/// client n8n builds from the API key alone.
+pub(super) struct Pinecone {
+    /// `https://api.pinecone.io`; r8r also reads `PINECONE_CONTROLLER_HOST`,
+    /// which the client only honours without a config object (n8n passes one).
+    controller: String,
+    api_key: String,
+    index: String,
+    namespace: String,
+    clear_namespace: bool,
+}
+
+/// `normalizeUrl`: `https://` unless a scheme is given.
+fn normalize_host(url: &str) -> String {
+    let url = url.trim_end_matches('/');
+    if url.starts_with("http://") || url.starts_with("https://") {
+        url.to_string()
+    } else {
+        format!("https://{url}")
+    }
+}
+
+impl Pinecone {
+    async fn open(ctx: &ExecCtx<'_>, node: &Node, item: usize) -> NodeResult<Pinecone> {
+        let index = match ctx.resolve_value(&node.parameters["pineconeIndex"], item)? {
+            Value::Object(o) => o.get("value").and_then(Value::as_str).unwrap_or("").to_string(),
+            v => v.as_str().unwrap_or("").to_string(),
+        };
+        let o = ctx.resolve_value(&node.parameters["options"], item)?;
+        let (_, cred) = ctx.credentials_for(node, "pineconeApi").await?;
+        let controller = std::env::var("PINECONE_CONTROLLER_HOST").ok().filter(|h| !h.trim().is_empty()).map(|h| normalize_host(&h)).unwrap_or_else(|| "https://api.pinecone.io".into());
+        Ok(Pinecone {
+            controller,
+            api_key: cred["apiKey"].as_str().unwrap_or("").to_string(),
+            index,
+            namespace: o["pineconeNamespace"].as_str().unwrap_or("").to_string(),
+            clear_namespace: o["clearNamespace"].as_bool().unwrap_or(false),
+        })
+    }
+
+    /// One API call with the client's headers; HTTP errors worded as the
+    /// client's `mapHttpStatusError`.
+    async fn call(&self, ctx: &ExecCtx<'_>, method: reqwest::Method, url: &str, body: Option<Value>) -> NodeResult<Value> {
+        let parsed = reqwest::Url::parse(url).map_err(|e| NodeError::new(format!("Invalid Pinecone URL {url}: {e}")))?;
+        super::check_ssrf(&parsed, ctx.config()).await.map_err(NodeError::new)?;
+        let mut req = ctx.services.http.request(method, parsed).header("Api-Key", &self.api_key).header("X-Pinecone-Api-Version", "2025-01");
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        let resp = req.send().await.map_err(|e| NodeError::new(format!("Request failed to reach Pinecone. This could be due to a network error, a server error, or a misconfiguration: {}", e.without_url())))?;
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if status.is_success() {
+            return Ok(serde_json::from_str(&text).unwrap_or(Value::Null));
+        }
+        let api_message = serde_json::from_str::<Value>(&text)
+            .ok()
+            .and_then(|v| v.pointer("/error/message").or(v.get("message")).and_then(Value::as_str).map(String::from))
+            .unwrap_or_else(|| text.clone());
+        let message = match status.as_u16() {
+            400 | 403 => api_message,
+            401 => format!("The API key you provided was rejected while calling {url}. Please check your configuration values and try again. You can find the configuration values for your project in the Pinecone developer console at https://app.pinecone.io"),
+            404 => format!("A call to {url} returned HTTP status 404."),
+            409 => format!("A call to {url} returned HTTP status 409. {api_message}").trim_end().to_string(),
+            code => format!("A call to {url} returned HTTP status {code}. Body: {text}"),
+        };
+        Err(NodeError::api(message.clone(), Some(status.as_u16()), Some(message)))
+    }
+
+    async fn list_indexes(&self, ctx: &ExecCtx<'_>) -> NodeResult<Vec<String>> {
+        let v = self.call(ctx, reqwest::Method::GET, &format!("{}/indexes", self.controller), None).await?;
+        Ok(v["indexes"].as_array().into_iter().flatten().filter_map(|i| i["name"].as_str().map(String::from)).collect())
+    }
+
+    /// The index's data-plane URL, from `describeIndex` on first use.
+    async fn host(&self, ctx: &ExecCtx<'_>) -> NodeResult<String> {
+        let key = format!("{}-{}", self.api_key, self.index);
+        if let Some(h) = pinecone_hosts().lock().unwrap().get(&key) {
+            return Ok(h.clone());
+        }
+        let mut url = reqwest::Url::parse(&self.controller).map_err(|e| NodeError::new(format!("Invalid Pinecone URL: {e}")))?;
+        url.path_segments_mut().map_err(|_| NodeError::new("Invalid Pinecone URL"))?.pop_if_empty().extend(["indexes", &self.index]);
+        let v = self.call(ctx, reqwest::Method::GET, url.as_str(), None).await?;
+        let host = v["host"].as_str().filter(|h| !h.is_empty()).map(normalize_host).ok_or_else(|| NodeError::new(format!("Could not get host for index: {}. Call describeIndex('{}') to check the current status of the index.", self.index, self.index)))?;
+        pinecone_hosts().lock().unwrap().insert(key, host.clone());
+        Ok(host)
+    }
+
+    /// `populateVectorStore`: the index must exist; "Clear Namespace"
+    /// empties a named namespace first (a failure is only logged).
+    async fn prepare_insert(&self, ctx: &ExecCtx<'_>) -> NodeResult<()> {
+        if !self.list_indexes(ctx).await?.contains(&self.index) {
+            return Err(NodeError::new(format!("Index {} not found", self.index)).describe("Please check that the index exists in your vector store"));
+        }
+        if !self.namespace.is_empty() && self.clear_namespace {
+            let host = self.host(ctx).await?;
+            if let Err(e) = self.call(ctx, reqwest::Method::POST, &format!("{host}/vectors/delete"), Some(json!({"deleteAll": true, "namespace": self.namespace}))).await {
+                tracing::info!("Namespace {} does not exist yet: {}", self.namespace, e.message);
+            }
+        }
+        Ok(())
+    }
+
+    /// `addVectors`: random UUIDs, flattened metadata plus the text under
+    /// `text`, upserted 100 at a time.
+    async fn add(&self, ctx: &ExecCtx<'_>, docs: &[Document], vectors: Vec<Vec<f64>>) -> NodeResult<()> {
+        let records: Vec<Value> = docs.iter().zip(vectors).map(|(d, v)| json!({"id": uuid::Uuid::new_v4().to_string(), "values": v, "metadata": pinecone_metadata(&d.metadata, &d.page_content)})).collect();
+        let host = self.host(ctx).await?;
+        for chunk in records.chunks(100) {
+            self.call(ctx, reqwest::Method::POST, &format!("{host}/vectors/upsert"), Some(json!({"vectors": chunk, "namespace": self.namespace}))).await?;
+        }
+        Ok(())
+    }
+
+    /// `similaritySearchVectorWithScore`: a `namespace` key in the filter
+    /// picks the namespace; matches without a score are dropped.
+    async fn search(&self, ctx: &ExecCtx<'_>, query: &[f64], k: usize, filter: Option<&Map<String, Value>>) -> NodeResult<Vec<Hit>> {
+        let mut filter = filter.cloned();
+        let mut namespace = Value::String(self.namespace.clone());
+        if let Some(ns) = filter.as_mut().and_then(|f| f.remove("namespace")) {
+            namespace = ns;
+        }
+        let mut body = Map::new();
+        body.insert("namespace".into(), namespace);
+        body.insert("topK".into(), json!(k));
+        if let Some(f) = filter.filter(|f| !f.is_empty()) {
+            body.insert("filter".into(), Value::Object(f));
+        }
+        body.insert("includeMetadata".into(), json!(true));
+        body.insert("vector".into(), json!(query));
+        let host = self.host(ctx).await?;
+        let result = self.call(ctx, reqwest::Method::POST, &format!("{host}/query"), Some(Value::Object(body))).await?;
+        Ok(result["matches"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .filter_map(|m| {
+                let score = m["score"].as_f64().filter(|s| *s != 0.0)?;
+                let mut metadata = m["metadata"].as_object().cloned().unwrap_or_else(|| Map::from_iter([("text".to_string(), json!(""))]));
+                let page_content = match metadata.shift_remove("text") {
+                    Some(Value::String(s)) => s,
+                    Some(Value::Null) | None => String::new(),
+                    Some(other) => other.to_string(),
+                };
+                Some(Hit { doc: Document { page_content, metadata }, score, id: m.get("id").cloned() })
+            })
+            .collect())
+    }
+}
+
+/// The metadata `addVectors` stores: the document's metadata flattened
+/// with `flat` (`a.b`, `list.0`), all-string arrays kept whole, then the
+/// text; null values and empty objects/arrays left out.
+fn pinecone_metadata(metadata: &Map<String, Value>, text: &str) -> Map<String, Value> {
+    fn flatten(prefix: Option<&str>, v: &Value, out: &mut Map<String, Value>) {
+        let children: Vec<(String, &Value)> = match v {
+            Value::Object(m) if !m.is_empty() => m.iter().map(|(k, v)| (k.clone(), v)).collect(),
+            Value::Array(a) if !a.is_empty() => a.iter().enumerate().map(|(i, v)| (i.to_string(), v)).collect(),
+            _ => {
+                out.insert(prefix.unwrap_or("").to_string(), v.clone());
+                return;
+            }
+        };
+        for (k, child) in children {
+            let key = match prefix {
+                Some(p) => format!("{p}.{k}"),
+                None => k,
+            };
+            flatten(Some(&key), child, out);
+        }
+    }
+    let mut out = Map::new();
+    let mut string_arrays = Map::new();
+    for (k, v) in metadata {
+        match v {
+            Value::Array(a) if a.iter().all(Value::is_string) => {
+                string_arrays.insert(k.clone(), v.clone());
+            }
+            _ => flatten(Some(k), v, &mut out),
+        }
+    }
+    out.extend(string_arrays);
+    out.insert("text".into(), json!(text));
+    out.retain(|_, v| match v {
+        Value::Null => false,
+        Value::Object(m) => !m.is_empty(),
+        Value::Array(a) => !a.is_empty(),
+        _ => true,
+    });
+    out
+}
+
+#[cfg(test)]
+mod pinecone_tests {
+    use super::*;
+
+    #[test]
+    fn metadata_is_flattened_like_langchain() {
+        let m = json!({"source": "blob", "loc": {"lines": {"from": 1, "to": 2}}, "tags": ["a", "b"], "mixed": [1, "x"], "none": null, "empty": {}, "text": "old"});
+        let out = pinecone_metadata(m.as_object().unwrap(), "new");
+        assert_eq!(
+            Value::Object(out).to_string(),
+            r#"{"source":"blob","loc.lines.from":1,"loc.lines.to":2,"mixed.0":1,"mixed.1":"x","text":"new","tags":["a","b"]}"#
+        );
     }
 }
 

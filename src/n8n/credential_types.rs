@@ -195,6 +195,11 @@ pub fn all() -> Vec<CredentialType> {
             fields: vec![f("apiKey", "API Key", true, false, json!("")), f("qdrantUrl", "Qdrant URL", false, true, json!(""))],
         },
         CredentialType {
+            name: "pineconeApi",
+            display_name: "PineconeApi",
+            fields: vec![f("apiKey", "API Key", true, true, json!(""))],
+        },
+        CredentialType {
             name: "mistralCloudApi",
             display_name: "Mistral Cloud API",
             fields: vec![f("apiKey", "API Key", true, true, json!("")), f("url", "Base URL", false, false, json!("https://api.mistral.ai/v1"))],

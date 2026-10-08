@@ -140,7 +140,19 @@ R8R_BIN=$PWD/node_modules/.bin/n8n R8R_BDD_START_TIMEOUT=120 \
     and not @requires-python-runner and not @requires-mailpit'
 ```
 
-On 2026-09-25 n8n 2.35.7 passed all 358 of these scenarios. When n8n
+On 2026-09-25 n8n 2.35.7 passed all 358 of these scenarios.
+
+`10-ai/vector_store_pinecone.feature` points the Pinecone client at the mock
+with `PINECONE_CONTROLLER_HOST`, which r8r reads but n8n's node doesn't (it
+passes the client a config object, so `https://api.pinecone.io` is fixed).
+To check those scenarios against n8n, preload `support/n8n-pinecone-redirect.cjs`
+through a wrapper used as `R8R_BIN`:
+
+```sh
+printf '#!/bin/sh\nexport NODE_OPTIONS="--require %s"\nexec %s "$@"\n' \
+  "$PWD/tests/bdd/support/n8n-pinecone-redirect.cjs" "$PWD/node_modules/.bin/n8n" > /tmp/n8n-pc && chmod +x /tmp/n8n-pc
+R8R_BIN=/tmp/n8n-pc R8R_BDD_START_TIMEOUT=120 cargo test --test bdd -- -i 'tests/bdd/features/10-ai/vector_store_pinecone.feature'
+``` When n8n
 fails a scenario, either the expectation is wrong (fix it) or the spec
 asks for more than n8n does (tag it `@beyond-n8n` and say why in a
 comment above the scenario).
