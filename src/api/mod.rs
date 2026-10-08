@@ -35,6 +35,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/rest/r8r/node-types", get(node_types::list_node_types))
         .route("/rest/r8r/node-types/:type_name/output-ports", post(node_types::output_ports_for_type))
         .route("/rest/r8r/executions/:id", get(executions::get_execution))
+        .route("/rest/r8r/executions/:id/stop", post(executions::stop_execution))
         .route("/rest/r8r/credentials", post(credentials::create_credential).get(credentials::list_credentials))
         .route(
             "/rest/r8r/credentials/:id",

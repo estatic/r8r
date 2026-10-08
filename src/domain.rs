@@ -72,6 +72,8 @@ pub enum ExecutionStatus {
     Running,
     Success,
     Error,
+    /// Stopped by a user before it finished.
+    Canceled,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

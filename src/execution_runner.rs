@@ -134,14 +134,32 @@ pub async fn start_execution(
     );
 
     let started = execution.clone();
+    let cancel = tokio_util::sync::CancellationToken::new();
+    running().lock().unwrap_or_else(|e| e.into_inner()).insert(execution.id, cancel.clone());
     let handle = tokio::spawn(async move {
         let clock = std::time::Instant::now();
+        let execution_id = execution.id;
         let tracker = LiveExecutionTracker::new(execution, storage.clone(), events.clone());
-        let result =
-            crate::engine::execute_workflow_seeded(&workflow, &registry, trigger_items, &resources, &tracker).await;
+        // A stop drops the run at its next await (an HTTP call, a wait, ...).
+        let result = tokio::select! {
+            result = crate::engine::execute_workflow_seeded(&workflow, &registry, trigger_items, &resources, &tracker) => Some(result),
+            _ = cancel.cancelled() => None,
+        };
+        running().lock().unwrap_or_else(|e| e.into_inner()).remove(&execution_id);
 
         let mut final_execution = tracker.into_execution();
         let duration_ms = clock.elapsed().as_millis() as u64;
+        let Some(result) = result else {
+            final_execution.status = ExecutionStatus::Canceled;
+            tracing::info!(
+                execution_id = %final_execution.id,
+                workflow_id = %workflow.id,
+                workflow_name = %workflow.name,
+                duration_ms,
+                "execution canceled"
+            );
+            return finish(&*storage, &events, workflow.id, final_execution).await;
+        };
         match &result {
             Ok(outputs) => {
                 final_execution.status = ExecutionStatus::Success;
@@ -166,19 +184,46 @@ pub async fn start_execution(
                 );
             }
         }
-        final_execution.finished_at = Some(chrono::Utc::now());
-        if let Err(e) = storage.update_execution(&final_execution).await {
-            tracing::error!(error = %e, execution_id = %final_execution.id, "failed to persist final execution result");
-        }
-
-        let _ = events.send(ExecutionEvent {
-            execution_id: final_execution.id,
-            workflow_id: workflow.id,
-            kind: ExecutionEventKind::ExecutionFinished { status: final_execution.status.clone() },
-        });
-        final_execution
+        finish(&*storage, &events, workflow.id, final_execution).await
     });
     Ok((started, handle))
+}
+
+/// Stamps, persists and announces a finished (or canceled) run.
+async fn finish(
+    storage: &dyn Storage,
+    events: &broadcast::Sender<ExecutionEvent>,
+    workflow_id: Uuid,
+    mut final_execution: Execution,
+) -> Execution {
+    final_execution.finished_at = Some(chrono::Utc::now());
+    if let Err(e) = storage.update_execution(&final_execution).await {
+        tracing::error!(error = %e, execution_id = %final_execution.id, "failed to persist final execution result");
+    }
+    let _ = events.send(ExecutionEvent {
+        execution_id: final_execution.id,
+        workflow_id,
+        kind: ExecutionEventKind::ExecutionFinished { status: final_execution.status.clone() },
+    });
+    final_execution
+}
+
+/// Stop handles of the runs in progress in this process.
+fn running() -> &'static std::sync::Mutex<std::collections::HashMap<Uuid, tokio_util::sync::CancellationToken>> {
+    static RUNNING: std::sync::OnceLock<std::sync::Mutex<std::collections::HashMap<Uuid, tokio_util::sync::CancellationToken>>> =
+        std::sync::OnceLock::new();
+    RUNNING.get_or_init(Default::default)
+}
+
+/// Asks a run in progress to stop; false when no such run is in progress here.
+pub fn stop_execution(id: Uuid) -> bool {
+    match running().lock().unwrap_or_else(|e| e.into_inner()).get(&id) {
+        Some(token) => {
+            token.cancel();
+            true
+        }
+        None => false,
+    }
 }
 
 /// Starts a run and waits for it. Used where the caller wants the result
@@ -450,6 +495,35 @@ mod tests {
         assert_eq!(finished.id, started.id);
         assert_eq!(finished.status, ExecutionStatus::Success);
         assert_eq!(storage.get_execution(started.id).await.unwrap().unwrap().status, ExecutionStatus::Success);
+    }
+
+    #[tokio::test]
+    async fn stopping_a_run_ends_it_as_canceled_without_waiting_for_the_node() {
+        let storage = memory_storage().await;
+        let (events, mut rx) = tokio::sync::broadcast::channel(16);
+        let (registry, wf) = sleepy_setup(60_000);
+        storage.create_workflow(&wf).await.unwrap();
+
+        let (started, handle) = start_execution(storage.clone(), events, registry, wf, ExecutionMode::Manual, None, Default::default())
+            .await
+            .unwrap();
+        assert!(super::stop_execution(started.id));
+
+        let finished = tokio::time::timeout(std::time::Duration::from_secs(5), handle).await.expect("stop must not wait for the node").unwrap();
+        assert_eq!(finished.status, ExecutionStatus::Canceled);
+        assert!(finished.finished_at.is_some());
+        assert_eq!(storage.get_execution(started.id).await.unwrap().unwrap().status, ExecutionStatus::Canceled);
+        // Watchers (the editor's socket) learn it ended.
+        let mut saw_finish = false;
+        while let Ok(event) = rx.try_recv() {
+            if let ExecutionEventKind::ExecutionFinished { status } = event.kind {
+                assert_eq!(status, ExecutionStatus::Canceled);
+                saw_finish = true;
+            }
+        }
+        assert!(saw_finish);
+        // It's no longer running, so there's nothing left to stop.
+        assert!(!super::stop_execution(started.id));
     }
 
     #[tokio::test]

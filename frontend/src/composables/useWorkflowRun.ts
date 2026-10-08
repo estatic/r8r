@@ -11,6 +11,9 @@ import type { Execution } from '../types/domain'
 export function useWorkflowRun(workflowId: string, execution: Ref<Execution | null>, pollMs = 2000) {
   const executing = ref(false)
   let startedId: string | null = null
+  // The execute request itself, while the server is still starting the run
+  // (a Telegram trigger waits there for its test message).
+  let starting: AbortController | null = null
   let timer: ReturnType<typeof setInterval> | null = null
   let disposed = false
 
@@ -49,11 +52,16 @@ export function useWorkflowRun(workflowId: string, execution: Ref<Execution | nu
   async function execute() {
     executing.value = true
     let started: Execution
+    const controller = new AbortController()
+    starting = controller
     try {
-      started = await api.post<Execution>(`/rest/r8r/workflows/${workflowId}/execute`)
+      started = await api.post<Execution>(`/rest/r8r/workflows/${workflowId}/execute`, undefined, { signal: controller.signal })
     } catch (e) {
       stop()
+      if (controller.signal.aborted) return // stopped by the user
       throw e
+    } finally {
+      if (starting === controller) starting = null
     }
     // The editor was left while the POST was in flight: nothing to track.
     if (disposed) {
@@ -81,6 +89,19 @@ export function useWorkflowRun(workflowId: string, execution: Ref<Execution | nu
     }, pollMs)
   }
 
+  /**
+   * Stops the run: a started one on the server (it then ends as Canceled
+   * over the socket or the poll), or the execute request still waiting
+   * for the run to start.
+   */
+  async function cancel() {
+    if (startedId) {
+      await api.post(`/rest/r8r/executions/${startedId}/stop`)
+    } else if (starting) {
+      starting.abort()
+    }
+  }
+
   if (getCurrentScope()) {
     onScopeDispose(() => {
       disposed = true
@@ -88,5 +109,5 @@ export function useWorkflowRun(workflowId: string, execution: Ref<Execution | nu
     })
   }
 
-  return { executing, execute, stop }
+  return { executing, execute, stop, cancel }
 }

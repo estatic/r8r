@@ -22,6 +22,38 @@ pub async fn get_execution(
     }
 }
 
+/// Stops a run in progress (204). A run still "Running" that no task
+/// owns (the server restarted mid-run) is closed as canceled too; a
+/// finished run answers 409.
+pub async fn stop_execution(
+    State(state): State<AppState>,
+    super::workflows::AuthUser(_user_id): super::workflows::AuthUser,
+    Path(id): Path<Uuid>,
+) -> impl IntoResponse {
+    if crate::execution_runner::stop_execution(id) {
+        return StatusCode::NO_CONTENT.into_response();
+    }
+    match state.storage.get_execution(id).await {
+        Ok(Some(mut exec)) if exec.status == crate::domain::ExecutionStatus::Running => {
+            exec.status = crate::domain::ExecutionStatus::Canceled;
+            exec.finished_at = Some(chrono::Utc::now());
+            match state.storage.update_execution(&exec).await {
+                Ok(()) => StatusCode::NO_CONTENT.into_response(),
+                Err(e) => {
+                    tracing::error!(error = %e, execution_id = %id, "failed to cancel an orphaned execution");
+                    StatusCode::INTERNAL_SERVER_ERROR.into_response()
+                }
+            }
+        }
+        Ok(Some(_)) => (StatusCode::CONFLICT, "the execution has already finished").into_response(),
+        Ok(None) => StatusCode::NOT_FOUND.into_response(),
+        Err(e) => {
+            tracing::error!(error = %e, "failed to fetch execution");
+            StatusCode::INTERNAL_SERVER_ERROR.into_response()
+        }
+    }
+}
+
 #[derive(Deserialize)]
 pub struct ListExecutionsQuery {
     limit: Option<i64>,

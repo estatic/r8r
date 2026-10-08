@@ -122,4 +122,39 @@ describe('useWorkflowRun', () => {
     await vi.advanceTimersByTimeAsync(0)
     expect(execution.value).toEqual(serverCopy)
   })
+
+  it('stopping while the run is still being started (e.g. waiting for a Telegram message) abandons the request quietly', async () => {
+    let signal: AbortSignal | undefined
+    const fetchMock = vi.fn((_url: string, options?: RequestInit) => {
+      signal = options?.signal ?? undefined
+      return new Promise((_resolve, reject) => {
+        signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')))
+      })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const run = useWorkflowRun('wf', ref<Execution | null>(null))
+    const pending = run.execute()
+    expect(run.executing.value).toBe(true)
+    await run.cancel()
+    await expect(pending).resolves.toBeUndefined()
+    expect(signal?.aborted).toBe(true)
+    expect(run.executing.value).toBe(false)
+  })
+
+  it('stopping a started run asks the server to stop it; the run then ends as Canceled', async () => {
+    const fetchMock = vi.fn((url: string, options?: RequestInit) => {
+      if (url === '/rest/r8r/executions/e1/stop') return Promise.resolve({ ok: true, status: 204 })
+      if (options?.method === 'POST') return Promise.resolve({ ok: true, status: 202, json: async () => exec('e1', 'Running') })
+      return Promise.resolve({ ok: true, status: 200, json: async () => exec('e1', 'Canceled') })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const execution = ref<Execution | null>(null)
+    const run = useWorkflowRun('wf', execution)
+    await run.execute()
+    await run.cancel()
+    expect(fetchMock.mock.calls.some(([url, o]) => url === '/rest/r8r/executions/e1/stop' && o?.method === 'POST')).toBe(true)
+    await vi.advanceTimersByTimeAsync(2000)
+    expect(execution.value?.status).toBe('Canceled')
+    expect(run.executing.value).toBe(false)
+  })
 })

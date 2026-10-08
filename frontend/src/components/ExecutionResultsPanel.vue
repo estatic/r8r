@@ -20,6 +20,7 @@ function onHistorySelect(e: Event) {
           'text-green-600': execution.status === 'Success',
           'text-red-600': execution.status === 'Error',
           'text-gray-500': execution.status === 'Running',
+          'text-amber-600': execution.status === 'Canceled',
         }"
       >
         {{ execution.status }}

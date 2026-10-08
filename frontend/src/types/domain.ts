@@ -53,7 +53,7 @@ export interface Item {
   binary: unknown
 }
 
-export type ExecutionStatus = 'Running' | 'Success' | 'Error'
+export type ExecutionStatus = 'Running' | 'Success' | 'Error' | 'Canceled'
 export type ExecutionMode = 'Manual' | 'Webhook' | 'Schedule' | 'Telegram'
 
 export interface Execution {

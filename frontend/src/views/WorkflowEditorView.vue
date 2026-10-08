@@ -145,6 +145,15 @@ async function execute() {
   }
 }
 
+async function stopRun() {
+  actionError.value = ''
+  try {
+    await run.cancel()
+  } catch (e) {
+    actionError.value = messageFor(e, 'Failed to stop the execution.')
+  }
+}
+
 async function showHistory() {
   actionError.value = ''
   loadingHistory.value = true
@@ -186,6 +195,14 @@ async function showHistory() {
         @click="execute"
       >
         {{ executing ? 'Running…' : 'Execute' }}
+      </button>
+      <button
+        v-if="executing"
+        data-testid="stop-execution"
+        class="bg-red-600 text-white rounded px-3 py-1.5 text-sm"
+        @click="stopRun"
+      >
+        Stop
       </button>
       <button
         class="bg-gray-200 text-gray-800 rounded px-3 py-1.5 text-sm disabled:opacity-50"
