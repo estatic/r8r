@@ -1,10 +1,12 @@
 //! Retrieval building blocks (spec §6.8, plan 2.7): the embeddings,
 //! document loader and text splitter sub-nodes, the Simple Vector Store
-//! (`vectorStoreInMemory`) and the Postgres PGVector Store
-//! (`vectorStorePGVector`), as n8n 2.35.7 runs them. Embedding requests,
+//! (`vectorStoreInMemory`), the Postgres PGVector Store
+//! (`vectorStorePGVector`) and the Qdrant Vector Store (`vectorStoreQdrant`),
+//! as n8n 2.35.7 runs them. Embedding requests,
 //! document shapes, scores and ranking follow LangChain exactly
 //! (`OpenAIEmbeddings`, `MemoryVectorStore`, `ml-distance`'s cosine,
-//! `@langchain/community` 1.1.27's `PGVectorStore`).
+//! `@langchain/community` 1.1.27's `PGVectorStore`, `@langchain/qdrant`
+//! 1.0.1's `QdrantVectorStore`).
 
 use super::ai::record;
 use super::doc_loader::n8n_json_loader;
@@ -22,6 +24,7 @@ pub fn all() -> Vec<Box<dyn NodeType>> {
     vec![
         Box::new(VectorStoreInMemory),
         Box::new(VectorStorePgVector),
+        Box::new(VectorStoreQdrant),
         Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.embeddingsOpenAi")),
         Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.documentDefaultDataLoader")),
         Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.textSplitterRecursiveCharacterTextSplitter")),
@@ -355,16 +358,29 @@ async fn insert(ctx: &ExecCtx<'_>) -> NodeResult<NodeOutput> {
     Ok(vec![out])
 }
 
-/// `populateVectorStore` for one batch. PGVector (`PGVectorStore.fromDocuments`)
-/// ensures its table before embedding; the in-memory store embeds first.
+/// `populateVectorStore` for one batch, in each store's order of calls:
+/// PGVector (`PGVectorStore.fromDocuments`) ensures its table before
+/// embedding, Qdrant (`addVectors`) its collection after; the in-memory
+/// store just embeds.
 async fn populate(ctx: &ExecCtx<'_>, embeddings: &Embeddings<'_>, docs: &[Document], item: usize) -> NodeResult<()> {
     let texts: Vec<String> = docs.iter().map(|d| d.page_content.clone()).collect();
     if is_pgvector(ctx.node) {
         let store = PgVector::open(ctx, ctx.node, item).await?;
-        let vectors = embeddings.embed_documents(ctx, &texts).await?;
-        let result = store.add(docs, &vectors).await;
+        let result = match embeddings.embed_documents(ctx, &texts).await {
+            Ok(vectors) => store.add(docs, &vectors).await,
+            Err(e) => Err(e),
+        };
         store.pool.close().await;
         return result;
+    }
+    if ctx.node.node_type == QDRANT {
+        let store = Qdrant::open(ctx, ctx.node, item).await?;
+        let vectors = embeddings.embed_documents(ctx, &texts).await?;
+        if vectors.is_empty() {
+            return Ok(());
+        }
+        store.ensure_collection(ctx, embeddings).await?;
+        return store.add(ctx, docs, vectors).await;
     }
     let vectors = embeddings.embed_documents(ctx, &texts).await?;
     memory_add(&memory_key(ctx, item)?, docs, vectors, ctx.param_bool("clearStore", item, false)?);
@@ -379,23 +395,17 @@ async fn load(ctx: &ExecCtx<'_>) -> NodeResult<NodeOutput> {
         let prompt = ctx.param_str("prompt", i, "")?;
         let k = ctx.param_f64("topK", i, 4.0)? as usize;
         let with_metadata = ctx.param_bool("includeDocumentMetadata", i, true)?;
-        let hits = if is_pgvector(ctx.node) {
-            let filter = metadata_filter(ctx, ctx.node, i)?;
-            let store = PgVector::open(ctx, ctx.node, i).await?;
-            let result = match embeddings.embed_query(ctx, &prompt).await {
-                Ok(query) => store.search(&query, k, filter.as_ref()).await,
-                Err(e) => Err(e),
-            };
-            store.pool.close().await;
-            result?
-        } else {
-            if ctx.raw_param("options").and_then(|o| o.get("metadata")).is_some() {
-                return Err(NodeError::new("Metadata filters on the Simple Vector Store are not supported natively yet"));
-            }
-            let query = embeddings.embed_query(ctx, &prompt).await?;
-            memory_search(&memory_key(ctx, i)?, &query, k).into_iter().map(|(doc, score)| Hit { doc, score, id: None }).collect()
+        let filter = metadata_filter(ctx, ctx.node, i)?;
+        if filter.is_some() && ctx.node.node_type == format!("{LC}vectorStoreInMemory") {
+            return Err(NodeError::new("Metadata filters on the Simple Vector Store are not supported natively yet"));
+        }
+        let store = Store::open(ctx, ctx.node, &embeddings, i).await?;
+        let result = match embeddings.embed_query(ctx, &prompt).await {
+            Ok(query) => store.search(ctx, &embeddings, &query, k, filter.as_ref()).await,
+            Err(e) => Err(e),
         };
-        for hit in hits {
+        store.close().await;
+        for hit in result? {
             let mut document = Map::from_iter([("pageContent".to_string(), json!(hit.doc.page_content))]);
             if with_metadata {
                 document.insert("metadata".into(), Value::Object(hit.doc.metadata));
@@ -406,12 +416,56 @@ async fn load(ctx: &ExecCtx<'_>) -> NodeResult<NodeOutput> {
     Ok(vec![out])
 }
 
+/// A vector store as n8n's `getVectorStoreClient` hands it out.
+enum Store {
+    Memory(String),
+    Pg(PgVector),
+    Qdrant(Qdrant),
+}
+
+impl Store {
+    /// PGVector ensures its tables, Qdrant its collection
+    /// (`fromExistingCollection`).
+    async fn open(ctx: &ExecCtx<'_>, node: &Node, embeddings: &Embeddings<'_>, item: usize) -> NodeResult<Store> {
+        if is_pgvector(node) {
+            Ok(Store::Pg(PgVector::open(ctx, node, item).await?))
+        } else if node.node_type == QDRANT {
+            let q = Qdrant::open(ctx, node, item).await?;
+            q.ensure_collection(ctx, embeddings).await?;
+            Ok(Store::Qdrant(q))
+        } else if node.node_type == format!("{LC}vectorStoreInMemory") {
+            Ok(Store::Memory(memory_key_of(ctx, node, item)?))
+        } else {
+            Err(NodeError::new(format!("The vector store \"{}\" ({}) is not supported natively yet", node.name, node.node_type)))
+        }
+    }
+
+    /// `similaritySearchVectorWithScore`.
+    async fn search(&self, ctx: &ExecCtx<'_>, embeddings: &Embeddings<'_>, query: &[f64], k: usize, filter: Option<&Map<String, Value>>) -> NodeResult<Vec<Hit>> {
+        match self {
+            Store::Memory(key) => Ok(memory_search(key, query, k).into_iter().map(|(doc, score)| Hit { doc, score, id: None }).collect()),
+            Store::Pg(pg) => pg.search(query, k, filter).await,
+            Store::Qdrant(q) => {
+                q.ensure_collection(ctx, embeddings).await?;
+                q.search(ctx, query, k, filter).await
+            }
+        }
+    }
+
+    /// `releaseVectorStoreClient`.
+    async fn close(self) {
+        if let Store::Pg(pg) = self {
+            pg.pool.close().await;
+        }
+    }
+}
+
 /// A search result: LangChain's `[Document, score]`, with the document's
 /// `id` (PGVector sets it to the row's ID; in-memory documents have none).
 pub(super) struct Hit {
     pub doc: Document,
     pub score: f64,
-    pub id: Option<String>,
+    pub id: Option<Value>,
 }
 
 impl Hit {
@@ -419,7 +473,7 @@ impl Hit {
     pub fn to_json(&self) -> Value {
         let mut v = json!({"pageContent": self.doc.page_content, "metadata": self.doc.metadata});
         if let Some(id) = &self.id {
-            v["id"] = json!(id);
+            v["id"] = id.clone();
         }
         v
     }
@@ -680,7 +734,7 @@ impl PgVector {
                     Some(Value::Object(m)) => m,
                     _ => Map::new(),
                 };
-                Some(Hit { doc: Document { page_content: content?, metadata }, score: distance?, id: r.try_get::<Option<String>, _>("_id").ok().flatten() })
+                Some(Hit { doc: Document { page_content: content?, metadata }, score: distance?, id: r.try_get::<Option<String>, _>("_id").ok().flatten().map(Value::String) })
             })
             .collect())
     }
@@ -766,6 +820,179 @@ mod tests {
     }
 }
 
+// ---- Qdrant store ----------------------------------------------------------------------
+
+struct VectorStoreQdrant;
+
+const QDRANT: &str = "@n8n/n8n-nodes-langchain.vectorStoreQdrant";
+
+#[async_trait::async_trait]
+impl NodeType for VectorStoreQdrant {
+    fn type_name(&self) -> &'static str {
+        QDRANT
+    }
+
+    async fn execute(&self, ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
+        let mode = ctx.param_str("mode", 0, "retrieve")?;
+        match mode.as_str() {
+            "insert" => insert(ctx).await,
+            "load" => load(ctx).await,
+            "retrieve" | "retrieve-as-tool" => Err(NodeError::new(format!("\"{}\" in {mode} mode is a sub-node: connect it to a chain, agent or retriever", ctx.node.name))),
+            other => Err(NodeError::new(format!("The vector store mode \"{other}\" is not supported natively yet"))),
+        }
+    }
+}
+
+/// A failed Qdrant call, as the JS client's `ApiError` carries it.
+struct QdrantError {
+    status: u16,
+    status_text: String,
+    /// `data.status.error`, Qdrant's own explanation.
+    error: Option<String>,
+}
+
+impl QdrantError {
+    /// `normalizeVectorStoreError` on the client's `ApiError`.
+    fn into_node_error(self) -> NodeError {
+        NodeError::api(self.status_text.clone(), Some(self.status), self.error.or(Some(self.status_text)))
+    }
+}
+
+/// LangChain's `QdrantVectorStore` on n8n's `createQdrantClient`.
+pub(super) struct Qdrant {
+    /// `{scheme}://{host}:{port}`: the client keeps no path from the URL.
+    base: String,
+    api_key: String,
+    collection: String,
+    content_key: String,
+    metadata_key: String,
+    collection_config: Option<Value>,
+}
+
+impl Qdrant {
+    async fn open(ctx: &ExecCtx<'_>, node: &Node, item: usize) -> NodeResult<Qdrant> {
+        let collection = match ctx.resolve_value(&node.parameters["qdrantCollection"], item)? {
+            Value::Object(o) => o.get("value").and_then(Value::as_str).unwrap_or("").to_string(),
+            v => v.as_str().unwrap_or("").to_string(),
+        };
+        let o = ctx.resolve_value(&node.parameters["options"], item)?;
+        let key = |name: &str, default: &str| -> NodeResult<String> {
+            match &o[name] {
+                Value::Null => Ok(default.to_string()),
+                Value::String(s) if s.is_empty() => Ok(default.to_string()),
+                Value::String(s) => Ok(s.clone()),
+                _ => Err(NodeError::new(format!("Parameter \"{name}\" is not string"))),
+            }
+        };
+        let collection_config = match &o["collectionConfig"] {
+            Value::String(s) if !s.trim().is_empty() => Some(serde_json::from_str(s).map_err(|_| NodeError::new("Parameter 'options.collectionConfig' could not be parsed as JSON"))?),
+            Value::Object(m) => Some(Value::Object(m.clone())),
+            _ => None,
+        };
+        let (_, cred) = ctx.credentials_for(node, "qdrantApi").await?;
+        let raw = cred["qdrantUrl"].as_str().unwrap_or("");
+        let invalid = || NodeError::new(format!("Invalid Qdrant URL: {raw}. Please provide a valid URL with protocol (http/https)"));
+        let url = reqwest::Url::parse(raw).map_err(|_| invalid())?;
+        let host = url.host_str().ok_or_else(invalid)?;
+        let https = url.scheme() == "https";
+        let port = url.port().unwrap_or(if https { 443 } else { 80 });
+        let host = if host.contains(':') && !host.starts_with('[') { format!("[{host}]") } else { host.to_string() };
+        Ok(Qdrant {
+            base: format!("{}://{host}:{port}", if https { "https" } else { "http" }),
+            api_key: cred["apiKey"].as_str().unwrap_or("").to_string(),
+            collection,
+            content_key: key("contentPayloadKey", "content")?,
+            metadata_key: key("metadataPayloadKey", "metadata")?,
+            collection_config,
+        })
+    }
+
+    /// One REST call; `Ok` with the response's `result`.
+    async fn call(&self, ctx: &ExecCtx<'_>, method: reqwest::Method, segments: &[&str], query: Option<&str>, body: Option<Value>) -> NodeResult<Result<Value, QdrantError>> {
+        let mut url = reqwest::Url::parse(&self.base).map_err(|e| NodeError::new(format!("Invalid Qdrant URL: {e}")))?;
+        url.path_segments_mut().map_err(|_| NodeError::new("Invalid Qdrant URL"))?.extend(segments);
+        url.set_query(query);
+        super::check_ssrf(&url, ctx.config()).await.map_err(NodeError::new)?;
+        let mut req = ctx.services.http.request(method, url).header("api-key", &self.api_key);
+        if let Some(b) = body {
+            req = req.json(&b);
+        }
+        let resp = req.send().await.map_err(|e| NodeError::new(format!("The Qdrant server could not be reached: {}", e.without_url())))?;
+        let status = resp.status();
+        let json: Value = resp.json().await.unwrap_or(Value::Null);
+        if status.is_success() {
+            return Ok(Ok(json["result"].clone()));
+        }
+        Ok(Err(QdrantError {
+            status: status.as_u16(),
+            status_text: status.canonical_reason().unwrap_or("").to_string(),
+            error: json.pointer("/status/error").and_then(Value::as_str).map(String::from),
+        }))
+    }
+
+    /// `ensureCollection`: created when missing, from "Collection Config"
+    /// or as `{size: <dimensions of embedQuery("test")>, distance: Cosine}`.
+    async fn ensure_collection(&self, ctx: &ExecCtx<'_>, embeddings: &Embeddings<'_>) -> NodeResult<()> {
+        let list = self.call(ctx, reqwest::Method::GET, &["collections"], None, None).await?.map_err(QdrantError::into_node_error)?;
+        if list["collections"].as_array().into_iter().flatten().any(|c| c["name"].as_str() == Some(&self.collection)) {
+            return Ok(());
+        }
+        let config = match &self.collection_config {
+            Some(c) => c.clone(),
+            None => json!({"vectors": {"size": embeddings.embed_query(ctx, "test").await?.len(), "distance": "Cosine"}}),
+        };
+        self.call(ctx, reqwest::Method::PUT, &["collections", &self.collection], None, Some(config)).await?.map_err(QdrantError::into_node_error)?;
+        Ok(())
+    }
+
+    /// `addVectors`: one upsert of points with random UUIDs and
+    /// `{content, metadata}` payloads.
+    async fn add(&self, ctx: &ExecCtx<'_>, docs: &[Document], vectors: Vec<Vec<f64>>) -> NodeResult<()> {
+        let points: Vec<Value> = docs
+            .iter()
+            .zip(vectors)
+            .map(|(d, v)| {
+                let mut payload = Map::new();
+                payload.insert(self.content_key.clone(), json!(d.page_content));
+                payload.insert(self.metadata_key.clone(), Value::Object(d.metadata.clone()));
+                json!({"id": uuid::Uuid::new_v4().to_string(), "vector": v, "payload": payload})
+            })
+            .collect();
+        match self.call(ctx, reqwest::Method::PUT, &["collections", &self.collection, "points"], Some("wait=true"), Some(json!({"points": points}))).await? {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                let message = format!("{} {}: {}", e.status, e.status_text, e.error.as_deref().unwrap_or("undefined"));
+                Err(NodeError::api(message.clone(), None, Some(message)))
+            }
+        }
+    }
+
+    /// `similaritySearchVectorWithScore`: Qdrant's query API, scored by
+    /// the collection's metric (cosine similarity by default).
+    async fn search(&self, ctx: &ExecCtx<'_>, query: &[f64], k: usize, filter: Option<&Map<String, Value>>) -> NodeResult<Vec<Hit>> {
+        let mut body = json!({"query": query, "limit": k, "with_payload": [self.metadata_key, self.content_key], "with_vector": false});
+        if let Some(f) = filter {
+            body["filter"] = Value::Object(f.clone());
+        }
+        let result = self.call(ctx, reqwest::Method::POST, &["collections", &self.collection, "points", "query"], None, Some(body)).await?.map_err(QdrantError::into_node_error)?;
+        Ok(result["points"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|p| {
+                let payload = &p["payload"];
+                let page_content = match &payload[&self.content_key] {
+                    Value::String(s) => s.clone(),
+                    Value::Null => String::new(),
+                    other => other.to_string(),
+                };
+                let metadata = payload[&self.metadata_key].as_object().cloned().unwrap_or_default();
+                Hit { doc: Document { page_content, metadata }, score: p["score"].as_f64().unwrap_or(0.0), id: Some(p["id"].clone()) }
+            })
+            .collect())
+    }
+}
+
 // ---- retrieval -----------------------------------------------------------------------
 
 /// A similarity search on a vector store sub-node (retrieve modes): the
@@ -773,31 +1000,25 @@ mod tests {
 /// the store like n8n's logWrapper.
 pub(super) async fn store_search(ctx: &ExecCtx<'_>, store: &Node, query: &str, k: usize, item: usize) -> NodeResult<Vec<Hit>> {
     let started = now_ms();
-    let hits = if is_pgvector(store) {
-        let filter = metadata_filter(ctx, store, item)?;
-        let embeddings = load_embeddings(ctx, &store.name, item).await?;
-        let pg = PgVector::open(ctx, store, item).await;
-        let result = match pg {
-            Ok(pg) => {
-                let r = match embeddings.embed_query(ctx, query).await {
-                    Ok(vector) => pg.search(&vector, k, filter.as_ref()).await,
-                    Err(e) => Err(e),
-                };
-                pg.pool.close().await;
-                r
-            }
-            Err(e) => Err(e),
-        };
-        if let Err(e) = &result {
-            record(ctx, &store.name, "ai_vectorStore", json!({"query": query}), Err(e), started);
+    let embeddings = load_embeddings(ctx, &store.name, item).await?;
+    let filter = metadata_filter(ctx, store, item)?;
+    let result = match Store::open(ctx, store, &embeddings, item).await {
+        Ok(s) => {
+            let r = match embeddings.embed_query(ctx, query).await {
+                Ok(vector) => s.search(ctx, &embeddings, &vector, k, filter.as_ref()).await,
+                Err(e) => Err(e),
+            };
+            s.close().await;
+            r
         }
-        result?
-    } else if store.node_type == format!("{LC}vectorStoreInMemory") {
-        let embeddings = load_embeddings(ctx, &store.name, item).await?;
-        let vector = embeddings.embed_query(ctx, query).await?;
-        memory_search(&memory_key_of(ctx, store, item)?, &vector, k).into_iter().map(|(doc, score)| Hit { doc, score, id: None }).collect()
-    } else {
-        return Err(NodeError::new(format!("The vector store \"{}\" ({}) is not supported natively yet", store.name, store.node_type)));
+        Err(e) => Err(e),
+    };
+    let hits = match result {
+        Ok(hits) => hits,
+        Err(e) => {
+            record(ctx, &store.name, "ai_vectorStore", json!({"query": query}), Err(&e), started);
+            return Err(e);
+        }
     };
     let docs: Vec<Value> = hits.iter().map(Hit::to_json).collect();
     record(ctx, &store.name, "ai_vectorStore", json!({"query": query}), Ok(json!({"response": docs})), started);

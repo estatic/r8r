@@ -35,6 +35,7 @@ const OPT_IN_TAGS: &[&str] = &[
     "requires-rabbitmq",
     "requires-mqtt",
     "requires-kafka",
+    "requires-qdrant",
 ];
 
 #[tokio::main]

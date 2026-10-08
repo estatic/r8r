@@ -23,6 +23,7 @@ pub mod rabbitmq;
 pub mod redis;
 pub mod scaling;
 pub mod server;
+pub mod vector_stores;
 pub mod workflow;
 
 use cucumber::gherkin::Step;

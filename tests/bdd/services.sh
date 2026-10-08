@@ -57,6 +57,8 @@ mqtt() {
 }
 # Single-node KRaft broker, advertised on 127.0.0.1:9092.
 kafka() { run r8r-bdd-kafka -p 127.0.0.1:9092:9092 apache/kafka:3.8.0; }
+# Qdrant on its REST port, no API key (Qdrant Vector Store).
+qdrant() { run r8r-bdd-qdrant -p 127.0.0.1:6333:6333 qdrant/qdrant:v1.19.2; }
 
 # GreenMail: SMTP 3025 / IMAP 3143 (plain), users created on first login.
 imap() {
@@ -66,7 +68,7 @@ imap() {
 }
 
 if [ $# -eq 0 ]; then
-    set -- postgres redis mailpit mysql mongo ssh ftp mssql rabbitmq mqtt kafka imap
+    set -- postgres redis mailpit mysql mongo ssh ftp mssql rabbitmq mqtt kafka imap qdrant
 fi
 for service in "$@"; do
     "$service"

@@ -32,7 +32,7 @@ the ports and logins listed below.
 | --- | --- | --- |
 | `R8R_BIN` | the `r8r` binary Cargo builds | Binary under test |
 | `R8R_BDD_CONCURRENCY` | 8 | Scenarios run in parallel |
-| `R8R_BDD_INCLUDE` | – | Opt-in tags to add: `perf`, `slow`, `requires-redis`, `requires-postgres`, `requires-mysql`, `requires-mongodb`, `requires-mssql`, `requires-python-runner`, `requires-mailpit`, `requires-ssh`, `requires-ftp`, `requires-imap`, `requires-rabbitmq`, `requires-mqtt`, `requires-kafka` |
+| `R8R_BDD_INCLUDE` | – | Opt-in tags to add: `perf`, `slow`, `requires-redis`, `requires-postgres`, `requires-mysql`, `requires-mongodb`, `requires-mssql`, `requires-python-runner`, `requires-mailpit`, `requires-ssh`, `requires-ftp`, `requires-imap`, `requires-rabbitmq`, `requires-mqtt`, `requires-kafka`, `requires-qdrant` |
 | `R8R_BDD_REDIS_HOST` / `_PORT` | 127.0.0.1 / 6379 | Redis for `@requires-redis` |
 | `R8R_BDD_POSTGRES_URL` | `postgres://postgres:postgres@127.0.0.1:5432/postgres` | PostgreSQL for `@requires-postgres` and `R8R_BDD_STORAGE=postgres`; needs the pgvector extension (Docker `r8r-bdd-postgres` runs `pgvector/pgvector:pg16`) |
 | — | 127.0.0.1:3306, root/mysql, db `r8r` (Docker `r8r-bdd-mysql`) | MySQL for `@requires-mysql` |
@@ -46,6 +46,7 @@ the ports and logins listed below.
 | `R8R_BDD_RABBITMQ_HOST` / `_PORT` | 127.0.0.1 / 5672 | RabbitMQ guest/guest (Docker `r8r-bdd-rabbitmq`, management on :15672) for `@requires-rabbitmq` |
 | `R8R_BDD_MQTT_HOST` / `_PORT` | 127.0.0.1 / 1883 | Mosquitto, anonymous (Docker `r8r-bdd-mqtt`) for `@requires-mqtt` |
 | `R8R_BDD_KAFKA_HOST` / `_PORT` | 127.0.0.1 / 9092 | Kafka KRaft, PLAINTEXT (Docker `r8r-bdd-kafka`) for `@requires-kafka` |
+| `R8R_BDD_QDRANT_URL` | `http://127.0.0.1:6333` | Qdrant, no API key (Docker `r8r-bdd-qdrant`) for `@requires-qdrant`; scenarios put the same URL in their credentials |
 | `R8R_BDD_STORAGE` | sqlite | `postgres` runs every scenario with `DB_TYPE=postgresdb`, one schema per scenario |
 | `R8R_BDD_START_TIMEOUT` | 30 | Seconds a server may take to become ready |
 
