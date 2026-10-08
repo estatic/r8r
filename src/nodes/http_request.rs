@@ -44,6 +44,10 @@ impl Node for HttpRequestNode {
     fn description(&self) -> &'static str {
         "Makes an HTTP request to an external URL."
     }
+    fn credential_types(&self) -> &'static [&'static str] {
+        // Picked by `auth.type`: bearer, apiKey, basic.
+        &["bearerToken", "apiKeyHeader", "basicAuth"]
+    }
     fn category(&self) -> crate::node::NodeCategory {
         crate::node::NodeCategory::Action
     }

@@ -263,6 +263,37 @@ describe('NodeConfigPanel', () => {
     store.loaded = true
   }
 
+  describe('Credential section', () => {
+    async function withTypes(types: Record<string, string[]>) {
+      const { useNodeTypesStore } = await import('../stores/nodeTypes')
+      const store = useNodeTypesStore()
+      store.types = Object.entries(types).map(([type_name, credential_types]) => ({
+        type_name, display_name: type_name, icon: '', category: 'action', description: '', credential_types, output_ports: ['main'],
+      }))
+      store.loaded = true
+    }
+    const at = (node_type: string, parameters: Record<string, unknown> = {}): NodeInstance => ({ id: 'n', node_type, position: [0, 0], parameters, disabled: false })
+    const shown = (w: ReturnType<typeof mount>) => w.find('[data-testid="credential-section"]').exists()
+
+    it('is hidden for nodes that take no credential (Code, Loop, Set, ...)', async () => {
+      await withTypes({ 'core.code': [], 'core.loop': [], 'core.set': [] })
+      for (const type of ['core.code', 'core.loop', 'core.set']) {
+        expect(shown(mount(NodeConfigPanel, { props: { node: at(type) } }))).toBe(false)
+      }
+    })
+
+    it('is shown for nodes that take one', async () => {
+      await withTypes({ 'ai.agent': ['openaiApi'], 'core.httpRequest': ['bearerToken'] })
+      expect(shown(mount(NodeConfigPanel, { props: { node: at('ai.agent') } }))).toBe(true)
+      expect(shown(mount(NodeConfigPanel, { props: { node: at('core.httpRequest') } }))).toBe(true)
+    })
+
+    it('stays for a node that still holds a credential, so it can be removed', async () => {
+      await withTypes({ 'core.code': [] })
+      expect(shown(mount(NodeConfigPanel, { props: { node: at('core.code', { auth: { credential_id: 'old' } }) } }))).toBe(true)
+    })
+  })
+
   function agent(parameters: Record<string, unknown>): NodeInstance {
     return { id: 'a1', node_type: 'ai.agent', position: [0, 0], parameters: { model: 'm', user_message: 'hi', ...parameters }, disabled: false }
   }

@@ -10,6 +10,7 @@ import { CODE_EXAMPLES, type CodeLanguage } from '../canvas/codeExamples'
 import { buildFields, loadRows, type SetFieldRow } from '../canvas/setFields'
 import type { UpstreamSource } from '../canvas/inputData'
 import { useCredentialsStore } from '../stores/credentials'
+import { useNodeTypesStore } from '../stores/nodeTypes'
 
 // ai.agent reads `provider` from its parameters, but the credential type
 // already says which API it is for; fill it in when the user hasn't.
@@ -66,6 +67,15 @@ function loadCode(parameters: Record<string, unknown>) {
   const script = typeof parameters.script === 'string' ? parameters.script : CODE_EXAMPLES[language]
   return { language, script, writtenIn: language }
 }
+
+// Only nodes that take a credential show the picker (a node that still holds
+// one keeps it, so it can be removed). Until the types load, it shows.
+const nodeTypesStore = useNodeTypesStore()
+const takesCredential = computed(() => {
+  if (credentialId.value) return true
+  const meta = nodeTypesStore.types.find((t) => t.type_name === props.node?.node_type)
+  return !nodeTypesStore.loaded || !meta || meta.credential_types.length > 0
+})
 
 const isLoop = computed(() => props.node?.node_type === 'core.loop')
 const batchSize = ref<number | string>(1)
@@ -364,8 +374,8 @@ onBeforeUnmount(() => {
       </fieldset>
       <CodeSettings v-if="isCode" v-model="codeFields" :sources="inputSources" :node-labels="nodeLabels" />
       <SetFieldsEditor v-if="isSet" v-model="setRows" :sources="inputSources" :node-labels="nodeLabels" />
-      <div>
-        <label class="block text-sm text-gray-600 mb-1">Credential (for nodes that need auth)</label>
+      <div v-if="takesCredential" data-testid="credential-section">
+        <label class="block text-sm text-gray-600 mb-1">Credential</label>
         <CredentialPicker v-model="credentialId" :node-type="node.node_type" />
       </div>
       <details v-if="hasForm">
