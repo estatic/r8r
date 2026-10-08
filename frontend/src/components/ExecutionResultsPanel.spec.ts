@@ -21,6 +21,21 @@ describe('ExecutionResultsPanel', () => {
     expect(wrapper.text()).toContain('hello')
   })
 
+  it("shows a failed node's error as readable text, line by line, not as JSON", () => {
+    const error = "node code failed: TypeError: cannot read property 'deep' of undefined\n  at f (line 3:20)    return x.missing.deep;\n  at main code (line 5:9)    return [f({})];"
+    const failed: Execution = {
+      ...execution,
+      status: 'Error',
+      node_outputs: { code: [{ json: { error }, binary: {} }] },
+      node_runs: { code: { status: 'error', counts: {} } },
+    }
+    const wrapper = mount(ExecutionResultsPanel, { props: { execution: failed } })
+    const shown = wrapper.find('[data-testid="node-error"]')
+    expect(shown.text()).toBe(error)
+    expect(shown.text()).not.toContain('\\n')
+    expect(shown.classes()).toContain('whitespace-pre-wrap')
+  })
+
   it('renders nothing when there is no execution', () => {
     const wrapper = mount(ExecutionResultsPanel, { props: { execution: null } })
     expect(wrapper.text()).toBe('')

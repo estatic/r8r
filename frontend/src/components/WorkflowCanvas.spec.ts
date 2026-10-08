@@ -30,10 +30,13 @@ const NODE_TYPES = [
   { type_name: 'core.if', display_name: 'If', icon: '❓', category: 'flowControl', description: '', credential_types: [], output_ports: ['true', 'false'] },
 ]
 
-function stubFetch(nodeTypesResponse: unknown = NODE_TYPES, portsResponse: string[] = ['true', 'false']) {
+function stubFetch(nodeTypesResponse: unknown = NODE_TYPES, portsResponse: string[] = ['true', 'false'], tools: unknown[] = []) {
   vi.stubGlobal(
     'fetch',
     vi.fn((url: string) => {
+      if (url === '/rest/r8r/tools') {
+        return Promise.resolve({ ok: true, status: 200, json: async () => tools })
+      }
       if (url === '/rest/r8r/node-types') {
         return Promise.resolve({ ok: true, status: 200, json: async () => nodeTypesResponse })
       }
@@ -132,8 +135,128 @@ describe('WorkflowCanvas', () => {
     const nodes: NodeInstance[] = [{ id: 'a', node_type: 'core.manualTrigger', position: [0, 0], parameters: {}, disabled: false }]
     const wrapper = mount(WorkflowCanvas, { props: { nodes, connections: [] } })
     await flush()
-    expect(wrapper.text()).toContain('🖱️ Manual Trigger')
+    // A trigger is a triangle: its icon inside, its name below.
+    expect(wrapper.text()).toContain('🖱️')
+    expect(wrapper.text()).toContain('Manual Trigger')
     expect(wrapper.find('[title="core.manualTrigger"]').exists()).toBe(true)
+  })
+
+  it('draws triggers as starts, nodes nothing follows as ends, the rest as boxes', async () => {
+    stubFetch()
+    const nodes: NodeInstance[] = [
+      { id: 't', node_type: 'core.manualTrigger', position: [0, 0], parameters: {}, disabled: false },
+      { id: 'mid', node_type: 'core.if', position: [200, 0], parameters: {}, disabled: false },
+      { id: 'last', node_type: 'core.if', position: [400, 0], parameters: {}, disabled: false },
+    ]
+    const connections: Connection[] = [
+      { from_node: 't', from_output: 0, to_node: 'mid', to_input: 0, error: false },
+      { from_node: 'mid', from_output: 0, to_node: 'last', to_input: 0, error: false },
+    ]
+    const wrapper = mount(WorkflowCanvas, { props: { nodes, connections } })
+    await flush()
+    const shapes = wrapper.findAll('[data-shape]').map((w) => w.attributes('data-shape'))
+    expect(shapes).toEqual(['start', 'box', 'end'])
+    // Inputs come in on the left, outputs leave on the right; a start has no input.
+    const targets = wrapper.findAll('.vue-flow__handle.target')
+    expect(targets).toHaveLength(2)
+    expect(targets.every((h) => h.classes().includes('vue-flow__handle-left'))).toBe(true)
+    expect(wrapper.findAll('.vue-flow__handle.source').every((h) => h.classes().includes('vue-flow__handle-right'))).toBe(true)
+  })
+
+  it('marks each node with how it fared in the run on screen', async () => {
+    stubFetch()
+    const nodes: NodeInstance[] = [
+      { id: 'a', node_type: 'core.manualTrigger', position: [0, 0], parameters: {}, disabled: false },
+      { id: 'b', node_type: 'core.if', position: [200, 0], parameters: {}, disabled: false },
+      { id: 'c', node_type: 'core.if', position: [400, 0], parameters: {}, disabled: false },
+    ]
+    const wrapper = mount(WorkflowCanvas, { props: { nodes, connections: [] } })
+    await flush()
+    expect(wrapper.findAll('[data-run]')).toHaveLength(0) // no run shown: no colours
+    await wrapper.setProps({
+      execution: {
+        id: 'e', workflow_id: 'w', status: 'Running', mode: 'Manual', node_outputs: {}, started_at: '', finished_at: null,
+        node_runs: { a: { status: 'success', counts: { '0': 1 } }, b: { status: 'running', counts: {} } },
+      },
+    })
+    await flush()
+    expect(wrapper.findAll('[data-run]').map((w) => w.attributes('data-run'))).toEqual(['success', 'running', 'pending'])
+  })
+
+  describe('AI Agent node', () => {
+    const agentNode = (parameters: Record<string, unknown>): NodeInstance => ({ id: 'agent', node_type: 'ai.agent', position: [0, 0], parameters, disabled: false })
+    const ready = { model: 'llama3.1', user_message: 'hi' }
+
+    it('has chat model, memory and tool ports below it, chat model marked required', async () => {
+      stubFetch(NODE_TYPES, ['main'])
+      const wrapper = mount(WorkflowCanvas, { props: { nodes: [agentNode(ready)], connections: [] } })
+      await flush()
+      const ports = wrapper.findAll('[data-testid^="aux-port-"]')
+      expect(ports.map((p) => p.attributes('data-testid'))).toEqual(['aux-port-model', 'aux-port-memory', 'aux-port-tools'])
+      expect(ports.map((p) => p.find('[data-testid="aux-label"]').text())).toEqual(['chat model*', 'memory', 'tool'])
+      expect(ports[0].find('[data-testid="aux-required"]').exists()).toBe(true)
+      expect(ports[1].find('[data-testid="aux-required"]').exists()).toBe(false)
+      // A box, even with nothing after it, so the ports have an edge to hang from.
+      expect(wrapper.find('[data-shape]').attributes('data-shape')).toBe('box')
+    })
+
+    it("marks a port that's set up", async () => {
+      stubFetch(NODE_TYPES, ['main'])
+      const wrapper = mount(WorkflowCanvas, { props: { nodes: [agentNode({ ...ready, memory: { enabled: true } })], connections: [] } })
+      await flush()
+      expect(wrapper.find('[data-testid="aux-port-model"]').attributes('data-set')).toBe('true')
+      expect(wrapper.find('[data-testid="aux-port-memory"]').attributes('data-set')).toBe('true')
+      expect(wrapper.find('[data-testid="aux-port-tools"]').attributes('data-set')).toBe('false')
+    })
+
+    it("shows the chosen model's name under its port, which glows green", async () => {
+      stubFetch(NODE_TYPES, ['main'])
+      const wrapper = mount(WorkflowCanvas, { props: { nodes: [agentNode(ready)], connections: [] } })
+      await flush()
+      const port = wrapper.find('[data-testid="aux-port-model"]')
+      expect(port.find('[data-testid="aux-detail"]').text()).toBe('llama3.1')
+      expect(port.find('button').attributes('style')).toContain('box-shadow')
+    })
+
+    it('shows no model name or glow before a model is chosen', async () => {
+      stubFetch(NODE_TYPES, ['main'])
+      const wrapper = mount(WorkflowCanvas, { props: { nodes: [agentNode({ user_message: 'hi' })], connections: [] } })
+      await flush()
+      const port = wrapper.find('[data-testid="aux-port-model"]')
+      expect(port.find('[data-testid="aux-detail"]').exists()).toBe(false)
+      expect(port.find('button').attributes('style') ?? '').not.toContain('box-shadow')
+    })
+
+    it('opens the matching settings from a port', async () => {
+      stubFetch(NODE_TYPES, ['main'])
+      const wrapper = mount(WorkflowCanvas, { props: { nodes: [agentNode(ready)], connections: [] } })
+      await flush()
+      await wrapper.find('[data-testid="aux-port-memory"] button').trigger('click')
+      expect(wrapper.emitted('aux-open')).toEqual([['agent', 'memory']])
+    })
+
+    it('shows the red "!" when the agent is set up but its last run failed', async () => {
+      stubFetch(NODE_TYPES, ['main'])
+      const wrapper = mount(WorkflowCanvas, { props: { nodes: [agentNode(ready)], connections: [] } })
+      await flush()
+      expect(wrapper.find('[data-testid="needs-setup"]').exists()).toBe(false)
+      await wrapper.setProps({
+        execution: { id: 'e', workflow_id: 'w', status: 'Error', mode: 'Manual', started_at: '', finished_at: null,
+          node_outputs: { agent: [{ json: { error: 'model not found' }, binary: {} }] }, node_runs: { agent: { status: 'error', counts: {} } } },
+      })
+      await flush()
+      expect(wrapper.find('[data-testid="needs-setup"]').attributes('title')).toContain('model not found')
+    })
+  })
+
+  it("hangs an AI Agent's tools below it", async () => {
+    stubFetch(NODE_TYPES, ['main'], [{ id: 't1', name: 'Weather' }, { id: 't2', name: 'Search' }])
+    const nodes: NodeInstance[] = [
+      { id: 'agent', node_type: 'ai.agent', position: [0, 0], parameters: { model: 'm', user_message: 'u', tool_ids: ['t1', 't2'] }, disabled: false },
+    ]
+    const wrapper = mount(WorkflowCanvas, { props: { nodes, connections: [] } })
+    await flush()
+    expect(wrapper.find('[data-testid="agent-tools"]').text()).toBe('🔧 Weather🔧 Search')
   })
 
   it('marks an AI Agent that is missing its model or message as needing setup', async () => {
@@ -146,7 +269,8 @@ describe('WorkflowCanvas', () => {
     await flush()
     const badges = wrapper.findAll('[data-testid="needs-setup"]')
     expect(badges).toHaveLength(1)
-    expect(badges[0].text()).toBe('Needs setup')
+    expect(badges[0].text()).toBe('!')
+    expect(badges[0].attributes('title')).toContain('Model')
   })
 
   it('falls back to the raw type_name for an unknown node type', async () => {

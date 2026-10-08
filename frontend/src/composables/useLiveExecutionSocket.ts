@@ -4,9 +4,9 @@ import type { Execution, ExecutionStatus, Item } from '../types/domain'
 
 export type LiveExecutionEvent = { execution_id: string; workflow_id: string } & (
   | { type: 'node_started'; node_id: string }
-  | { type: 'node_finished'; node_id: string; items: Item[] }
-  | { type: 'node_errored'; node_id: string; error: string }
-  | { type: 'node_skipped'; node_id: string; items: Item[] }
+  | { type: 'node_finished'; node_id: string; items: Item[]; counts?: Record<string, number> }
+  | { type: 'node_errored'; node_id: string; error: string; counts?: Record<string, number> }
+  | { type: 'node_skipped'; node_id: string; items: Item[]; counts?: Record<string, number> }
   | { type: 'execution_finished'; status: ExecutionStatus }
 )
 
@@ -39,19 +39,26 @@ export function useLiveExecutionSocket(workflowId: string): LiveExecutionSocket 
     }
 
     const updated = execution.value!
+    const runs = (updated.node_runs ??= {})
     switch (event.type) {
       case 'node_finished':
       case 'node_skipped':
         updated.node_outputs[event.node_id] = event.items
+        runs[event.node_id] = {
+          status: event.type === 'node_finished' ? 'success' : 'skipped',
+          counts: event.counts ?? { '0': event.items.length },
+        }
         break
       case 'node_errored':
         updated.node_outputs[event.node_id] = [{ json: { error: event.error }, binary: {} }]
+        runs[event.node_id] = { status: 'error', counts: event.counts ?? {} }
         break
       case 'execution_finished':
         updated.status = event.status
         updated.finished_at = new Date().toISOString()
         break
       case 'node_started':
+        runs[event.node_id] = { status: 'running', counts: {} }
         break
     }
   }

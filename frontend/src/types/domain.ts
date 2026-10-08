@@ -62,8 +62,18 @@ export interface Execution {
   status: ExecutionStatus
   mode: ExecutionMode
   node_outputs: Record<string, Item[]>
+  /** How each node that ran ended, and the items per output ("0", "1", ..., "error"). */
+  node_runs?: Record<string, NodeRun>
   started_at: string
   finished_at: string | null
+}
+
+/** "running" only exists client-side, between node_started and its end. */
+export type NodeRunStatus = 'running' | 'success' | 'error' | 'skipped'
+
+export interface NodeRun {
+  status: NodeRunStatus
+  counts: Record<string, number>
 }
 
 export interface CredentialSummary {
@@ -118,4 +128,11 @@ export interface AgentFields {
   user_message: string
   max_iterations: number | string
   tool_ids: string[]
+  /** Chat memory: remember the last `memory_window` exchanges per session. */
+  memory_enabled: boolean
+  memory_window: number | string
+  /** Empty: each Telegram chat is its own conversation. */
+  memory_session_key: string
+  /** Whether the node already had `memory` (so turning it off keeps it, off). */
+  memory_stored: boolean
 }

@@ -1,8 +1,14 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, ref, watch } from 'vue'
 import type { AgentFields, NodeInstance, NodeSettings } from '../types/domain'
 import CredentialPicker from './CredentialPicker.vue'
 import AgentSettings from './AgentSettings.vue'
+import TelegramTriggerSettings from './TelegramTriggerSettings.vue'
+import SetFieldsEditor from './SetFieldsEditor.vue'
+import CodeSettings from './CodeSettings.vue'
+import { CODE_EXAMPLES, type CodeLanguage } from '../canvas/codeExamples'
+import { buildFields, loadRows, type SetFieldRow } from '../canvas/setFields'
+import type { UpstreamSource } from '../canvas/inputData'
 import { useCredentialsStore } from '../stores/credentials'
 
 // ai.agent reads `provider` from its parameters, but the credential type
@@ -12,8 +18,18 @@ const PROVIDER_BY_CREDENTIAL_TYPE: Record<string, string> = {
   anthropicApi: 'anthropic',
 }
 
-const props = defineProps<{ node: NodeInstance | null }>()
-const emit = defineEmits<{ update: [node: NodeInstance]; close: [] }>()
+const props = withDefaults(
+  defineProps<{
+    node: NodeInstance | null
+    /** The data reaching the node, for the Set form's picker. */
+    inputSources?: UpstreamSource[]
+    nodeLabels?: Record<string, string>
+    /** A section to bring into view (an agent port was clicked); `at` makes repeats count. */
+    focus?: { section: string; at: number } | null
+  }>(),
+  { inputSources: () => [], nodeLabels: () => ({}) },
+)
+const emit = defineEmits<{ update: [node: NodeInstance]; close: []; delete: [nodeId: string] }>()
 
 const paramsText = ref('')
 const error = ref('')
@@ -28,8 +44,42 @@ const waitMs = ref<number | string>(1000)
 const timeoutMs = ref<number | string>('')
 
 const isAgent = computed(() => props.node?.node_type === 'ai.agent')
-const emptyAgentFields = (): AgentFields => ({ provider: '', model: '', system_prompt: '', user_message: '', max_iterations: 10, tool_ids: [] })
+const emptyAgentFields = (): AgentFields => ({
+  provider: '',
+  model: '',
+  system_prompt: '',
+  user_message: '',
+  max_iterations: 10,
+  tool_ids: [],
+  memory_enabled: false,
+  memory_window: 5,
+  memory_session_key: '',
+  memory_stored: false,
+})
 const agentFields = ref<AgentFields>(emptyAgentFields())
+
+const isCode = computed(() => props.node?.node_type === 'core.code')
+const codeFields = ref<{ language: CodeLanguage; script: string; writtenIn: CodeLanguage }>({ language: 'javaScript', script: '', writtenIn: 'javaScript' })
+function loadCode(parameters: Record<string, unknown>) {
+  // Nodes saved before the language choice are JavaScript.
+  const language: CodeLanguage = parameters.language === 'python' ? 'python' : 'javaScript'
+  const script = typeof parameters.script === 'string' ? parameters.script : CODE_EXAMPLES[language]
+  return { language, script, writtenIn: language }
+}
+
+const isSet = computed(() => props.node?.node_type === 'core.set')
+const setRows = ref<SetFieldRow[]>([])
+// Nodes with their own form keep the raw JSON under "Advanced".
+const hasForm = computed(() => isAgent.value || isSet.value || isCode.value)
+
+const isTelegramTrigger = computed(() => props.node?.node_type === 'telegram.trigger')
+// Nothing chosen yet means every update, as the trigger treats it.
+const telegramUpdates = ref<string[]>(['*'])
+function loadTelegramUpdates(parameters: Record<string, unknown>): string[] {
+  const u = parameters.updates
+  const chosen = Array.isArray(u) ? u.filter((v): v is string => typeof v === 'string') : []
+  return chosen.length > 0 ? chosen : ['*']
+}
 const inlineToolCount = computed(() => {
   const tools = props.node?.parameters?.tools
   return Array.isArray(tools) ? tools.length : 0
@@ -45,8 +95,40 @@ function loadAgentFields(parameters: Record<string, unknown>): AgentFields {
     user_message: str('user_message'),
     max_iterations: typeof parameters.max_iterations === 'number' ? parameters.max_iterations : 10,
     tool_ids: Array.isArray(ids) ? ids.filter((v): v is string => typeof v === 'string') : [],
+    ...loadMemory(parameters.memory),
   }
 }
+
+function loadMemory(memory: unknown): Pick<AgentFields, 'memory_enabled' | 'memory_window' | 'memory_session_key' | 'memory_stored'> {
+  const m = memory && typeof memory === 'object' ? (memory as Record<string, unknown>) : null
+  return {
+    memory_enabled: m?.enabled === true,
+    memory_window: typeof m?.window === 'number' ? m.window : 5,
+    memory_session_key: typeof m?.session_key === 'string' ? m.session_key : '',
+    memory_stored: m !== null,
+  }
+}
+
+// Everything the form holds, to tell whether it differs from the node.
+const formSnapshot = computed(() =>
+  JSON.stringify([
+    paramsText.value,
+    disabled.value,
+    continueOnFail.value,
+    retryEnabled.value,
+    maxTries.value,
+    waitMs.value,
+    timeoutMs.value,
+    credentialId.value,
+    agentFields.value,
+    codeFields.value.language,
+    codeFields.value.script,
+    telegramUpdates.value,
+    setRows.value,
+  ]),
+)
+const loaded = ref('')
+const pending = computed(() => props.node !== null && formSnapshot.value !== loaded.value)
 
 watch(
   () => props.node,
@@ -63,6 +145,15 @@ watch(
       const auth = node.parameters?.auth as { credential_id?: string } | undefined
       credentialId.value = auth?.credential_id ?? null
       agentFields.value = node.node_type === 'ai.agent' ? loadAgentFields(node.parameters ?? {}) : emptyAgentFields()
+      telegramUpdates.value = loadTelegramUpdates(node.parameters ?? {})
+      setRows.value = node.node_type === 'core.set' ? loadRows(node.parameters?.fields) : []
+      if (node.node_type === 'core.code') codeFields.value = loadCode(node.parameters ?? {})
+      loaded.value = formSnapshot.value
+      // A new Code node shows its example: save it, so the node can run as shown.
+      if (node.node_type === 'core.code' && typeof node.parameters?.script !== 'string') {
+        loaded.value = ''
+        nextTick(() => scheduleAutoApply())
+      }
     }
   },
   { immediate: true },
@@ -86,14 +177,14 @@ function buildSettings(): NodeSettings | string {
   return { retry, timeout_ms: timeout, continue_on_fail: continueOnFail.value }
 }
 
-function apply() {
-  if (!props.node) return
+/** The node as the form describes it, or why it can't be. */
+function build(): NodeInstance | string {
+  if (!props.node) return 'No node.'
   let parsed: Record<string, unknown>
   try {
     parsed = JSON.parse(paramsText.value)
   } catch {
-    error.value = 'Parameters must be valid JSON.'
-    return
+    return 'Parameters must be valid JSON.'
   }
   if (credentialId.value) {
     parsed.auth = { ...((parsed.auth as object) ?? {}), credential_id: credentialId.value }
@@ -103,28 +194,38 @@ function apply() {
     if (Object.keys(rest).length > 0) parsed.auth = rest
     else delete parsed.auth
   }
+  if (isCode.value) {
+    parsed.language = codeFields.value.language
+    parsed.script = codeFields.value.script
+  }
+  if (isSet.value) {
+    const built = buildFields(setRows.value)
+    if ('error' in built) return built.error
+    // Don't invent an empty `fields` the node never had.
+    if (setRows.value.length > 0 || 'fields' in parsed) parsed.fields = built.fields
+  }
+  if (isTelegramTrigger.value) {
+    if (telegramUpdates.value.length === 0) return 'Choose at least one update type, or All updates.'
+    parsed.updates = [...telegramUpdates.value]
+  }
   if (isAgent.value) {
     // The form is the source of truth for the fields it shows; everything
     // else in the JSON (inline tools, api_base_url, ...) is kept as typed.
     const f = agentFields.value
     const iterations = Number(f.max_iterations)
-    if (!f.model.trim()) {
-      error.value = 'Model is required.'
-      return
-    }
-    if (!f.user_message.trim()) {
-      error.value = 'User message is required.'
-      return
-    }
-    if (!Number.isInteger(iterations) || iterations < 1 || iterations > 50) {
-      error.value = 'Max iterations must be between 1 and 50.'
-      return
-    }
+    if (!f.model.trim()) return 'Model is required.'
+    if (!f.user_message.trim()) return 'User message is required.'
+    if (!Number.isInteger(iterations) || iterations < 1 || iterations > 50) return 'Max iterations must be between 1 and 50.'
     parsed.model = f.model.trim()
     parsed.user_message = f.user_message
     parsed.system_prompt = f.system_prompt
     parsed.max_iterations = iterations
     parsed.tool_ids = f.tool_ids
+    if (f.memory_enabled || f.memory_stored) {
+      const window = Number(f.memory_window)
+      if (f.memory_enabled && (!Number.isInteger(window) || window < 1 || window > 50)) return 'Exchanges to remember must be between 1 and 50.'
+      parsed.memory = { enabled: f.memory_enabled, window: Number.isInteger(window) ? window : 5, session_key: f.memory_session_key.trim() }
+    }
     if (f.provider) parsed.provider = f.provider
     else delete parsed.provider
   }
@@ -134,13 +235,69 @@ function apply() {
     if (provider) parsed.provider = provider
   }
   const settings = buildSettings()
-  if (typeof settings === 'string') {
-    error.value = settings
-    return
-  }
-  emit('update', { ...props.node, parameters: parsed, disabled: disabled.value, settings })
-  error.value = ''
+  if (typeof settings === 'string') return settings
+  return { ...props.node, parameters: parsed, disabled: disabled.value, settings }
 }
+
+/** Applies the form to the node now; false (with the reason shown) if it's invalid. */
+function apply(): boolean {
+  const node = build()
+  if (typeof node === 'string') {
+    error.value = node
+    return false
+  }
+  error.value = ''
+  loaded.value = formSnapshot.value
+  emit('update', node)
+  return true
+}
+
+/** Applies pending edits, if any. Callers stop (Save, Execute, ...) on false. */
+function flush(): boolean {
+  return pending.value ? apply() : true
+}
+defineExpose({ flush })
+
+const panelBody = ref<HTMLElement | null>(null)
+watch(
+  () => props.focus,
+  async (focus) => {
+    if (!focus) return
+    await nextTick()
+    const el = panelBody.value?.querySelector<HTMLElement>(`[data-section="${focus.section}"]`)
+    if (!el) return
+    el.scrollIntoView({ behavior: 'smooth', block: 'center' })
+    el.classList.add('ring-2', 'ring-blue-400', 'rounded')
+    setTimeout(() => el.classList.remove('ring-2', 'ring-blue-400'), 1500)
+  },
+  { immediate: true },
+)
+
+// Edits apply by themselves shortly after typing stops; an invalid state
+// waits quietly (no error mid-typing) until flush() or Apply reports it.
+let autoApply: ReturnType<typeof setTimeout> | null = null
+function scheduleAutoApply() {
+  if (autoApply) clearTimeout(autoApply)
+  if (!pending.value) return
+  autoApply = setTimeout(() => {
+    autoApply = null
+    if (pending.value && typeof build() !== 'string') apply()
+  }, 500)
+}
+watch(formSnapshot, scheduleAutoApply)
+
+// Unapplied edits (an invalid one, or within the last half second) also
+// make the browser ask before a reload or close.
+function onBeforeUnload(e: BeforeUnloadEvent) {
+  if (!pending.value) return
+  e.preventDefault()
+  e.returnValue = ''
+}
+window.addEventListener('beforeunload', onBeforeUnload)
+onBeforeUnmount(() => {
+  if (autoApply) clearTimeout(autoApply)
+  window.removeEventListener('beforeunload', onBeforeUnload)
+})
 </script>
 
 <template>
@@ -152,7 +309,7 @@ function apply() {
       </div>
       <button class="text-gray-400" @click="emit('close')">&times;</button>
     </header>
-    <div class="p-4 flex-1 overflow-auto space-y-3">
+    <div ref="panelBody" class="p-4 flex-1 overflow-auto space-y-3">
       <label class="flex items-center gap-2 text-sm">
         <input v-model="disabled" type="checkbox" />
         Disabled
@@ -183,11 +340,14 @@ function apply() {
         </label>
       </fieldset>
       <AgentSettings v-if="isAgent" v-model="agentFields" :inline-tool-count="inlineToolCount" />
+      <TelegramTriggerSettings v-if="isTelegramTrigger" v-model="telegramUpdates" />
+      <CodeSettings v-if="isCode" v-model="codeFields" :sources="inputSources" :node-labels="nodeLabels" />
+      <SetFieldsEditor v-if="isSet" v-model="setRows" :sources="inputSources" :node-labels="nodeLabels" />
       <div>
         <label class="block text-sm text-gray-600 mb-1">Credential (for nodes that need auth)</label>
         <CredentialPicker v-model="credentialId" :node-type="node.node_type" />
       </div>
-      <details v-if="isAgent">
+      <details v-if="hasForm">
         <summary class="text-sm text-gray-600 cursor-pointer">Advanced (JSON)</summary>
         <textarea v-model="paramsText" rows="14" class="mt-1 w-full border rounded px-2 py-1.5 font-mono text-xs"></textarea>
       </details>
@@ -199,7 +359,17 @@ function apply() {
       <p v-if="error" role="alert" class="text-sm text-red-600">{{ error }}</p>
     </div>
     <footer class="px-4 py-3 border-t">
-      <button class="w-full bg-blue-600 text-white rounded py-2 text-sm" @click="apply">Apply</button>
+      <div class="flex gap-2">
+        <button
+          data-testid="delete-node"
+          class="border border-red-300 text-red-700 rounded px-3 py-2 text-sm hover:bg-red-50"
+          title="Delete this node and its connections (Delete key)"
+          @click="emit('delete', node.id)"
+        >
+          Delete
+        </button>
+        <button class="flex-1 bg-blue-600 text-white rounded py-2 text-sm" @click="apply">Apply</button>
+      </div>
     </footer>
   </aside>
 </template>
