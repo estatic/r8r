@@ -100,3 +100,33 @@ Feature: Simple Vector Store with OpenAI embeddings
       {"input": ["Cats purr", "Dogs bark"]}
       """
     And the node "Splitter" has run data on the "ai_textSplitter" connection
+
+  Scenario: A metadata filter in the workflow JSON is ignored, as the node has no such option
+    n8n only reads parameters the node describes, and the Simple Vector
+    Store's load mode has no options.
+    Given a workflow with nodes:
+      | name       | type                   | parameters                                                                                                                                                                 |
+      | Start      | manualTrigger          |                                                                                                                                                                            |
+      | Insert     | lc.vectorStoreInMemory | {"mode": "insert", "memoryKey": {"__rl": true, "mode": "list", "value": "bdd_filter"}, "clearStore": true}                                                                  |
+      | Once       | limit                  | {"maxItems": 1}                                                                                                                                                            |
+      | Loader     | lc.documentDefaultDataLoader | {"options": {}}                                                                                                                                                      |
+      | Search     | lc.vectorStoreInMemory | {"mode": "load", "prompt": "feline", "memoryKey": {"__rl": true, "mode": "list", "value": "bdd_filter"}, "options": {"metadata": {"metadataValues": [{"name": "kind", "value": "pet"}]}}} |
+      | Embeddings | lc.embeddingsOpenAi    | {"options": {}}                                                                                                                                                            |
+    And the node "Embeddings" uses the "openAiApi" credential "Mock OpenAI"
+    And the connections:
+      """
+      Start -> Insert -> Once -> Search
+      Embeddings -[ai_embedding]-> Insert
+      Embeddings -[ai_embedding]-> Search
+      Loader -[ai_document]-> Insert
+      """
+    And the trigger outputs the items:
+      """
+      [{"text": "Cats purr"}]
+      """
+    When I execute the workflow
+    Then the execution succeeds
+    And the node "Search" outputs:
+      """
+      [{"document": {"pageContent": "Cats purr", "metadata": {"source": "blob", "blobType": "application/json", "loc": {"lines": {"from": 1, "to": 1}}}}, "score": 0.9938837341719244}]
+      """

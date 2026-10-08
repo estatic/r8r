@@ -1019,7 +1019,7 @@ fn load_tools<'a>(ctx: &'a ExecCtx<'_>, item: usize) -> NodeResult<Vec<Tool<'a>>
                 return Err(NodeError::new(format!("The Code Tool \"{}\" uses Python, which is not supported natively yet", node.name)));
             }
             ToolKind::Code { description: p["description"].as_str().unwrap_or("").to_string(), code: node.parameters["jsCode"].as_str().unwrap_or("").to_string(), schema: code_tool_schema(node, &p)? }
-        } else if [format!("{LC}vectorStoreInMemory"), format!("{LC}vectorStorePGVector"), format!("{LC}vectorStoreQdrant"), format!("{LC}vectorStorePinecone")].contains(&node.node_type) && node.parameters["mode"].as_str() == Some("retrieve-as-tool") {
+        } else if [format!("{LC}vectorStoreInMemory"), format!("{LC}vectorStorePGVector"), format!("{LC}vectorStoreQdrant"), format!("{LC}vectorStorePinecone"), format!("{LC}vectorStoreSupabase")].contains(&node.node_type) && node.parameters["mode"].as_str() == Some("retrieve-as-tool") {
             let p = ctx.resolve_value(&node.parameters, item)?;
             if node.type_version < 1.3 {
                 name = p["toolName"].as_str().unwrap_or("").to_string();
@@ -1441,7 +1441,7 @@ impl Tool<'_> {
                 let query = args["input"].as_str().map(String::from).or_else(|| args.as_str().map(String::from)).unwrap_or_default();
                 // Each hit as a text content block holding the document JSON;
                 // the model gets the block list as JSON text, as from n8n.
-                let blocks: Vec<Value> = match super::ai_vector::store_search(ctx, self.node, &query, *k, 0).await {
+                let blocks: Vec<Value> = match super::ai_vector::store_search(ctx, self.node, &query, *k, 0, false).await {
                     Ok(hits) => hits
                         .iter()
                         .map(|h| {

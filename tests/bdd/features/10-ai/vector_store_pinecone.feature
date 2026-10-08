@@ -227,3 +227,55 @@ Feature: Pinecone Vector Store with OpenAI embeddings
     And the node "Search" failed with an error containing "The API key you provided was rejected while calling http://127.0.0.1"
     And the node "Search" failed with an error containing "/indexes/locked-index. Please check your configuration values and try again."
     And the execution data does not contain "pc-test-123"
+
+  Scenario: Update mode replaces a vector under its ID
+    Each input item is read whole as JSON and must give one document,
+    which is embedded and upserted under the item's ID.
+    Given a workflow with nodes:
+      | name       | type                   | parameters                                                                                                    |
+      | Start      | manualTrigger          |                                                                                                               |
+      | Update     | lc.vectorStorePinecone | {"mode": "update", "pineconeIndex": {"__rl": true, "mode": "list", "value": "bdd-index"}, "id": "={{ $json.id }}"} |
+      | Embeddings | lc.embeddingsOpenAi    | {"options": {}}                                                                                               |
+    And the node "Embeddings" uses the "openAiApi" credential "Mock OpenAI"
+    And the node "Update" uses the "pineconeApi" credential "Mock Pinecone"
+    And the connections:
+      """
+      Start -> Update
+      Embeddings -[ai_embedding]-> Update
+      """
+    And the trigger outputs the items:
+      """
+      [{"id": 7, "text": "Cats purr"}]
+      """
+    When I execute the workflow
+    Then the execution succeeds
+    And the node "Update" outputs:
+      """
+      [{"metadata": {"source": "blob", "blobType": "application/json"}, "pageContent": "Cats purr"}]
+      """
+    And the last request to "/vectors/upsert" had a JSON body matching:
+      """
+      {"vectors": [{"id": 7, "values": [1, 0, 0], "metadata": {"source": "blob", "blobType": "application/json", "text": "Cats purr"}}], "namespace": ""}
+      """
+
+  Scenario: Update mode needs exactly one document per item
+    Given a workflow with nodes:
+      | name       | type                   | parameters                                                                                              |
+      | Start      | manualTrigger          |                                                                                                         |
+      | Update     | lc.vectorStorePinecone | {"mode": "update", "pineconeIndex": {"__rl": true, "mode": "list", "value": "bdd-index"}, "id": "id-cats"} |
+      | Embeddings | lc.embeddingsOpenAi    | {"options": {}}                                                                                         |
+    And the node "Embeddings" uses the "openAiApi" credential "Mock OpenAI"
+    And the node "Update" uses the "pineconeApi" credential "Mock Pinecone"
+    And the connections:
+      """
+      Start -> Update
+      Embeddings -[ai_embedding]-> Update
+      """
+    And the trigger outputs the items:
+      """
+      [{"text": "Cats purr", "more": "Dogs bark"}]
+      """
+    When I execute the workflow
+    Then the execution fails
+    And the node "Update" failed with an error containing "Single document per item expected"
+    And the mock embeddings API received 0 requests

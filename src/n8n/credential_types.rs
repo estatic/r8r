@@ -200,6 +200,16 @@ pub fn all() -> Vec<CredentialType> {
             fields: vec![f("apiKey", "API Key", true, true, json!(""))],
         },
         CredentialType {
+            name: "supabaseApi",
+            display_name: "Supabase API",
+            fields: vec![f("host", "Host", false, true, json!("")), f("serviceRole", "Service Role Secret", true, true, json!(""))],
+        },
+        CredentialType {
+            name: "cohereApi",
+            display_name: "Cohere API",
+            fields: vec![f("apiKey", "API Key", true, true, json!("")), f("url", "Base URL", false, false, json!("https://api.cohere.ai"))],
+        },
+        CredentialType {
             name: "mistralCloudApi",
             display_name: "Mistral Cloud API",
             fields: vec![f("apiKey", "API Key", true, true, json!("")), f("url", "Base URL", false, false, json!("https://api.mistral.ai/v1"))],

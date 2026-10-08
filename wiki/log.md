@@ -50,3 +50,7 @@ Operations:
 ## [2026-10-08] query | Plan 2.7: Qdrant Vector Store (qdrantApi credential, collection auto-create, payload keys, Qdrant filters, tool point IDs), new @requires-qdrant BDD tag; full suite 982/982, qdrant feature 4/4 on r8r and n8n 2.35.7
 
 ## [2026-10-08] query | Plan 2.7: Pinecone Vector Store (pineconeApi credential, index check, namespaces, flattened metadata, PINECONE_CONTROLLER_HOST for tests); full suite 987/987, pinecone feature 5/5 on r8r and n8n 2.35.7 (fetch redirect preload)
+
+## [2026-10-08] query | Plan 2.7: Supabase Vector Store (supabaseApi credential, PostgREST upsert + match_documents RPC, n8n/LangChain error texts); the four planned external vector stores are done; full suite 993/993, supabase feature 6/6 on r8r and n8n 2.35.7
+
+## [2026-10-08] query | Plan 2.7: Reranker Cohere (cohereApi, CO_API_URL for tests), update mode for Pinecone/Supabase, Simple Vector Store ignores undeclared filter; n8n preload renamed to n8n-api-redirect.cjs; full suite 1001/1001, touched AI features 23/23 on r8r and n8n 2.35.7

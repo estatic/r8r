@@ -43,6 +43,8 @@ pub fn default_type_version(node_type: &str) -> Value {
         "vectorStorePGVector" => json!(1.3),
         "vectorStoreQdrant" => json!(1.3),
         "vectorStorePinecone" => json!(1.3),
+        "vectorStoreSupabase" => json!(1.3),
+        "rerankerCohere" => json!(1),
         "documentDefaultDataLoader" => json!(1.1),
         "chainRetrievalQa" => json!(1.7),
         "toolCode" => json!(1.3),

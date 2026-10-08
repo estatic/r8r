@@ -1,13 +1,14 @@
 //! Retrieval building blocks (spec §6.8, plan 2.7): the embeddings,
 //! document loader and text splitter sub-nodes, the Simple Vector Store
 //! (`vectorStoreInMemory`), the Postgres PGVector Store
-//! (`vectorStorePGVector`), the Qdrant Vector Store (`vectorStoreQdrant`)
-//! and the Pinecone Vector Store (`vectorStorePinecone`), as n8n 2.35.7
-//! runs them. Embedding requests,
+//! (`vectorStorePGVector`), the Qdrant Vector Store (`vectorStoreQdrant`),
+//! the Pinecone Vector Store (`vectorStorePinecone`) and the Supabase Vector
+//! Store (`vectorStoreSupabase`), as n8n 2.35.7 runs them. Embedding requests,
 //! document shapes, scores and ranking follow LangChain exactly
 //! (`OpenAIEmbeddings`, `MemoryVectorStore`, `ml-distance`'s cosine,
 //! `@langchain/community` 1.1.27's `PGVectorStore`, `@langchain/qdrant`
-//! 1.0.1's `QdrantVectorStore`, `@langchain/pinecone` 1.0.1's `PineconeStore`).
+//! 1.0.1's `QdrantVectorStore`, `@langchain/pinecone` 1.0.1's `PineconeStore`,
+//! `SupabaseVectorStore`).
 
 use super::ai::record;
 use super::doc_loader::n8n_json_loader;
@@ -27,11 +28,13 @@ pub fn all() -> Vec<Box<dyn NodeType>> {
         Box::new(VectorStorePgVector),
         Box::new(VectorStoreQdrant),
         Box::new(VectorStorePinecone),
+        Box::new(VectorStoreSupabase),
         Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.embeddingsOpenAi")),
         Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.documentDefaultDataLoader")),
         Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.textSplitterRecursiveCharacterTextSplitter")),
         Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.textSplitterCharacterTextSplitter")),
         Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.retrieverVectorStore")),
+        Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.rerankerCohere")),
     ]
 }
 
@@ -326,6 +329,7 @@ impl NodeType for VectorStoreInMemory {
         match mode.as_str() {
             "insert" => insert(ctx).await,
             "load" => load(ctx).await,
+            "update" => update(ctx).await,
             "retrieve" | "retrieve-as-tool" => Err(NodeError::new(format!("\"{}\" in {mode} mode is a sub-node: connect it to a chain, agent or retriever", ctx.node.name))),
             other => Err(NodeError::new(format!("The vector store mode \"{other}\" is not supported natively yet"))),
         }
@@ -384,11 +388,16 @@ async fn populate(ctx: &ExecCtx<'_>, embeddings: &Embeddings<'_>, docs: &[Docume
         store.ensure_collection(ctx, embeddings).await?;
         return store.add(ctx, docs, vectors).await;
     }
+    if ctx.node.node_type == SUPABASE {
+        let store = Supabase::open(ctx, ctx.node, item).await?;
+        let vectors = embeddings.embed_documents(ctx, &texts).await?;
+        return store.add(ctx, docs, vectors, None).await;
+    }
     if ctx.node.node_type == PINECONE {
         let store = Pinecone::open(ctx, ctx.node, item).await?;
         store.prepare_insert(ctx).await?;
         let vectors = embeddings.embed_documents(ctx, &texts).await?;
-        return store.add(ctx, docs, vectors).await;
+        return store.add(ctx, docs, vectors, None).await;
     }
     let vectors = embeddings.embed_documents(ctx, &texts).await?;
     memory_add(&memory_key(ctx, item)?, docs, vectors, ctx.param_bool("clearStore", item, false)?);
@@ -404,21 +413,62 @@ async fn load(ctx: &ExecCtx<'_>) -> NodeResult<NodeOutput> {
         let k = ctx.param_f64("topK", i, 4.0)? as usize;
         let with_metadata = ctx.param_bool("includeDocumentMetadata", i, true)?;
         let filter = metadata_filter(ctx, ctx.node, i)?;
-        if filter.is_some() && ctx.node.node_type == format!("{LC}vectorStoreInMemory") {
-            return Err(NodeError::new("Metadata filters on the Simple Vector Store are not supported natively yet"));
-        }
         let store = Store::open(ctx, ctx.node, &embeddings, i).await?;
         let result = match embeddings.embed_query(ctx, &prompt).await {
             Ok(query) => store.search(ctx, &embeddings, &query, k, filter.as_ref()).await,
             Err(e) => Err(e),
         };
         store.close().await;
-        for hit in result? {
+        let mut hits = result?;
+        if ctx.param_bool("useReranker", i, false)? && !hits.is_empty() {
+            hits = rerank(ctx, ctx.node, hits, &prompt, i, false).await?;
+        }
+        for hit in hits {
             let mut document = Map::from_iter([("pageContent".to_string(), json!(hit.doc.page_content))]);
             if with_metadata {
                 document.insert("metadata".into(), Value::Object(hit.doc.metadata));
             }
             out.push(Item::new(Map::from_iter([("document".to_string(), Value::Object(document)), ("score".to_string(), json!(hit.score))])).paired(i));
+        }
+    }
+    Ok(vec![out])
+}
+
+/// `handleUpdateOperation` (Pinecone, Supabase): each item read whole as
+/// JSON (the store node has no loader options, so n8n's defaults apply),
+/// which must give exactly one document, re-added under the item's "ID".
+async fn update(ctx: &ExecCtx<'_>) -> NodeResult<NodeOutput> {
+    if ![PINECONE, SUPABASE].contains(&ctx.node.node_type.as_str()) {
+        return Err(NodeError::new("Update operation is not implemented for this Vector Store"));
+    }
+    let embeddings = load_embeddings(ctx, &ctx.node.name, 0).await?;
+    let mut out = Vec::new();
+    for i in 0..ctx.input().len() {
+        // As n8n passes it on: an expression's value keeps its type.
+        let id = match ctx.resolve_value(&ctx.node.parameters["id"], i)? {
+            Value::Object(o) if o.contains_key("__rl") => o.get("value").cloned().unwrap_or(json!("")),
+            Value::Null => json!(""),
+            other => other,
+        };
+        let docs = super::doc_loader::n8n_json_loader(&ctx.input()[i].json, "allInputData", &Value::Null, "", None).map_err(NodeError::new)?;
+        if docs.len() != 1 {
+            return Err(NodeError::new("Single document per item expected"));
+        }
+        for d in &docs {
+            out.push(Item::new(Map::from_iter([("metadata".to_string(), Value::Object(d.metadata.clone())), ("pageContent".to_string(), json!(d.page_content))])).paired(i));
+        }
+        let texts: Vec<String> = docs.iter().map(|d| d.page_content.clone()).collect();
+        let ids = [id];
+        if ctx.node.node_type == PINECONE {
+            // The namespace option isn't shown in update mode.
+            let mut store = Pinecone::open(ctx, ctx.node, i).await?;
+            store.namespace = String::new();
+            let vectors = embeddings.embed_documents(ctx, &texts).await?;
+            store.add(ctx, &docs, vectors, Some(&ids)).await?;
+        } else {
+            let store = Supabase::open(ctx, ctx.node, i).await?;
+            let vectors = embeddings.embed_documents(ctx, &texts).await?;
+            store.add(ctx, &docs, vectors, Some(&ids)).await?;
         }
     }
     Ok(vec![out])
@@ -430,6 +480,7 @@ enum Store {
     Pg(PgVector),
     Qdrant(Qdrant),
     Pinecone(Pinecone),
+    Supabase(Supabase),
 }
 
 impl Store {
@@ -444,6 +495,8 @@ impl Store {
             Ok(Store::Qdrant(q))
         } else if node.node_type == PINECONE {
             Ok(Store::Pinecone(Pinecone::open(ctx, node, item).await?))
+        } else if node.node_type == SUPABASE {
+            Ok(Store::Supabase(Supabase::open(ctx, node, item).await?))
         } else if node.node_type == format!("{LC}vectorStoreInMemory") {
             Ok(Store::Memory(memory_key_of(ctx, node, item)?))
         } else {
@@ -461,6 +514,7 @@ impl Store {
                 q.search(ctx, query, k, filter).await
             }
             Store::Pinecone(p) => p.search(ctx, query, k, filter).await,
+            Store::Supabase(sb) => sb.search(ctx, query, k, filter).await,
         }
     }
 
@@ -492,8 +546,13 @@ impl Hit {
 }
 
 /// `getMetadataFiltersValues`: the "Metadata Filter" option as a
-/// name → value object, else the `searchFilterJson` option.
+/// name → value object, else the `searchFilterJson` option. The Simple
+/// Vector Store has no options, so n8n's `getNodeParameter` never returns
+/// any for it, even when the workflow JSON holds some.
 fn metadata_filter(ctx: &ExecCtx<'_>, node: &Node, item: usize) -> NodeResult<Option<Map<String, Value>>> {
+    if node.node_type == format!("{LC}vectorStoreInMemory") {
+        return Ok(None);
+    }
     let options = ctx.resolve_value(&node.parameters["options"], item)?;
     if let Some(values) = options.pointer("/metadata/metadataValues").and_then(Value::as_array) {
         if !values.is_empty() {
@@ -531,6 +590,7 @@ impl NodeType for VectorStorePgVector {
         match mode.as_str() {
             "insert" => insert(ctx).await,
             "load" => load(ctx).await,
+            "update" => update(ctx).await,
             "retrieve" | "retrieve-as-tool" => Err(NodeError::new(format!("\"{}\" in {mode} mode is a sub-node: connect it to a chain, agent or retriever", ctx.node.name))),
             other => Err(NodeError::new(format!("The vector store mode \"{other}\" is not supported natively yet"))),
         }
@@ -849,6 +909,7 @@ impl NodeType for VectorStoreQdrant {
         match mode.as_str() {
             "insert" => insert(ctx).await,
             "load" => load(ctx).await,
+            "update" => update(ctx).await,
             "retrieve" | "retrieve-as-tool" => Err(NodeError::new(format!("\"{}\" in {mode} mode is a sub-node: connect it to a chain, agent or retriever", ctx.node.name))),
             other => Err(NodeError::new(format!("The vector store mode \"{other}\" is not supported natively yet"))),
         }
@@ -1022,6 +1083,7 @@ impl NodeType for VectorStorePinecone {
         match mode.as_str() {
             "insert" => insert(ctx).await,
             "load" => load(ctx).await,
+            "update" => update(ctx).await,
             "retrieve" | "retrieve-as-tool" => Err(NodeError::new(format!("\"{}\" in {mode} mode is a sub-node: connect it to a chain, agent or retriever", ctx.node.name))),
             other => Err(NodeError::new(format!("The vector store mode \"{other}\" is not supported natively yet"))),
         }
@@ -1137,10 +1199,18 @@ impl Pinecone {
         Ok(())
     }
 
-    /// `addVectors`: random UUIDs, flattened metadata plus the text under
-    /// `text`, upserted 100 at a time.
-    async fn add(&self, ctx: &ExecCtx<'_>, docs: &[Document], vectors: Vec<Vec<f64>>) -> NodeResult<()> {
-        let records: Vec<Value> = docs.iter().zip(vectors).map(|(d, v)| json!({"id": uuid::Uuid::new_v4().to_string(), "values": v, "metadata": pinecone_metadata(&d.metadata, &d.page_content)})).collect();
+    /// `addVectors`: the given IDs or random UUIDs, flattened metadata plus
+    /// the text under `text`, upserted 100 at a time.
+    async fn add(&self, ctx: &ExecCtx<'_>, docs: &[Document], vectors: Vec<Vec<f64>>, ids: Option<&[Value]>) -> NodeResult<()> {
+        let records: Vec<Value> = docs
+            .iter()
+            .zip(vectors)
+            .enumerate()
+            .map(|(i, (d, v))| {
+                let id = ids.and_then(|ids| ids.get(i).cloned()).unwrap_or_else(|| json!(uuid::Uuid::new_v4().to_string()));
+                json!({"id": id, "values": v, "metadata": pinecone_metadata(&d.metadata, &d.page_content)})
+            })
+            .collect();
         let host = self.host(ctx).await?;
         for chunk in records.chunks(100) {
             self.call(ctx, reqwest::Method::POST, &format!("{host}/vectors/upsert"), Some(json!({"vectors": chunk, "namespace": self.namespace}))).await?;
@@ -1241,12 +1311,184 @@ mod pinecone_tests {
     }
 }
 
+// ---- Supabase store --------------------------------------------------------------------
+
+struct VectorStoreSupabase;
+
+const SUPABASE: &str = "@n8n/n8n-nodes-langchain.vectorStoreSupabase";
+
+#[async_trait::async_trait]
+impl NodeType for VectorStoreSupabase {
+    fn type_name(&self) -> &'static str {
+        SUPABASE
+    }
+
+    async fn execute(&self, ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
+        let mode = ctx.param_str("mode", 0, "retrieve")?;
+        match mode.as_str() {
+            "insert" => insert(ctx).await,
+            "load" => load(ctx).await,
+            "update" => update(ctx).await,
+            "retrieve" | "retrieve-as-tool" => Err(NodeError::new(format!("\"{}\" in {mode} mode is a sub-node: connect it to a chain, agent or retriever", ctx.node.name))),
+            other => Err(NodeError::new(format!("The vector store mode \"{other}\" is not supported natively yet"))),
+        }
+    }
+}
+
+/// A PostgREST error as postgrest-js reports it: the JSON body (or
+/// `{message: <body>}`), with the HTTP status.
+struct PostgrestError {
+    body: Value,
+    status: u16,
+    status_text: String,
+}
+
+impl PostgrestError {
+    /// A field as JavaScript would interpolate it (`undefined`, `null`).
+    fn js(&self, key: &str) -> String {
+        match self.body.get(key) {
+            None => "undefined".into(),
+            Some(Value::Null) => "null".into(),
+            Some(Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+        }
+    }
+}
+
+/// LangChain's `SupabaseVectorStore` on supabase-js 2.50 (PostgREST under
+/// `{host}/rest/v1`, the service role key as `apikey` and bearer token).
+pub(super) struct Supabase {
+    rest: reqwest::Url,
+    key: String,
+    table: String,
+    query_name: String,
+}
+
+impl Supabase {
+    async fn open(ctx: &ExecCtx<'_>, node: &Node, item: usize) -> NodeResult<Supabase> {
+        let table = match ctx.resolve_value(&node.parameters["tableName"], item)? {
+            Value::Object(o) => o.get("value").and_then(Value::as_str).unwrap_or("").to_string(),
+            v => v.as_str().unwrap_or("").to_string(),
+        };
+        let o = ctx.resolve_value(&node.parameters["options"], item)?;
+        let (_, cred) = ctx.credentials_for(node, "supabaseApi").await?;
+        let host = cred["host"].as_str().unwrap_or("");
+        if host.is_empty() {
+            return Err(NodeError::new("supabaseUrl is required."));
+        }
+        // `new URL('rest/v1', ensureTrailingSlash(host))`.
+        let base = reqwest::Url::parse(&format!("{}/", host.trim_end_matches('/'))).map_err(|_| NodeError::new("Invalid supabaseUrl: Must be a valid HTTP or HTTPS URL."))?;
+        let rest = base.join("rest/v1").map_err(|e| NodeError::new(e.to_string()))?;
+        Ok(Supabase {
+            rest,
+            key: cred["serviceRole"].as_str().unwrap_or("").to_string(),
+            table: if table.is_empty() { "documents".into() } else { table },
+            query_name: o["queryName"].as_str().filter(|q| !q.is_empty()).unwrap_or("match_documents").to_string(),
+        })
+    }
+
+    async fn post(&self, ctx: &ExecCtx<'_>, segments: &[&str], query: &[(&str, &str)], prefer: Option<&str>, body: Value) -> NodeResult<Result<Value, PostgrestError>> {
+        let mut url = self.rest.clone();
+        url.path_segments_mut().map_err(|_| NodeError::new("Invalid supabaseUrl"))?.extend(segments);
+        if !query.is_empty() {
+            url.query_pairs_mut().extend_pairs(query);
+        }
+        super::check_ssrf(&url, ctx.config()).await.map_err(NodeError::new)?;
+        let mut req = ctx.services.http.post(url).header("apikey", &self.key).bearer_auth(&self.key).header("Content-Profile", "public").json(&body);
+        if let Some(p) = prefer {
+            req = req.header("Prefer", p);
+        }
+        let resp = match req.send().await {
+            Ok(r) => r,
+            Err(e) => return Ok(Err(PostgrestError { body: json!({"message": format!("FetchError: {}", e.without_url()), "details": "", "hint": "", "code": ""}), status: 0, status_text: String::new() })),
+        };
+        let status = resp.status();
+        let text = resp.text().await.unwrap_or_default();
+        if status.is_success() {
+            return Ok(Ok(serde_json::from_str(&text).unwrap_or(Value::Null)));
+        }
+        let body = match serde_json::from_str::<Value>(&text) {
+            // postgrest-js: a JSON array on 404 counts as an empty result.
+            Ok(Value::Array(_)) if status.as_u16() == 404 => return Ok(Ok(json!([]))),
+            Ok(v) => v,
+            Err(_) if status.as_u16() == 404 && text.is_empty() => return Ok(Ok(Value::Null)),
+            Err(_) => json!({"message": text}),
+        };
+        Ok(Err(PostgrestError { body, status: status.as_u16(), status_text: status.canonical_reason().unwrap_or("").to_string() }))
+    }
+
+    /// `addVectors` (rows of content/embedding/metadata, led by `id` when
+    /// IDs are given, 500 per upsert), with n8n's "Table … not found" for
+    /// PostgREST's message-less 404.
+    async fn add(&self, ctx: &ExecCtx<'_>, docs: &[Document], vectors: Vec<Vec<f64>>, ids: Option<&[Value]>) -> NodeResult<()> {
+        let rows: Vec<Value> = docs
+            .iter()
+            .zip(vectors)
+            .enumerate()
+            .map(|(i, (d, v))| {
+                let mut row = Map::new();
+                if let Some(id) = ids.and_then(|ids| ids.get(i)) {
+                    row.insert("id".into(), id.clone());
+                }
+                row.insert("content".into(), json!(d.page_content));
+                row.insert("embedding".into(), json!(v));
+                row.insert("metadata".into(), Value::Object(d.metadata.clone()));
+                Value::Object(row)
+            })
+            .collect();
+        let columns = if ids.is_some() { "\"id\",\"content\",\"embedding\",\"metadata\"" } else { "\"content\",\"embedding\",\"metadata\"" };
+        for chunk in rows.chunks(500) {
+            let query = [("columns", columns), ("select", "*")];
+            if let Err(e) = self.post(ctx, &[&self.table], &query, Some("resolution=merge-duplicates,return=representation"), Value::Array(chunk.to_vec())).await? {
+                let message = format!("Error inserting: {} {} {}", e.js("message"), e.status, e.status_text);
+                if message == "Error inserting: undefined 404 Not Found" {
+                    return Err(NodeError::new(format!("Table {} not found", self.table)).describe("Please check that the table exists in your vector store"));
+                }
+                return Err(NodeError::new(message));
+            }
+        }
+        Ok(())
+    }
+
+    /// `_searchSupabase`: the match function over RPC with the filter
+    /// (always sent, `{}` when none) and `match_count`; scored by its
+    /// `similarity`.
+    async fn search(&self, ctx: &ExecCtx<'_>, query: &[f64], k: usize, filter: Option<&Map<String, Value>>) -> NodeResult<Vec<Hit>> {
+        let body = json!({"query_embedding": query, "filter": filter.cloned().unwrap_or_default(), "match_count": k});
+        let rows = match self.post(ctx, &["rpc", &self.query_name], &[], None, body).await? {
+            Ok(rows) => rows,
+            Err(e) => {
+                let message = format!("Error searching for documents: {} {} {}", e.js("code"), e.js("message"), e.js("details"));
+                return Err(NodeError::api(message.clone(), None, Some(message)));
+            }
+        };
+        Ok(rows
+            .as_array()
+            .into_iter()
+            .flatten()
+            .map(|r| {
+                let page_content = match &r["content"] {
+                    Value::String(s) => s.clone(),
+                    Value::Null => String::new(),
+                    other => other.to_string(),
+                };
+                let metadata = r["metadata"].as_object().cloned().unwrap_or_default();
+                Hit { doc: Document { page_content, metadata }, score: r["similarity"].as_f64().unwrap_or(f64::NAN), id: None }
+            })
+            .collect())
+    }
+}
+
 // ---- retrieval -----------------------------------------------------------------------
 
 /// A similarity search on a vector store sub-node (retrieve modes): the
 /// query embedded with the store's own embeddings sub-node, recorded on
 /// the store like n8n's logWrapper.
-pub(super) async fn store_search(ctx: &ExecCtx<'_>, store: &Node, query: &str, k: usize, item: usize) -> NodeResult<Vec<Hit>> {
+/// With the store's "Rerank Results" on, the hits go through its reranker
+/// sub-node; `keep_relevance` leaves `relevanceScore` in their metadata, as
+/// the retriever's `ContextualCompressionRetriever` does (the tool moves it
+/// into the score).
+pub(super) async fn store_search(ctx: &ExecCtx<'_>, store: &Node, query: &str, k: usize, item: usize, keep_relevance: bool) -> NodeResult<Vec<Hit>> {
     let started = now_ms();
     let embeddings = load_embeddings(ctx, &store.name, item).await?;
     let filter = metadata_filter(ctx, store, item)?;
@@ -1270,7 +1512,108 @@ pub(super) async fn store_search(ctx: &ExecCtx<'_>, store: &Node, query: &str, k
     };
     let docs: Vec<Value> = hits.iter().map(Hit::to_json).collect();
     record(ctx, &store.name, "ai_vectorStore", json!({"query": query}), Ok(json!({"response": docs})), started);
+    if ctx.resolve_value(&store.parameters["useReranker"], item)?.as_bool().unwrap_or(false) && !hits.is_empty() {
+        return rerank(ctx, store, hits, query, item, keep_relevance).await;
+    }
     Ok(hits)
+}
+
+// ---- reranker ------------------------------------------------------------------------
+
+/// The `ai_reranker` sub-node of `store`: LangChain's `CohereRerank`
+/// (`@langchain/cohere` 1.0.1 on cohere-ai 7.14), which sends the
+/// documents' text to `POST /v1/rerank` and returns the `topN` documents
+/// in Cohere's order, each with `metadata.relevanceScore`. The SDK always
+/// calls `https://api.cohere.com`; r8r also reads `CO_API_URL`.
+async fn rerank(ctx: &ExecCtx<'_>, store: &Node, hits: Vec<Hit>, query: &str, item: usize, keep_relevance: bool) -> NodeResult<Vec<Hit>> {
+    let node = sub_node(ctx, &store.name, "ai_reranker").ok_or_else(|| NodeError::new("A Reranker sub-node must be connected and enabled"))?;
+    if node.node_type != format!("{LC}rerankerCohere") {
+        return Err(NodeError::new(format!("The reranker \"{}\" ({}) is not supported natively yet", node.name, node.node_type)));
+    }
+    let started = now_ms();
+    let p = ctx.resolve_value(&node.parameters, item)?;
+    let model = p["modelName"].as_str().filter(|m| !m.is_empty()).unwrap_or("rerank-v3.5").to_string();
+    let top_n = p.get("topN").cloned().filter(|v| v.is_number()).unwrap_or(json!(3));
+    let (_, cred) = ctx.credentials_for(node, "cohereApi").await?;
+    let api_key = cred["apiKey"].as_str().unwrap_or("").to_string();
+    let docs: Vec<Value> = hits.iter().map(Hit::to_json).collect();
+    let input = json!({"query": query, "documents": docs});
+    let result = cohere_rerank(ctx, &api_key, &model, &top_n, query, &hits).await;
+    let order = match result {
+        Ok(order) => order,
+        Err(e) => {
+            record(ctx, &node.name, "ai_reranker", input, Err(&e), started);
+            return Err(e);
+        }
+    };
+    let reranked: Vec<Hit> = order
+        .into_iter()
+        .filter_map(|(index, relevance)| {
+            let h = hits.get(index)?;
+            let mut metadata = h.doc.metadata.clone();
+            metadata.insert("relevanceScore".into(), json!(relevance));
+            Some(Hit { doc: Document { page_content: h.doc.page_content.clone(), metadata }, score: relevance, id: h.id.clone() })
+        })
+        .collect();
+    let response: Vec<Value> = reranked.iter().map(Hit::to_json).collect();
+    record(ctx, &node.name, "ai_reranker", input, Ok(json!({"response": response})), started);
+    Ok(reranked
+        .into_iter()
+        .map(|mut h| {
+            if !keep_relevance {
+                h.doc.metadata.shift_remove("relevanceScore");
+            }
+            h
+        })
+        .collect())
+}
+
+/// cohere-ai's `client.rerank`: `(index, relevance_score)` pairs, or the
+/// SDK's error (`UnauthorizedError\nStatus code: 401\nBody: …`).
+async fn cohere_rerank(ctx: &ExecCtx<'_>, api_key: &str, model: &str, top_n: &Value, query: &str, hits: &[Hit]) -> NodeResult<Vec<(usize, f64)>> {
+    let base = std::env::var("CO_API_URL").ok().filter(|u| !u.trim().is_empty()).unwrap_or_else(|| "https://api.cohere.com".into());
+    let url = reqwest::Url::parse(&format!("{}/v1/rerank", base.trim_end_matches('/'))).map_err(|e| NodeError::new(format!("Invalid Cohere URL: {e}")))?;
+    super::check_ssrf(&url, ctx.config()).await.map_err(NodeError::new)?;
+    let documents: Vec<&str> = hits.iter().map(|h| h.doc.page_content.as_str()).collect();
+    let body = json!({"model": model, "query": query, "documents": documents, "top_n": top_n});
+    let resp = ctx
+        .services
+        .http
+        .post(url)
+        .bearer_auth(api_key)
+        .header("X-Fern-Language", "JavaScript")
+        .header("X-Fern-SDK-Name", "cohere-ai")
+        .header("X-Fern-SDK-Version", "7.14.0")
+        .json(&body)
+        .send()
+        .await
+        .map_err(|e| NodeError::new(format!("The Cohere API could not be reached: {}", e.without_url())))?;
+    let status = resp.status();
+    let text = resp.text().await.unwrap_or_default();
+    if !status.is_success() {
+        let body = serde_json::from_str::<Value>(&text).unwrap_or(Value::String(text));
+        let name = match status.as_u16() {
+            400 => Some("BadRequestError"),
+            401 => Some("UnauthorizedError"),
+            403 => Some("ForbiddenError"),
+            404 => Some("NotFoundError"),
+            422 => Some("UnprocessableEntityError"),
+            429 => Some("TooManyRequestsError"),
+            499 => Some("ClientClosedRequestError"),
+            500 => Some("InternalServerError"),
+            501 => Some("NotImplementedError"),
+            503 => Some("ServiceUnavailableError"),
+            504 => Some("GatewayTimeoutError"),
+            _ => None,
+        };
+        let mut lines: Vec<String> = name.map(String::from).into_iter().collect();
+        lines.push(format!("Status code: {}", status.as_u16()));
+        lines.push(format!("Body: {}", serde_json::to_string_pretty(&body).unwrap_or_default()));
+        let message = lines.join("\n").replace(api_key, "***");
+        return Err(NodeError::api(message.clone(), Some(status.as_u16()), Some(message)));
+    }
+    let json: Value = serde_json::from_str(&text).unwrap_or(Value::Null);
+    Ok(json["results"].as_array().into_iter().flatten().filter_map(|r| Some((r["index"].as_u64()? as usize, r["relevance_score"].as_f64().unwrap_or(0.0)))).collect())
 }
 
 /// The documents an `ai_retriever` sub-node (Vector Store Retriever)
@@ -1282,5 +1625,5 @@ pub(super) async fn retrieve(ctx: &ExecCtx<'_>, item: usize, query: &str) -> Nod
     }
     let k = ctx.resolve_value(&retriever.parameters["topK"], item)?.as_f64().unwrap_or(4.0) as usize;
     let store = sub_node(ctx, &retriever.name, "ai_vectorStore").ok_or_else(|| NodeError::new("A Vector Store sub-node must be connected to the retriever"))?;
-    Ok(store_search(ctx, store, query, k, item).await?.into_iter().map(|h| h.doc).collect())
+    Ok(store_search(ctx, store, query, k, item, true).await?.into_iter().map(|h| h.doc).collect())
 }
