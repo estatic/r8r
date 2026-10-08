@@ -11,7 +11,7 @@ use crate::n8n::workflow::Node;
 use serde_json::{json, Map, Value};
 
 pub fn all() -> Vec<Box<dyn NodeType>> {
-    vec![Box::new(SentimentAnalysis), Box::new(TextClassifier), Box::new(InformationExtractor), Box::new(ChainSummarization)]
+    vec![Box::new(SentimentAnalysis), Box::new(TextClassifier), Box::new(InformationExtractor), Box::new(ChainSummarization), Box::new(ChainRetrievalQa)]
 }
 
 // ---- structured output (LangChain StructuredOutputParser) ---------------------
@@ -665,5 +665,55 @@ impl OutputParser<'_> {
             Err(_) => text.to_string(),
         };
         self.parse(ctx, &input)
+    }
+}
+
+// ---- Question and Answer Chain ------------------------------------------------------
+
+const QA_SYSTEM: &str = "You are an assistant for question-answering tasks. Use the following pieces of retrieved context to answer the question.\nIf you don't know the answer, just say that you don't know, don't try to make up an answer.\n----------------\nContext: {context}";
+
+struct ChainRetrievalQa;
+
+#[async_trait::async_trait]
+impl NodeType for ChainRetrievalQa {
+    fn type_name(&self) -> &'static str {
+        "@n8n/n8n-nodes-langchain.chainRetrievalQa"
+    }
+
+    /// `createRetrievalChain` + `createStuffDocumentsChain`: the retrieved
+    /// documents joined into the system prompt's `{context}`, the question
+    /// as the user message.
+    async fn execute(&self, ctx: &mut ExecCtx<'_>) -> NodeResult<NodeOutput> {
+        let v = ctx.node.type_version;
+        let mut out = Vec::new();
+        for i in 0..ctx.input().len() {
+            let result = async {
+                let query = if v <= 1.2 {
+                    ctx.param_str("query", i, "")?
+                } else if ctx.param_str("promptType", i, "auto")? == "define" {
+                    ctx.param_str("text", i, "")?
+                } else {
+                    ctx.input()[i].json.get("chatInput").and_then(Value::as_str).unwrap_or("").to_string()
+                };
+                let docs = super::ai_vector::retrieve(ctx, i, &query).await?;
+                let context = docs.iter().map(|d| d.page_content.as_str()).collect::<Vec<_>>().join("\n\n");
+                let mut template = ctx.param_str("options.systemPromptTemplate", i, QA_SYSTEM)?;
+                if v < 1.5 {
+                    template = template.replace("{question}", "{input}");
+                }
+                let system = fill(&template, &[("context", &context), ("input", &query)]);
+                let model = load_model(ctx, i).await?;
+                let reply = model.chat(ctx, &[json!({"role": "system", "content": system}), json!({"role": "user", "content": query})], &[]).await?;
+                Ok::<String, NodeError>(reply["content"].as_str().unwrap_or("").to_string())
+            }
+            .await;
+            match result {
+                Ok(answer) if v >= 1.5 => out.push(Item::new(Map::from_iter([("response".to_string(), json!(answer))])).paired(i)),
+                Ok(answer) => out.push(Item::new(Map::from_iter([("response".to_string(), json!({"text": answer}))])).paired(i)),
+                Err(e) if ctx.continue_on_fail() => out.push(Item::new(Map::from_iter([("error".to_string(), json!(e.message))])).paired(i)),
+                Err(e) => return Err(e.at(i)),
+            }
+        }
+        Ok(vec![out])
     }
 }

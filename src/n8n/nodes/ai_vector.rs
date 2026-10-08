@@ -23,6 +23,7 @@ pub fn all() -> Vec<Box<dyn NodeType>> {
         Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.documentDefaultDataLoader")),
         Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.textSplitterRecursiveCharacterTextSplitter")),
         Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.textSplitterCharacterTextSplitter")),
+        Box::new(super::ai::SubNode("@n8n/n8n-nodes-langchain.retrieverVectorStore")),
     ]
 }
 
@@ -289,8 +290,13 @@ struct VectorStoreInMemory;
 /// The store's key: from v1.2 a resource locator shared across workflows,
 /// before that prefixed with the workflow ID.
 pub(super) fn memory_key(ctx: &ExecCtx<'_>, item: usize) -> NodeResult<String> {
-    let raw = ctx.param("memoryKey", item)?;
-    if ctx.node.type_version <= 1.1 {
+    memory_key_of(ctx, ctx.node, item)
+}
+
+fn memory_key_of(ctx: &ExecCtx<'_>, node: &Node, item: usize) -> NodeResult<String> {
+    let raw = ctx.resolve_value(&node.parameters["memoryKey"], item)?;
+    let raw = if raw.is_null() { json!("vector_store_key") } else { raw };
+    if node.type_version <= 1.1 {
         let key = raw.as_str().unwrap_or("vector_store_key");
         return Ok(format!("{}__{key}", ctx.workflow.id.clone().unwrap_or_default()));
     }
@@ -397,4 +403,34 @@ mod tests {
         let v = decode_embedding(&json!(base64::engine::general_purpose::STANDARD.encode(bytes))).unwrap();
         assert_eq!(v, vec![0.5, -1.0, 0.1f32 as f64]);
     }
+}
+
+// ---- retrieval -----------------------------------------------------------------------
+
+/// A similarity search on a vector store sub-node (retrieve modes): the
+/// query embedded with the store's own embeddings sub-node, recorded on
+/// the store like n8n's logWrapper.
+pub(super) async fn store_search(ctx: &ExecCtx<'_>, store: &Node, query: &str, k: usize, item: usize) -> NodeResult<Vec<(Document, f64)>> {
+    if store.node_type != format!("{LC}vectorStoreInMemory") {
+        return Err(NodeError::new(format!("The vector store \"{}\" ({}) is not supported natively yet", store.name, store.node_type)));
+    }
+    let started = now_ms();
+    let embeddings = load_embeddings(ctx, &store.name, item).await?;
+    let vector = embeddings.embed_query(ctx, query).await?;
+    let hits = memory_search(&memory_key_of(ctx, store, item)?, &vector, k);
+    let docs: Vec<Value> = hits.iter().map(|(d, _)| json!({"pageContent": d.page_content, "metadata": d.metadata})).collect();
+    record(ctx, &store.name, "ai_vectorStore", json!({"query": query}), Ok(json!({"response": docs})), started);
+    Ok(hits)
+}
+
+/// The documents an `ai_retriever` sub-node (Vector Store Retriever)
+/// finds for `query`.
+pub(super) async fn retrieve(ctx: &ExecCtx<'_>, item: usize, query: &str) -> NodeResult<Vec<Document>> {
+    let retriever = sub_node(ctx, &ctx.node.name, "ai_retriever").ok_or_else(|| NodeError::new("A Retriever sub-node must be connected and enabled"))?;
+    if retriever.node_type != format!("{LC}retrieverVectorStore") {
+        return Err(NodeError::new(format!("The retriever \"{}\" ({}) is not supported natively yet", retriever.name, retriever.node_type)));
+    }
+    let k = ctx.resolve_value(&retriever.parameters["topK"], item)?.as_f64().unwrap_or(4.0) as usize;
+    let store = sub_node(ctx, &retriever.name, "ai_vectorStore").ok_or_else(|| NodeError::new("A Vector Store sub-node must be connected to the retriever"))?;
+    Ok(store_search(ctx, store, query, k, item).await?.into_iter().map(|(d, _)| d).collect())
 }

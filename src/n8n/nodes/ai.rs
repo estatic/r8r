@@ -389,7 +389,25 @@ impl Model<'_> {
             body["random_seed"] = t;
         }
         if !tools.is_empty() {
-            body["tools"] = Value::Array(tools.to_vec());
+            // n8n's ChatOpenAI-based models send LangChain's conversion of
+            // each tool: the JSON schema with its `$schema` and `strict: false`.
+            let langchain_openai = [format!("{LC}lmChatOpenAi"), format!("{LC}lmChatAzureOpenAi"), format!("{LC}lmChatOpenRouter")].contains(&self.node.node_type);
+            let tools: Vec<Value> = tools
+                .iter()
+                .map(|t| {
+                    let mut t = t.clone();
+                    if langchain_openai {
+                        if let Some(params) = t["function"]["parameters"].as_object_mut() {
+                            params.entry("$schema").or_insert(json!("http://json-schema.org/draft-07/schema#"));
+                        }
+                        if let Some(f) = t["function"].as_object_mut() {
+                            f.entry("strict").or_insert(json!(false));
+                        }
+                    }
+                    t
+                })
+                .collect();
+            body["tools"] = Value::Array(tools);
         }
         body
     }
@@ -960,6 +978,9 @@ enum ToolKind {
     /// workflow inputs mapped through `$fromAI` it takes those arguments,
     /// otherwise a single string.
     Workflow { description: String, workflow_id: String, args: Option<Vec<FromAi>> },
+    /// A vector store in "retrieve-as-tool" mode: an `input` query (plus any
+    /// `$fromAI` arguments) answered with the closest documents.
+    VectorStore { description: String, args: Vec<FromAi>, k: usize, with_metadata: bool },
 }
 
 struct Tool<'a> {
@@ -998,6 +1019,19 @@ fn load_tools<'a>(ctx: &'a ExecCtx<'_>, item: usize) -> NodeResult<Vec<Tool<'a>>
                 return Err(NodeError::new(format!("The Code Tool \"{}\" uses Python, which is not supported natively yet", node.name)));
             }
             ToolKind::Code { description: p["description"].as_str().unwrap_or("").to_string(), code: node.parameters["jsCode"].as_str().unwrap_or("").to_string(), schema: code_tool_schema(node, &p)? }
+        } else if node.node_type == format!("{LC}vectorStoreInMemory") && node.parameters["mode"].as_str() == Some("retrieve-as-tool") {
+            let p = ctx.resolve_value(&node.parameters, item)?;
+            if node.type_version < 1.3 {
+                name = p["toolName"].as_str().unwrap_or("").to_string();
+            }
+            let mut args = tool_arguments(node)?;
+            args.push(FromAi { key: "input".into(), description: Some("Query to search for. Required".into()), kind: "string".into(), default: None });
+            ToolKind::VectorStore {
+                description: p["toolDescription"].as_str().unwrap_or("").to_string(),
+                args,
+                k: p["topK"].as_f64().unwrap_or(4.0) as usize,
+                with_metadata: p["includeDocumentMetadata"].as_bool().unwrap_or(true),
+            }
         } else if node.node_type == format!("{LC}toolWorkflow") {
             let p = &node.parameters;
             if node.type_version <= 2.1 {
@@ -1293,7 +1327,7 @@ impl Tool<'_> {
                 "Useful for getting the result of a math expression. The input to this tool should be a valid mathematical expression that could be executed by a simple calculator.".to_string(),
                 json!({"type": "object", "properties": {"input": {"type": "string"}}, "required": ["input"], "additionalProperties": false}),
             ),
-            ToolKind::Node { description, args, .. } => (description.clone(), from_ai_schema(args)),
+            ToolKind::Node { description, args, .. } | ToolKind::VectorStore { description, args, .. } => (description.clone(), from_ai_schema(args)),
             ToolKind::Workflow { description, args: Some(args), .. } => (description.clone(), from_ai_schema(args)),
             ToolKind::Workflow { description, args: None, .. } => (description.clone(), json!({"type": "object", "properties": {"input": {"type": "string"}}, "additionalProperties": false})),
             // Without a schema, LangChain's `DynamicTool`: one optional string.
@@ -1401,6 +1435,27 @@ impl Tool<'_> {
                         Ok(response)
                     }
                 }
+            }
+            ToolKind::VectorStore { k, with_metadata, .. } => {
+                let args: Value = serde_json::from_str(arguments).unwrap_or_else(|_| json!({"input": arguments}));
+                let query = args["input"].as_str().map(String::from).or_else(|| args.as_str().map(String::from)).unwrap_or_default();
+                // Each hit as a text content block holding the document JSON;
+                // the model gets the block list as JSON text, as from n8n.
+                let blocks: Vec<Value> = match super::ai_vector::store_search(ctx, self.node, &query, *k, 0).await {
+                    Ok(hits) => hits
+                        .into_iter()
+                        .map(|(d, _)| {
+                            let doc = if *with_metadata { json!({"pageContent": d.page_content, "metadata": d.metadata}) } else { json!({"pageContent": d.page_content}) };
+                            json!({"type": "text", "text": doc.to_string()})
+                        })
+                        .collect(),
+                    Err(e) => {
+                        record(ctx, &self.node.name, "ai_tool", args.clone(), Err(&e), started);
+                        return Ok(String::new());
+                    }
+                };
+                record(ctx, &self.node.name, "ai_tool", args, Ok(json!({"response": blocks})), started);
+                Ok(Value::Array(blocks).to_string())
             }
             ToolKind::Node { base, .. } => {
                 let args = match serde_json::from_str::<Value>(arguments) {
