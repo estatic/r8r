@@ -12,17 +12,38 @@ fn next_slots() -> &'static Mutex<HashMap<String, Instant>> {
     SLOTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
+/// How far ahead turns may be handed out. A longer queue (many items at a
+/// low limit) is refused rather than holding the key for everyone else
+/// for hours; a stopped run's turns also never block past this.
+pub const MAX_QUEUE: Duration = Duration::from_secs(600);
+
+/// Keys kept before idle ones are dropped.
+const MAX_KEYS: usize = 1024;
+
 /// Waits until this caller's turn: at least `interval` after the turn
 /// before it for the same `key`. Turns are handed out in arrival order.
-pub async fn wait_turn(key: &str, interval: Duration) {
+/// Errs at once when the turn would be more than `MAX_QUEUE` away.
+pub async fn wait_turn(key: &str, interval: Duration) -> Result<(), String> {
     let slot = {
         let mut slots = next_slots().lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
-        let slot = slots.get(key).copied().filter(|t| *t > now).unwrap_or(now);
+        // Keys whose last turn has passed hold nothing; drop them once
+        // there are many (one entry per API key in use is fine to keep).
+        if slots.len() > MAX_KEYS {
+            slots.retain(|_, next| *next > now);
+        }
+        let slot = slots.get(key).copied().unwrap_or(now);
+        if slot - now > MAX_QUEUE {
+            return Err(format!(
+                "the rate limit's queue for this API key is full (the next free turn is {} s away); lower the number of items or raise the limit",
+                (slot - now).as_secs()
+            ));
+        }
         slots.insert(key.to_string(), slot + interval);
         slot
     };
     tokio::time::sleep_until(slot).await;
+    Ok(())
 }
 
 /// The spacing for `per_minute` requests a minute (1 to 6000).
@@ -40,7 +61,7 @@ mod tests {
         let key = "test-spacing";
         let interval = Duration::from_secs(6);
         let handles: Vec<_> = (0..3).map(|_| tokio::spawn(async move {
-            wait_turn(key, interval).await;
+            wait_turn(key, interval).await.unwrap();
             Instant::now()
         })).collect();
         let mut times = Vec::new();
@@ -54,13 +75,32 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn other_keys_and_a_quiet_key_go_at_once() {
         let start = Instant::now();
-        wait_turn("test-a", Duration::from_secs(60)).await;
-        wait_turn("test-b", Duration::from_secs(60)).await;
+        wait_turn("test-a", Duration::from_secs(60)).await.unwrap();
+        wait_turn("test-b", Duration::from_secs(60)).await.unwrap();
         assert_eq!(Instant::now() - start, Duration::ZERO);
         tokio::time::sleep(Duration::from_secs(61)).await;
         let before = Instant::now();
-        wait_turn("test-a", Duration::from_secs(60)).await;
+        wait_turn("test-a", Duration::from_secs(60)).await.unwrap();
         assert_eq!(Instant::now() - before, Duration::ZERO);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_queue_longer_than_the_limit_is_refused_at_once() {
+        // One a minute: turns 0..=10 minutes are handed out, the next is refused.
+        let key = "test-full";
+        let minute = Duration::from_secs(60);
+        let mut waits = Vec::new();
+        for _ in 0..11 {
+            waits.push(tokio::spawn(async move { wait_turn(key, minute).await }));
+        }
+        tokio::task::yield_now().await;
+        let start = Instant::now();
+        let err = wait_turn(key, minute).await.unwrap_err();
+        assert!(err.contains("queue for this API key is full"), "{err}");
+        assert_eq!(Instant::now() - start, Duration::ZERO, "refused without waiting");
+        for w in waits {
+            w.abort();
+        }
     }
 
     #[test]

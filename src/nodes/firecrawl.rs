@@ -214,7 +214,7 @@ async fn execute_with_client(client: &reqwest::Client, ctx: &NodeExecutionContex
     // with this key (any run, any agent tool call) waits for its turn.
     if let Some(per_minute) = number_param(p, "max_requests_per_minute")? {
         let interval = super::rate_limit::interval_for(per_minute).ok_or_else(|| fail("\"max_requests_per_minute\" must be between 1 and 6000"))?;
-        super::rate_limit::wait_turn(&limiter_key(&base, &key), interval).await;
+        super::rate_limit::wait_turn(&limiter_key(&base, &key), interval).await.map_err(fail)?;
     }
     // Errors never include the reqwest error or the request: the key is in it.
     let response = client
