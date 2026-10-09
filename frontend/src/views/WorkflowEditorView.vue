@@ -13,6 +13,7 @@ import WorkflowCanvas from '../components/WorkflowCanvas.vue'
 import AddNodeMenu from '../components/AddNodeMenu.vue'
 import NodeConfigPanel from '../components/NodeConfigPanel.vue'
 import ExecutionResultsPanel from '../components/ExecutionResultsPanel.vue'
+import NodeDetailsView from '../components/NodeDetailsView.vue'
 import { insertNodeIntoConnection, removeConnection, removeNode } from '../canvas/edit'
 import { upstreamSources } from '../canvas/inputData'
 import { useNodeTypesStore } from '../stores/nodeTypes'
@@ -222,7 +223,8 @@ async function save(): Promise<boolean> {
   }
 }
 
-async function execute() {
+/** Runs the workflow; nodes that succeeded last time and haven't changed are reused unless `fresh`. */
+async function execute(fresh = false) {
   actionError.value = ''
   if (!flushPanel()) return
   const problems = workflow.value ? agentSetupProblems(workflow.value.nodes) : []
@@ -234,11 +236,19 @@ async function execute() {
   // (the open panel's were applied above) first, so what runs is what's on screen.
   if (changes.dirty.value && !(await save())) return
   try {
-    await run.execute()
+    await run.execute(fresh)
   } catch (e) {
     actionError.value = messageFor(e, 'Failed to execute workflow.')
   }
 }
+
+// The run on screen reused every node: nothing ran (say so, or it looks like nothing happened).
+const allReused = computed(() => {
+  const e = execution.value
+  if (!e || e.status === 'Running') return false
+  const runs = Object.values(e.node_runs ?? {})
+  return runs.length > 0 && runs.every((r) => r.reused)
+})
 
 const activating = ref(false)
 
@@ -328,9 +338,20 @@ async function showHistory() {
       <button
         class="bg-green-600 text-white rounded px-3 py-1.5 text-sm disabled:opacity-50"
         :disabled="executing"
-        @click="execute"
+        data-testid="execute"
+        title="Runs the nodes that failed, changed or haven't run; the others keep their last output"
+        @click="execute(false)"
       >
         {{ executing ? 'Running…' : 'Execute' }}
+      </button>
+      <button
+        v-if="!executing"
+        class="bg-gray-200 text-gray-800 rounded px-3 py-1.5 text-sm"
+        data-testid="execute-fresh"
+        title="Runs every node again (a Telegram trigger waits for a new message)"
+        @click="execute(true)"
+      >
+        Run all again
       </button>
       <button
         v-if="executing"
@@ -349,6 +370,9 @@ async function showHistory() {
       </button>
     </header>
     <p v-if="actionError" class="bg-red-50 border-b border-red-200 px-6 py-2 text-sm text-red-600">{{ actionError }}</p>
+    <p v-if="allReused" data-testid="all-reused" class="bg-blue-50 border-b border-blue-200 px-6 py-2 text-sm text-blue-800">
+      Nothing changed since the last run, so every node kept its output. Use <b>Run all again</b> to run everything.
+    </p>
     <div class="flex-1 relative">
       <p v-if="loadError" class="p-6 text-sm text-red-600">{{ loadError }}</p>
       <WorkflowCanvas
@@ -364,21 +388,22 @@ async function showHistory() {
         @node-move="onNodeMove"
         @connect="onConnect"
       />
-      <NodeConfigPanel
-        ref="panel"
-        :workflow-id="workflow?.id"
-        :node="selectedNode"
-        :focus="panelFocus"
-        :input-sources="inputSources"
-        :node-labels="nodeLabels"
-        @update="onNodeUpdate" @delete="deleteNode" @close="closePanel" />
+      <NodeDetailsView v-if="selectedNode && workflow" :node="selectedNode" :workflow="workflow" :execution="execution ?? latestRun" @close="closePanel">
+        <NodeConfigPanel
+          ref="panel"
+          embedded
+          :workflow-id="workflow?.id"
+          :node="selectedNode"
+          :focus="panelFocus"
+          :input-sources="inputSources"
+          :node-labels="nodeLabels"
+          @update="onNodeUpdate" @delete="deleteNode" @close="closePanel" />
+      </NodeDetailsView>
       <div v-if="insertInto" data-testid="insert-menu" class="absolute top-4 left-1/2 -translate-x-1/2 z-20">
         <p class="text-xs text-gray-600 bg-white border rounded px-2 py-1 mb-1 shadow">Choose the node to put into this connection</p>
         <AddNodeMenu v-model:open="insertMenuOpen" hide-button @add="onInsertNode" />
       </div>
-      <!-- Stops at the open node panel (w-96) instead of covering its lower part. -->
       <ExecutionResultsPanel
-        :style="selectedNode ? { right: '24rem' } : undefined"
         :execution="execution"
         :history="executionsStore.history"
         @close="execution = null"

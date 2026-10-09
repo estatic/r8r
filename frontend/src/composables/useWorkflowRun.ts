@@ -49,13 +49,15 @@ export function useWorkflowRun(workflowId: string, execution: Ref<Execution | nu
     { deep: true },
   )
 
-  async function execute() {
+  /** Unchanged nodes that succeeded last time are reused unless `fresh`. */
+  async function execute(fresh = false) {
     executing.value = true
     let started: Execution
     const controller = new AbortController()
     starting = controller
     try {
-      started = await api.post<Execution>(`/rest/r8r/workflows/${workflowId}/execute`, undefined, { signal: controller.signal })
+      const url = `/rest/r8r/workflows/${workflowId}/execute${fresh ? '?fresh=true' : ''}`
+      started = await api.post<Execution>(url, undefined, { signal: controller.signal })
     } catch (e) {
       stop()
       if (controller.signal.aborted) return // stopped by the user

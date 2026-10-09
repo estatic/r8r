@@ -11,6 +11,20 @@ pub trait ExecutionObserver: Send + Sync {
     /// Items the node sent per output ("0", "1", ..., "error"); called just
     /// before its finished/errored/skipped event.
     async fn on_node_counts(&self, _node_id: &str, _counts: &BTreeMap<String, usize>) {}
+    /// What the node received and sent (every output, and its error
+    /// output); called just before its finished/errored/skipped event.
+    async fn on_node_io(
+        &self,
+        _node_id: &str,
+        _input: &[Item],
+        _outputs: &[Vec<Item>],
+        _error_items: &[Item],
+    ) {
+    }
+    /// The node's output was taken from an earlier run instead of running it.
+    async fn on_node_reused(&self, node_id: &str, items: &[Item]) {
+        self.on_node_finished(node_id, items).await
+    }
 }
 
 pub struct NoopObserver;
@@ -138,33 +152,68 @@ pub async fn execute_workflow_seeded(
     resources: &crate::credentials::RunResources,
     observer: &dyn ExecutionObserver,
 ) -> anyhow::Result<HashMap<String, Vec<Item>>> {
+    execute_workflow_reusing(
+        workflow,
+        registry,
+        trigger_items,
+        resources,
+        observer,
+        &HashMap::new(),
+    )
+    .await
+}
+
+/// As `execute_workflow_seeded`, taking a node's output from `reuse` (an
+/// earlier run's record) instead of running it, when everything feeding it
+/// was reused too. Loops and the nodes inside them always run.
+pub async fn execute_workflow_reusing(
+    workflow: &Workflow,
+    registry: &std::sync::Arc<NodeRegistry>,
+    trigger_items: Option<Vec<Item>>,
+    resources: &crate::credentials::RunResources,
+    observer: &dyn ExecutionObserver,
+    reuse: &HashMap<String, crate::domain::NodeRun>,
+) -> anyhow::Result<HashMap<String, Vec<Item>>> {
     let order = topological_order(workflow)?;
     let back = back_edges(workflow);
     let owner = loop_owners(workflow, &back);
-    let mut run = Run {
+    let run = Run {
         workflow,
         registry,
         resources,
         observer,
         start_id: order.first().map(|n| n.id.clone()),
         trigger_items,
-        produced: HashMap::new(),
-        error_produced: HashMap::new(),
-        tool_executor: std::sync::Arc::new(EngineToolExecutor::new(registry.clone(), resources.credentials.clone())),
+        state: std::sync::Mutex::new(RunState::default()),
+        tool_executor: std::sync::Arc::new(EngineToolExecutor::new(
+            registry.clone(),
+            resources.credentials.clone(),
+        )),
         back,
         owner,
         order: order.clone(),
+        reuse,
     };
     // Nodes inside a loop run from it, once per batch.
-    let top: Vec<NodeInstance> = order.iter().filter(|n| !run.owner.contains_key(&n.id)).cloned().collect();
-    run.run_list(&top).await?;
+    let top: Vec<NodeInstance> = order
+        .iter()
+        .filter(|n| !run.owner.contains_key(&n.id))
+        .cloned()
+        .collect();
+    run.run_graph(&top).await?;
 
     // Persist/return only each node's primary (port 0) output, flattened
     // into the pre-existing HashMap<String, Vec<Item>> shape.
     let flattened = order
         .into_iter()
         .map(|n| {
-            let items = run.produced.get(&n.id).and_then(|ports| ports.first()).cloned().unwrap_or_default();
+            let items = run
+                .st()
+                .produced
+                .get(&n.id)
+                .and_then(|ports| ports.first())
+                .cloned()
+                .unwrap_or_default();
             (n.id, items)
         })
         .collect();
@@ -179,24 +228,84 @@ struct Run<'a> {
     observer: &'a dyn ExecutionObserver,
     start_id: Option<String>,
     trigger_items: Option<Vec<Item>>,
-    produced: HashMap<String, crate::node::NodeOutput>,
-    error_produced: HashMap<String, Vec<Item>>,
+    /// What the nodes produced so far. Branches run at the same time, so
+    /// it is shared behind a lock, held only briefly and never across an await.
+    state: std::sync::Mutex<RunState>,
     tool_executor: std::sync::Arc<dyn crate::node::ToolExecutor>,
     /// Indexes of connections that lead back into a loop node.
     back: HashSet<usize>,
     /// Node id -> the (innermost) loop whose body it is in.
     owner: HashMap<String, String>,
     order: Vec<NodeInstance>,
+    /// Earlier records whose output may stand in for running the node.
+    reuse: &'a HashMap<String, crate::domain::NodeRun>,
+}
+
+#[derive(Default)]
+struct RunState {
+    produced: HashMap<String, crate::node::NodeOutput>,
+    error_produced: HashMap<String, Vec<Item>>,
+    /// Nodes this run took from `reuse`.
+    reused: HashSet<String>,
 }
 
 impl<'a> Run<'a> {
-    fn run_list<'b>(&'b mut self, list: &'b [NodeInstance]) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'b>>
+    fn st(&self) -> std::sync::MutexGuard<'_, RunState> {
+        self.state.lock().unwrap_or_else(|e| e.into_inner())
+    }
+
+    /// Runs `list`'s nodes as their inputs become ready: every node whose
+    /// upstream nodes (in `list`) have finished starts at once, so branches
+    /// (an If's true and false, ...) run at the same time, not one after
+    /// the other. The first node to fail fails the whole run.
+    fn run_graph<'b>(
+        &'b self,
+        list: &'b [NodeInstance],
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = anyhow::Result<()>> + Send + 'b>>
     where
         'a: 'b,
     {
         Box::pin(async move {
-            for node in list {
-                self.run_node(node).await?;
+            use futures_util::stream::{FuturesUnordered, StreamExt};
+            let ids: HashSet<&str> = list.iter().map(|n| n.id.as_str()).collect();
+            let deps: HashMap<&str, HashSet<&str>> = list
+                .iter()
+                .map(|n| {
+                    let from: HashSet<&str> = self
+                        .workflow
+                        .connections
+                        .iter()
+                        .enumerate()
+                        .filter(|(i, c)| {
+                            c.to_node == n.id
+                                && !self.back.contains(i)
+                                && c.from_node != n.id
+                                && ids.contains(c.from_node.as_str())
+                        })
+                        .map(|(_, c)| c.from_node.as_str())
+                        .collect();
+                    (n.id.as_str(), from)
+                })
+                .collect();
+            let mut started: HashSet<&str> = HashSet::new();
+            let mut finished: HashSet<&str> = HashSet::new();
+            let mut running = FuturesUnordered::new();
+            loop {
+                // In workflow order, so equal-footing nodes start top to bottom.
+                for n in list {
+                    let id = n.id.as_str();
+                    if !started.contains(id) && deps[id].iter().all(|d| finished.contains(d)) {
+                        started.insert(id);
+                        running.push(async move { (id, self.run_node(n).await) });
+                    }
+                }
+                match running.next().await {
+                    Some((id, result)) => {
+                        result?;
+                        finished.insert(id);
+                    }
+                    None => break,
+                }
             }
             Ok(())
         })
@@ -204,9 +313,19 @@ impl<'a> Run<'a> {
 
     /// Sends `input` through the loop's body a batch at a time, then out of
     /// "done" with everything the body sent back.
-    async fn run_loop(&mut self, lp: &NodeInstance, input: Vec<Item>) -> anyhow::Result<()> {
-        let batch_size = lp.parameters.get("batch_size").and_then(|v| v.as_u64()).filter(|n| *n > 0).unwrap_or(1) as usize;
-        let body: Vec<NodeInstance> = self.order.iter().filter(|n| self.owner.get(&n.id) == Some(&lp.id)).cloned().collect();
+    async fn run_loop(&self, lp: &NodeInstance, input: Vec<Item>) -> anyhow::Result<()> {
+        let batch_size = lp
+            .parameters
+            .get("batch_size")
+            .and_then(|v| v.as_u64())
+            .filter(|n| *n > 0)
+            .unwrap_or(1) as usize;
+        let body: Vec<NodeInstance> = self
+            .order
+            .iter()
+            .filter(|n| self.owner.get(&n.id) == Some(&lp.id))
+            .cloned()
+            .collect();
         let returns: Vec<Connection> = self
             .workflow
             .connections
@@ -215,6 +334,7 @@ impl<'a> Run<'a> {
             .filter(|(i, c)| c.to_node == lp.id && self.back.contains(i))
             .map(|(_, c)| c.clone())
             .collect();
+        let loop_input = input.clone();
         let mut queue: VecDeque<Item> = input.into();
         let (mut done, mut looped) = (Vec::new(), 0usize);
         // What each body node sent over all batches, kept as its output.
@@ -223,40 +343,101 @@ impl<'a> Run<'a> {
         while !queue.is_empty() {
             let batch: Vec<Item> = queue.drain(..batch_size.min(queue.len())).collect();
             looped += batch.len();
-            for node in &body {
-                self.produced.remove(&node.id);
-                self.error_produced.remove(&node.id);
+            {
+                let mut st = self.st();
+                for node in &body {
+                    st.produced.remove(&node.id);
+                    st.error_produced.remove(&node.id);
+                }
+                st.produced.insert(lp.id.clone(), vec![vec![], batch]);
             }
-            self.produced.insert(lp.id.clone(), vec![vec![], batch]);
-            self.run_list(&body).await?;
-            for node in &body {
-                if let Some(ports) = self.produced.get(&node.id) {
-                    let total = totals.entry(node.id.clone()).or_default();
-                    total.resize(total.len().max(ports.len()), Vec::new());
-                    for (i, items) in ports.iter().enumerate() {
-                        total[i].extend(items.iter().cloned());
+            self.run_graph(&body).await?;
+            {
+                let st = self.st();
+                for node in &body {
+                    if let Some(ports) = st.produced.get(&node.id) {
+                        let total = totals.entry(node.id.clone()).or_default();
+                        total.resize(total.len().max(ports.len()), Vec::new());
+                        for (i, items) in ports.iter().enumerate() {
+                            total[i].extend(items.iter().cloned());
+                        }
                     }
                 }
-            }
-            for c in &returns {
-                let back_items = if c.error {
-                    self.error_produced.get(&c.from_node).cloned().unwrap_or_default()
-                } else {
-                    self.produced.get(&c.from_node).and_then(|ports| ports.get(c.from_output)).cloned().unwrap_or_default()
-                };
-                done.extend(back_items);
+                for c in &returns {
+                    let back_items = if c.error {
+                        st.error_produced
+                            .get(&c.from_node)
+                            .cloned()
+                            .unwrap_or_default()
+                    } else {
+                        st.produced
+                            .get(&c.from_node)
+                            .and_then(|ports| ports.get(c.from_output))
+                            .cloned()
+                            .unwrap_or_default()
+                    };
+                    done.extend(back_items);
+                }
             }
         }
         self.observer
             .on_node_counts(&lp.id, &BTreeMap::from([("0".to_string(), done.len()), ("1".to_string(), looped)]))
             .await;
+        self.observer
+            .on_node_io(&lp.id, &loop_input, &[done.clone()], &[])
+            .await;
         self.observer.on_node_finished(&lp.id, &done).await;
-        self.produced.extend(totals);
-        self.produced.insert(lp.id.clone(), vec![done, vec![]]);
+        let mut st = self.st();
+        st.produced.extend(totals);
+        st.produced.insert(lp.id.clone(), vec![done, vec![]]);
         Ok(())
     }
 
-    async fn run_node(&mut self, node_instance: &NodeInstance) -> anyhow::Result<()> {
+    /// Takes the node's output from its earlier record, when it may: it is
+    /// no loop or loop body, and everything feeding it was reused too (a
+    /// node that runs again may send something else).
+    async fn try_reuse(&self, node: &NodeInstance) -> bool {
+        let Some(prev) = self.reuse.get(&node.id) else {
+            return false;
+        };
+        if node.node_type == LOOP_TYPE || self.owner.contains_key(&node.id) {
+            return false;
+        }
+        let fed_by_reused = self
+            .workflow
+            .connections
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| c.to_node == node.id && !self.back.contains(i))
+            .all(|(_, c)| self.st().reused.contains(&c.from_node));
+        if !fed_by_reused {
+            return false;
+        }
+        let outputs = if prev.outputs.is_empty() {
+            vec![Vec::new()]
+        } else {
+            prev.outputs.clone()
+        };
+        self.observer.on_node_started(&node.id).await;
+        self.observer.on_node_counts(&node.id, &prev.counts).await;
+        self.observer
+            .on_node_io(&node.id, &prev.input, &outputs, &prev.error_items)
+            .await;
+        self.observer.on_node_reused(&node.id, &outputs[0]).await;
+        let mut st = self.st();
+        if !prev.error_items.is_empty() {
+            st.error_produced
+                .insert(node.id.clone(), prev.error_items.clone());
+        }
+        st.produced.insert(node.id.clone(), outputs);
+        st.reused.insert(node.id.clone());
+        true
+    }
+
+    async fn run_node(&self, node_instance: &NodeInstance) -> anyhow::Result<()> {
+        if self.try_reuse(node_instance).await {
+            return Ok(());
+        }
         // Aggregate this node's input items from every incoming connection,
         // pulling each upstream node's items from the SPECIFIC from_output
         // port index that connection names (not just port 0). A connection
@@ -266,34 +447,62 @@ impl<'a> Run<'a> {
         let mut input_items: Vec<Item> = Vec::new();
         // The same items by the input they arrive on, for Merge.
         let mut input_groups: Vec<Vec<Item>> = Vec::new();
-        for (index, conn) in self.workflow.connections.iter().enumerate() {
-            if conn.to_node != node_instance.id || self.back.contains(&index) {
-                continue;
+        {
+            let st = self.st();
+            for (index, conn) in self.workflow.connections.iter().enumerate() {
+                if conn.to_node != node_instance.id || self.back.contains(&index) {
+                    continue;
+                }
+                let arrived: &[Item] = if conn.error {
+                    st.error_produced
+                        .get(&conn.from_node)
+                        .map(Vec::as_slice)
+                        .unwrap_or_default()
+                } else {
+                    st.produced
+                        .get(&conn.from_node)
+                        .and_then(|outputs| outputs.get(conn.from_output))
+                        .map(Vec::as_slice)
+                        .unwrap_or_default()
+                };
+                input_items.extend(arrived.iter().cloned());
+                // A node has a handful of inputs; an index from the JSON beyond
+                // that would only allocate a huge list.
+                if conn.to_input >= MAX_INPUTS {
+                    return Err(anyhow::anyhow!(
+                        "connection into {} uses input {}; a node has at most {MAX_INPUTS} inputs",
+                        node_instance.id,
+                        conn.to_input
+                    ));
+                }
+                if input_groups.len() <= conn.to_input {
+                    input_groups.resize_with(conn.to_input + 1, Vec::new);
+                }
+                input_groups[conn.to_input].extend(arrived.iter().cloned());
             }
-            let arrived: &[Item] = if conn.error {
-                self.error_produced.get(&conn.from_node).map(Vec::as_slice).unwrap_or_default()
-            } else {
-                self.produced.get(&conn.from_node).and_then(|outputs| outputs.get(conn.from_output)).map(Vec::as_slice).unwrap_or_default()
-            };
-            input_items.extend(arrived.iter().cloned());
-            // A node has a handful of inputs; an index from the JSON beyond
-            // that would only allocate a huge list.
-            if conn.to_input >= MAX_INPUTS {
-                return Err(anyhow::anyhow!("connection into {} uses input {}; a node has at most {MAX_INPUTS} inputs", node_instance.id, conn.to_input));
-            }
-            if input_groups.len() <= conn.to_input {
-                input_groups.resize_with(conn.to_input + 1, Vec::new);
-            }
-            input_groups[conn.to_input].extend(arrived.iter().cloned());
         }
 
         if node_instance.disabled {
             // A disabled node is a no-op passthrough: its input items flow
             // through unchanged as its (single-port) output, and it is never
             // handed to the self.registry, executed, or given resolved parameters.
-            self.observer.on_node_counts(&node_instance.id, &port_counts(&[input_items.len()])).await;
-            self.observer.on_node_skipped(&node_instance.id, &input_items).await;
-            self.produced.insert(node_instance.id.clone(), vec![input_items]);
+            self.observer
+                .on_node_counts(&node_instance.id, &port_counts(&[input_items.len()]))
+                .await;
+            self.observer
+                .on_node_io(
+                    &node_instance.id,
+                    &input_items,
+                    std::slice::from_ref(&input_items),
+                    &[],
+                )
+                .await;
+            self.observer
+                .on_node_skipped(&node_instance.id, &input_items)
+                .await;
+            self.st()
+                .produced
+                .insert(node_instance.id.clone(), vec![input_items]);
             return Ok(());
         }
 
@@ -307,9 +516,18 @@ impl<'a> Run<'a> {
         if let (Some(items), Some(start)) = (&self.trigger_items, &self.start_id) {
             if &node_instance.id == start {
                 self.observer.on_node_started(&node_instance.id).await;
-                self.observer.on_node_counts(&node_instance.id, &port_counts(&[items.len()])).await;
-                self.observer.on_node_finished(&node_instance.id, items).await;
-                self.produced.insert(node_instance.id.clone(), vec![items.clone()]);
+                self.observer
+                    .on_node_counts(&node_instance.id, &port_counts(&[items.len()]))
+                    .await;
+                self.observer
+                    .on_node_io(&node_instance.id, &[], std::slice::from_ref(items), &[])
+                    .await;
+                self.observer
+                    .on_node_finished(&node_instance.id, items)
+                    .await;
+                self.st()
+                    .produced
+                    .insert(node_instance.id.clone(), vec![items.clone()]);
                 return Ok(());
             }
         }
@@ -332,7 +550,7 @@ impl<'a> Run<'a> {
             self.workflow.connections.iter().enumerate().any(|(i, c)| c.to_node == node_instance.id && !self.back.contains(&i));
         if has_incoming_connection && input_items.is_empty() {
             self.observer.on_node_skipped(&node_instance.id, &[]).await;
-            self.produced.insert(node_instance.id.clone(), vec![]);
+            self.st().produced.insert(node_instance.id.clone(), vec![]);
             return Ok(());
         }
 
@@ -343,24 +561,40 @@ impl<'a> Run<'a> {
         // A per-item node runs once for each input item, with that item as
         // `$json` and its only input (n8n's default); any other node runs
         // once for all of them.
+        let all_input = input_items.clone();
         let batches: Vec<Vec<Item>> = if node.runs_per_item() && input_items.len() > 1 {
             input_items.iter().map(|item| vec![item.clone()]).collect()
         } else {
             vec![input_items]
         };
-        let items_json: Vec<serde_json::Value> = batches.iter().flatten().map(|i| i.json.clone()).collect();
-        let node_json: HashMap<String, serde_json::Value> = self.produced
-            .iter()
-            .filter_map(|(id, ports)| {
-                let first_item_json = ports.first().and_then(|p| p.first()).map(|item| item.json.clone());
-                first_item_json.map(|j| (id.clone(), j))
-            })
-            .collect();
-        let upstream: HashMap<String, Vec<serde_json::Value>> = self.produced
-            .iter()
-            .filter_map(|(id, ports)| ports.first().map(|items| (id.clone(), items.iter().map(|i| i.json.clone()).collect())))
-            .collect();
-        let has_error_route = self.workflow
+        let items_json: Vec<serde_json::Value> =
+            batches.iter().flatten().map(|i| i.json.clone()).collect();
+        let (node_json, upstream) = {
+            let st = self.st();
+            let node_json: HashMap<String, serde_json::Value> = st
+                .produced
+                .iter()
+                .filter_map(|(id, ports)| {
+                    let first_item_json = ports
+                        .first()
+                        .and_then(|p| p.first())
+                        .map(|item| item.json.clone());
+                    first_item_json.map(|j| (id.clone(), j))
+                })
+                .collect();
+            let upstream: HashMap<String, Vec<serde_json::Value>> = st
+                .produced
+                .iter()
+                .filter_map(|(id, ports)| {
+                    ports
+                        .first()
+                        .map(|items| (id.clone(), items.iter().map(|i| i.json.clone()).collect()))
+                })
+                .collect();
+            (node_json, upstream)
+        };
+        let has_error_route = self
+            .workflow
             .connections
             .iter()
             .any(|c| c.from_node == node_instance.id && c.error);
@@ -389,8 +623,15 @@ impl<'a> Run<'a> {
                     Err(e) => {
                         // Report it on the node, so the editor marks which one failed.
                         let message = format!("parameter resolution failed: {e}");
-                        self.observer.on_node_counts(&node_instance.id, &BTreeMap::new()).await;
-                        self.observer.on_node_errored(&node_instance.id, &message).await;
+                        self.observer
+                            .on_node_counts(&node_instance.id, &BTreeMap::new())
+                            .await;
+                        self.observer
+                            .on_node_io(&node_instance.id, &all_input, &[], &[])
+                            .await;
+                        self.observer
+                            .on_node_errored(&node_instance.id, &message)
+                            .await;
                         return Err(anyhow::anyhow!("node {} {message}", node_instance.id));
                     }
                 }
@@ -427,8 +668,15 @@ impl<'a> Run<'a> {
                     // continue_on_fail (error item on port 0 only), else the
                     // whole run fails.
                     if !has_error_route && !node_instance.settings.continue_on_fail {
-                        self.observer.on_node_counts(&node_instance.id, &BTreeMap::new()).await;
-                        self.observer.on_node_errored(&node_instance.id, &e.to_string()).await;
+                        self.observer
+                            .on_node_counts(&node_instance.id, &BTreeMap::new())
+                            .await;
+                        self.observer
+                            .on_node_io(&node_instance.id, &all_input, &output, &[])
+                            .await;
+                        self.observer
+                            .on_node_errored(&node_instance.id, &e.to_string())
+                            .await;
                         return Err(anyhow::anyhow!("node {} failed: {e}", node_instance.id));
                     }
                     first_error.get_or_insert_with(|| e.to_string());
@@ -452,9 +700,16 @@ impl<'a> Run<'a> {
         let mut counts = port_counts(&lens);
         if !error_items.is_empty() {
             counts.insert("error".to_string(), error_items.len());
-            self.error_produced.insert(node_instance.id.clone(), error_items);
+            self.st()
+                .error_produced
+                .insert(node_instance.id.clone(), error_items.clone());
         }
-        self.observer.on_node_counts(&node_instance.id, &counts).await;
+        self.observer
+            .on_node_counts(&node_instance.id, &counts)
+            .await;
+        self.observer
+            .on_node_io(&node_instance.id, &all_input, &output, &error_items)
+            .await;
         match first_error {
             Some(message) => self.observer.on_node_errored(&node_instance.id, &message).await,
             None => {
@@ -462,7 +717,7 @@ impl<'a> Run<'a> {
                 self.observer.on_node_finished(&node_instance.id, &primary).await;
             }
         }
-        self.produced.insert(node_instance.id.clone(), output);
+        self.st().produced.insert(node_instance.id.clone(), output);
         Ok(())
     }
 }
@@ -551,6 +806,79 @@ fn with_input_fields(output: crate::node::NodeOutput, input: &[Item]) -> crate::
 /// Item counts keyed by output index, as the editor's handles are.
 fn port_counts(lens: &[usize]) -> BTreeMap<String, usize> {
     lens.iter().enumerate().map(|(i, n)| (i.to_string(), *n)).collect()
+}
+
+/// Each node's fingerprint: a hash of its type, parameters (whatever their
+/// key order), settings and whether it is disabled, together with the
+/// fingerprints of the nodes feeding it and how they connect. Equal
+/// fingerprints mean the node and everything upstream are unchanged.
+pub fn fingerprints(workflow: &Workflow) -> HashMap<String, String> {
+    use sha2::{Digest, Sha256};
+    let Ok(order) = topological_order(workflow) else {
+        return HashMap::new();
+    };
+    let back = back_edges(workflow);
+    let mut prints: HashMap<String, String> = HashMap::new();
+    for node in &order {
+        let mut incoming: Vec<String> = workflow
+            .connections
+            .iter()
+            .enumerate()
+            .filter(|(i, c)| c.to_node == node.id && !back.contains(i))
+            .map(|(_, c)| {
+                let from = prints
+                    .get(&c.from_node)
+                    .cloned()
+                    .unwrap_or_else(|| format!("?{}", c.from_node));
+                format!("{from}:{}:{}:{}", c.from_output, c.to_input, c.error)
+            })
+            .collect();
+        incoming.sort();
+        let settings = serde_json::to_value(&node.settings).unwrap_or_default();
+        let text = format!(
+            "{}\n{}\n{}\n{}\n{}",
+            node.node_type,
+            canonical_json(&node.parameters),
+            canonical_json(&settings),
+            node.disabled,
+            incoming.join(",")
+        );
+        prints.insert(
+            node.id.clone(),
+            format!("{:x}", Sha256::digest(text.as_bytes())),
+        );
+    }
+    prints
+}
+
+/// JSON with every object's keys sorted, so key order doesn't count.
+fn canonical_json(v: &serde_json::Value) -> String {
+    match v {
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let parts: Vec<String> = keys
+                .iter()
+                .map(|k| {
+                    format!(
+                        "{}:{}",
+                        serde_json::Value::String((*k).clone()),
+                        canonical_json(&map[*k])
+                    )
+                })
+                .collect();
+            format!("{{{}}}", parts.join(","))
+        }
+        serde_json::Value::Array(items) => format!(
+            "[{}]",
+            items
+                .iter()
+                .map(canonical_json)
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        other => other.to_string(),
+    }
 }
 
 /// The most inputs any node has (Merge has 2); also enforced when saving.
@@ -935,6 +1263,81 @@ mod tests {
         let outputs = execute_workflow(&wf, &registry()).await.unwrap();
         let merged: Vec<_> = outputs["merge"].iter().map(|i| i.json.clone()).collect();
         assert_eq!(merged, vec![serde_json::json!({"from_b": true}), serde_json::json!({"from_a": true})]);
+    }
+
+    /// Records "started:id" / "finished:id" in order.
+    struct OrderObserver(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait::async_trait]
+    impl ExecutionObserver for OrderObserver {
+        async fn on_node_started(&self, node_id: &str) {
+            self.0.lock().unwrap().push(format!("started:{node_id}"));
+        }
+        async fn on_node_finished(&self, node_id: &str, _items: &[Item]) {
+            self.0.lock().unwrap().push(format!("finished:{node_id}"));
+        }
+        async fn on_node_errored(&self, _node_id: &str, _error: &str) {}
+        async fn on_node_skipped(&self, _node_id: &str, _items: &[Item]) {}
+    }
+
+    #[tokio::test]
+    async fn both_branches_of_an_if_run_at_the_same_time() {
+        // trigger -> if: true -> slow (Wait 300 ms), false -> quick (Set).
+        let mut wf = linear_workflow();
+        let node = |id: &str, node_type: &str, parameters: serde_json::Value| NodeInstance {
+            id: id.into(),
+            node_type: node_type.into(),
+            position: (1.0, 0.0),
+            parameters,
+            disabled: false,
+            settings: Default::default(),
+        };
+        wf.nodes = vec![
+            wf.nodes[0].clone(),
+            node("if1", "core.if", serde_json::json!({"conditions": {"combinator": "and", "rules": [{"left": "{{ $json.slow }}", "operator": "isTrue"}]}})),
+            node("slow", "core.wait", serde_json::json!({"seconds": 0.3})),
+            node("quick", "core.set", serde_json::json!({"fields": {"done": true}})),
+        ];
+        let conn = |from: &str, out: usize, to: &str| Connection { from_node: from.into(), from_output: out, to_node: to.into(), to_input: 0, error: false };
+        wf.connections = vec![conn("trigger", 0, "if1"), conn("if1", 0, "slow"), conn("if1", 1, "quick")];
+        let seed = vec![
+            Item { json: serde_json::json!({"slow": true}), binary: serde_json::json!({}) },
+            Item { json: serde_json::json!({"slow": false}), binary: serde_json::json!({}) },
+        ];
+        let observer = OrderObserver(std::sync::Mutex::new(Vec::new()));
+        let started = std::time::Instant::now();
+        let outputs = execute_workflow_seeded(&wf, &registry(), Some(seed), &Default::default(), &observer).await.unwrap();
+        let events = observer.0.into_inner().unwrap();
+        let at = |e: &str| events.iter().position(|x| x == e).unwrap_or_else(|| panic!("no {e} in {events:?}"));
+        assert!(at("finished:quick") < at("finished:slow"), "the false branch must not wait for the true one: {events:?}");
+        assert!(at("started:quick") < at("finished:slow"), "{events:?}");
+        assert_eq!(outputs["quick"].len(), 1);
+        assert_eq!(outputs["slow"].len(), 1);
+        assert!(started.elapsed() < std::time::Duration::from_millis(600));
+    }
+
+    #[tokio::test]
+    async fn a_node_fed_by_both_branches_waits_for_both() {
+        // trigger -> a (Wait 200 ms) -> merge input 0; trigger -> b (Set) -> merge input 1.
+        let mut wf = linear_workflow();
+        let node = |id: &str, node_type: &str, parameters: serde_json::Value| NodeInstance {
+            id: id.into(),
+            node_type: node_type.into(),
+            position: (1.0, 0.0),
+            parameters,
+            disabled: false,
+            settings: Default::default(),
+        };
+        wf.nodes = vec![
+            wf.nodes[0].clone(),
+            node("a", "core.wait", serde_json::json!({"seconds": 0.2})),
+            node("b", "core.set", serde_json::json!({"fields": {"from_b": true}})),
+            node("m", "core.merge", serde_json::json!({"mode": "append"})),
+        ];
+        let conn = |from: &str, to: &str, to_input: usize| Connection { from_node: from.into(), from_output: 0, to_node: to.into(), to_input, error: false };
+        wf.connections = vec![conn("trigger", "a", 0), conn("trigger", "b", 0), conn("a", "m", 0), conn("b", "m", 1)];
+        let outputs = execute_workflow(&wf, &registry()).await.unwrap();
+        assert_eq!(outputs["m"].len(), 2, "both inputs arrived before the merge ran");
     }
 
     #[tokio::test]

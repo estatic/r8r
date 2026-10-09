@@ -199,6 +199,7 @@ const flowNodes = computed<FlowNode[]>(() =>
       disabled: n.disabled,
       outputPorts: portsByNodeId[n.id] ?? ['main'],
       inputCount: metaFor(n.node_type)?.input_count ?? 1,
+      reused: props.execution?.node_runs?.[n.id]?.reused === true,
       needsSetup: agentSetupProblems([n]).length > 0,
     },
   })),
@@ -329,6 +330,14 @@ function outputTop(shape: string, index: number, total: number): string {
           >
             {{ label }}
           </div>
+          <!-- Kept from the previous run rather than run again. -->
+          <span
+            v-if="data.reused"
+            data-testid="reused"
+            title="Unchanged since the last run: its output was reused, not run again"
+            class="absolute -top-1.5 -left-1.5 z-10 w-4 h-4 rounded-full bg-green-600 text-white text-[10px] leading-4 text-center shadow"
+            >↺</span
+          >
           <!-- Not set up, or its last run failed: a small red "!" in the corner, the reason on hover. -->
           <span
             v-if="data.problem"

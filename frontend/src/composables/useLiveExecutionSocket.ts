@@ -4,7 +4,7 @@ import type { Execution, ExecutionStatus, Item } from '../types/domain'
 
 export type LiveExecutionEvent = { execution_id: string; workflow_id: string } & (
   | { type: 'node_started'; node_id: string }
-  | { type: 'node_finished'; node_id: string; items: Item[]; counts?: Record<string, number> }
+  | { type: 'node_finished'; node_id: string; items: Item[]; counts?: Record<string, number>; reused?: boolean }
   | { type: 'node_errored'; node_id: string; error: string; counts?: Record<string, number> }
   | { type: 'node_skipped'; node_id: string; items: Item[]; counts?: Record<string, number> }
   | { type: 'execution_finished'; status: ExecutionStatus }
@@ -47,11 +47,13 @@ export function useLiveExecutionSocket(workflowId: string): LiveExecutionSocket 
         runs[event.node_id] = {
           status: event.type === 'node_finished' ? 'success' : 'skipped',
           counts: event.counts ?? { '0': event.items.length },
+          outputs: [event.items],
+          ...(event.type === 'node_finished' && event.reused ? { reused: true } : {}),
         }
         break
       case 'node_errored':
         updated.node_outputs[event.node_id] = [{ json: { error: event.error }, binary: {} }]
-        runs[event.node_id] = { status: 'error', counts: event.counts ?? {} }
+        runs[event.node_id] = { status: 'error', counts: event.counts ?? {}, error: event.error }
         break
       case 'execution_finished':
         updated.status = event.status

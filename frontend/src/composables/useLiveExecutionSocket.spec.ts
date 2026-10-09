@@ -70,6 +70,16 @@ describe('useLiveExecutionSocket', () => {
     expect(execution.value?.finished_at).not.toBeNull()
   })
 
+  it('marks a reused node and keeps an error\'s full text on its run', () => {
+    const { execution, connect } = useLiveExecutionSocket('wf-1')
+    connect()
+    const ws = MockWebSocket.instances[0]
+    ws.emitMessage({ execution_id: 'e1', workflow_id: 'wf-1', type: 'node_finished', node_id: 't', items: [], counts: { '0': 0 }, reused: true })
+    ws.emitMessage({ execution_id: 'e1', workflow_id: 'wf-1', type: 'node_errored', node_id: 'c', error: 'boom\n  at main (line 1:7)' })
+    expect(execution.value?.node_runs?.t.reused).toBe(true)
+    expect(execution.value?.node_runs?.c.error).toBe('boom\n  at main (line 1:7)')
+  })
+
   it('records a node_errored event as a synthesized error item', () => {
     const { execution, connect } = useLiveExecutionSocket('wf-1')
     connect()

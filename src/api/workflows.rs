@@ -1,7 +1,7 @@
 use crate::domain::{Connection, ExecutionMode, NodeInstance, Workflow};
 use crate::state::AppState;
 use axum::async_trait;
-use axum::extract::{FromRequestParts, Path, State};
+use axum::extract::{FromRequestParts, Path, Query, State};
 use axum::http::request::Parts;
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
@@ -194,10 +194,18 @@ pub async fn set_workflow_active(
     Json(workflow).into_response()
 }
 
+#[derive(Deserialize, Default)]
+pub struct ExecuteQuery {
+    /// Run every node, reusing nothing from the last run.
+    #[serde(default)]
+    pub fresh: bool,
+}
+
 pub async fn execute_workflow(
     State(state): State<AppState>,
     AuthUser(_user_id): AuthUser,
     Path(id): Path<Uuid>,
+    Query(query): Query<ExecuteQuery>,
 ) -> impl IntoResponse {
     let workflow = match state.storage.get_workflow(id).await {
         Ok(Some(wf)) => wf,
@@ -216,11 +224,37 @@ pub async fn execute_workflow(
         }
     };
 
+    // Nodes that succeeded in the last run and haven't changed (nor has
+    // anything upstream of them) keep that output instead of running again.
+    let reuse = if query.fresh {
+        std::collections::HashMap::new()
+    } else {
+        match state
+            .storage
+            .list_executions_for_workflow(workflow.id, 5)
+            .await
+        {
+            Ok(runs) => runs
+                .iter()
+                .find(|r| r.status != crate::domain::ExecutionStatus::Running)
+                .map(|last| crate::execution_runner::reusable_runs(&workflow, last))
+                .unwrap_or_default(),
+            Err(e) => {
+                tracing::warn!(error = %e, "could not read the last run; running every node");
+                std::collections::HashMap::new()
+            }
+        }
+    };
+
     // A Telegram trigger has no data of its own: as n8n's "Listen for test
-    // event", wait for the next message to the bot and run with it.
-    let start = crate::engine::start_node_id(&workflow).ok().and_then(|id| workflow.nodes.iter().find(|n| n.id == id));
+    // event", wait for the next message to the bot and run with it -- unless
+    // the last run's trigger output is reused (the same message again).
+    let start = crate::engine::start_node_id(&workflow)
+        .ok()
+        .and_then(|id| workflow.nodes.iter().find(|n| n.id == id));
+    let start_reused = start.is_some_and(|n| reuse.contains_key(&n.id));
     let trigger_items = match start {
-        Some(node) if node.node_type == "telegram.trigger" => {
+        Some(node) if node.node_type == "telegram.trigger" && !start_reused => {
             if workflow.active {
                 // Its poller owns the bot's updates (Telegram allows one
                 // reader), so run again with the last message it handled.
@@ -258,7 +292,10 @@ pub async fn execute_workflow(
 
     // The run is a detached background task (Plan 8.7): respond at once;
     // the editor follows progress over the WebSocket.
-    match crate::execution_runner::start_execution(
+    if !reuse.is_empty() {
+        tracing::info!(workflow_id = %workflow.id, reused = reuse.len(), "manual run: reusing unchanged nodes from the last run");
+    }
+    match crate::execution_runner::start_execution_reusing(
         state.storage.clone(),
         state.execution_events.clone(),
         state.registry.clone(),
@@ -266,6 +303,7 @@ pub async fn execute_workflow(
         ExecutionMode::Manual,
         trigger_items,
         resources,
+        reuse,
     )
     .await
     {

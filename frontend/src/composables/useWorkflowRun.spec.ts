@@ -41,6 +41,16 @@ describe('useWorkflowRun', () => {
     expect(run.executing.value).toBe(false)
   })
 
+  it('asks for a fresh run only when told to', async () => {
+    const fetchMock = stubFetch(exec('e1', 'Running'))
+    const run = useWorkflowRun('wf', ref<Execution | null>(null))
+    await run.execute()
+    expect(fetchMock.mock.calls[0][0]).toBe('/rest/r8r/workflows/wf/execute')
+    run.stop()
+    await run.execute(true)
+    expect(fetchMock.mock.calls[fetchMock.mock.calls.length - 1][0]).toBe('/rest/r8r/workflows/wf/execute?fresh=true')
+  })
+
   it('keeps socket node outputs when the POST response arrives after socket events', async () => {
     stubFetch(exec('e1', 'Running'))
     const execution = ref<Execution | null>(exec('e1', 'Running', { set1: [{ json: { a: 1 }, binary: {} }] }))

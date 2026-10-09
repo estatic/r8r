@@ -46,6 +46,8 @@ const props = withDefaults(
     nodeLabels?: Record<string, string>
     /** The workflow's id, for the Webhook's URL. */
     workflowId?: string
+    /** Inside the node view (between Input and Output) rather than docked at the right edge. */
+    embedded?: boolean
     /** A section to bring into view (an agent port was clicked); `at` makes repeats count. */
     focus?: { section: string; at: number } | null
   }>(),
@@ -107,7 +109,7 @@ const takesCredential = computed(() => {
 const isTelegramSend = computed(() => props.node?.node_type === 'telegram.sendMessage')
 const telegramMessage = ref<MessageForm>(loadMessage({}))
 // The keys the Send Message form owns (it rewrites them all on Apply).
-const TELEGRAM_MESSAGE_KEYS = ['chat_id', 'text', 'parse_mode', 'reply_markup', 'disable_notification', 'protect_content', 'disable_web_page_preview', 'reply_to_message_id', 'message_thread_id']
+const TELEGRAM_MESSAGE_KEYS = ['operation', 'file', 'caption', 'has_spoiler', 'supports_streaming', 'duration', 'performer', 'title', 'chat_id', 'text', 'parse_mode', 'reply_markup', 'disable_notification', 'protect_content', 'disable_web_page_preview', 'reply_to_message_id', 'message_thread_id']
 
 const isLoop = computed(() => props.node?.node_type === 'core.loop')
 const batchSize = ref<number | string>(1)
@@ -473,7 +475,11 @@ onBeforeUnmount(() => {
 </script>
 
 <template>
-  <aside v-if="node" class="absolute top-0 right-0 bottom-0 w-96 bg-white border-l shadow-lg flex flex-col">
+  <aside
+    v-if="node"
+    class="bg-white flex flex-col"
+    :class="embedded ? 'relative h-full w-[28rem] shrink-0 border-x' : 'absolute top-0 right-0 bottom-0 w-96 border-l shadow-lg'"
+  >
     <header class="px-4 py-3 border-b flex justify-between items-center">
       <div>
         <div class="text-xs text-gray-400">{{ node.node_type }}</div>

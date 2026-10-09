@@ -18,11 +18,30 @@ pub const EXECUTION_EVENTS_CAPACITY: usize = 256;
 #[derive(Debug, Clone, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ExecutionEventKind {
-    NodeStarted { node_id: String },
-    NodeFinished { node_id: String, items: Vec<Item>, counts: BTreeMap<String, usize> },
-    NodeErrored { node_id: String, error: String, counts: BTreeMap<String, usize> },
-    NodeSkipped { node_id: String, items: Vec<Item>, counts: BTreeMap<String, usize> },
-    ExecutionFinished { status: ExecutionStatus },
+    NodeStarted {
+        node_id: String,
+    },
+    NodeFinished {
+        node_id: String,
+        items: Vec<Item>,
+        counts: BTreeMap<String, usize>,
+        /// Taken from the previous run, not run again.
+        #[serde(skip_serializing_if = "std::ops::Not::not")]
+        reused: bool,
+    },
+    NodeErrored {
+        node_id: String,
+        error: String,
+        counts: BTreeMap<String, usize>,
+    },
+    NodeSkipped {
+        node_id: String,
+        items: Vec<Item>,
+        counts: BTreeMap<String, usize>,
+    },
+    ExecutionFinished {
+        status: ExecutionStatus,
+    },
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -31,6 +50,14 @@ pub struct ExecutionEvent {
     pub workflow_id: Uuid,
     #[serde(flatten)]
     pub kind: ExecutionEventKind,
+}
+
+/// What a node received and sent, as `on_node_io` reports it.
+#[derive(Default)]
+struct NodeIo {
+    input: Vec<Item>,
+    outputs: Vec<Vec<Item>>,
+    error_items: Vec<Item>,
 }
 
 /// The concrete `ExecutionObserver` used for every real (non-test) run:
@@ -46,6 +73,10 @@ struct LiveExecutionTracker {
     execution: Mutex<Execution>,
     /// Counts reported by `on_node_counts`, until the node's own event.
     pending_counts: std::sync::Mutex<HashMap<String, BTreeMap<String, usize>>>,
+    /// Input and outputs reported by `on_node_io`, until the node's own event.
+    pending_io: std::sync::Mutex<HashMap<String, NodeIo>>,
+    /// Each node's fingerprint for this run, kept on its record.
+    fingerprints: HashMap<String, String>,
     storage: Arc<dyn Storage>,
     events: broadcast::Sender<ExecutionEvent>,
 }
@@ -57,25 +88,53 @@ impl LiveExecutionTracker {
             workflow_id: execution.workflow_id,
             execution: Mutex::new(execution),
             pending_counts: Default::default(),
+            pending_io: Default::default(),
+            fingerprints: HashMap::new(),
             storage,
             events,
         }
     }
 
     /// Records a node's output; returns what it now totals (items, counts).
-    async fn persist_node_output(&self, node_id: &str, items: Vec<Item>, run: NodeRun) -> (Vec<Item>, BTreeMap<String, usize>) {
+    async fn persist_node_output(
+        &self,
+        node_id: &str,
+        items: Vec<Item>,
+        mut run: NodeRun,
+    ) -> (Vec<Item>, BTreeMap<String, usize>) {
+        let io = self
+            .pending_io
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(node_id)
+            .unwrap_or_default();
+        run.input = io.input;
+        run.outputs = io.outputs;
+        run.error_items = io.error_items;
+        run.fingerprint = self.fingerprints.get(node_id).cloned();
         let mut execution = self.execution.lock().await;
         // A node inside a loop runs once per batch: keep what all its runs sent.
         let earlier = execution.node_runs.get(node_id).filter(|r| r.status == NodeRunStatus::Success && run.status == NodeRunStatus::Success).cloned();
         let (items, run) = match earlier {
-            Some(earlier) => {
-                let mut all = execution.node_outputs.get(node_id).cloned().unwrap_or_default();
+            Some(mut earlier) => {
+                let mut all = execution
+                    .node_outputs
+                    .get(node_id)
+                    .cloned()
+                    .unwrap_or_default();
                 all.extend(items);
-                let mut counts = earlier.counts;
                 for (port, n) in run.counts {
-                    *counts.entry(port).or_default() += n;
+                    *earlier.counts.entry(port).or_default() += n;
                 }
-                (all, NodeRun { status: run.status, counts })
+                earlier.input.extend(run.input);
+                if earlier.outputs.len() < run.outputs.len() {
+                    earlier.outputs.resize_with(run.outputs.len(), Vec::new);
+                }
+                for (port, its) in run.outputs.into_iter().enumerate() {
+                    earlier.outputs[port].extend(its);
+                }
+                earlier.error_items.extend(run.error_items);
+                (all, earlier)
             }
             None => (items, run),
         };
@@ -120,21 +179,98 @@ impl ExecutionObserver for LiveExecutionTracker {
     async fn on_node_counts(&self, node_id: &str, counts: &BTreeMap<String, usize>) {
         self.pending_counts.lock().unwrap_or_else(|e| e.into_inner()).insert(node_id.to_string(), counts.clone());
     }
+    async fn on_node_io(
+        &self,
+        node_id: &str,
+        input: &[Item],
+        outputs: &[Vec<Item>],
+        error_items: &[Item],
+    ) {
+        let io = NodeIo {
+            input: input.to_vec(),
+            outputs: outputs.to_vec(),
+            error_items: error_items.to_vec(),
+        };
+        self.pending_io
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .insert(node_id.to_string(), io);
+    }
     async fn on_node_finished(&self, node_id: &str, items: &[Item]) {
         let counts = self.take_counts(node_id, items.len());
-        let (items, counts) = self.persist_node_output(node_id, items.to_vec(), NodeRun { status: NodeRunStatus::Success, counts }).await;
-        self.emit(ExecutionEventKind::NodeFinished { node_id: node_id.to_string(), items, counts });
+        let (items, counts) = self
+            .persist_node_output(
+                node_id,
+                items.to_vec(),
+                NodeRun {
+                    status: NodeRunStatus::Success,
+                    counts,
+                    ..Default::default()
+                },
+            )
+            .await;
+        self.emit(ExecutionEventKind::NodeFinished {
+            node_id: node_id.to_string(),
+            items,
+            counts,
+            reused: false,
+        });
+    }
+    async fn on_node_reused(&self, node_id: &str, items: &[Item]) {
+        let counts = self.take_counts(node_id, items.len());
+        let run = NodeRun {
+            status: NodeRunStatus::Success,
+            counts,
+            reused: true,
+            ..Default::default()
+        };
+        let (items, counts) = self.persist_node_output(node_id, items.to_vec(), run).await;
+        self.emit(ExecutionEventKind::NodeFinished {
+            node_id: node_id.to_string(),
+            items,
+            counts,
+            reused: true,
+        });
     }
     async fn on_node_errored(&self, node_id: &str, error: &str) {
         let counts = self.take_counts(node_id, 0);
-        let error_item = Item { json: serde_json::json!({ "error": error }), binary: serde_json::json!({}) };
-        let (_, counts) = self.persist_node_output(node_id, vec![error_item], NodeRun { status: NodeRunStatus::Error, counts }).await;
-        self.emit(ExecutionEventKind::NodeErrored { node_id: node_id.to_string(), error: error.to_string(), counts });
+        let error_item = Item {
+            json: serde_json::json!({ "error": error }),
+            binary: serde_json::json!({}),
+        };
+        let run = NodeRun {
+            status: NodeRunStatus::Error,
+            counts,
+            error: Some(error.to_string()),
+            ..Default::default()
+        };
+        let (_, counts) = self
+            .persist_node_output(node_id, vec![error_item], run)
+            .await;
+        self.emit(ExecutionEventKind::NodeErrored {
+            node_id: node_id.to_string(),
+            error: error.to_string(),
+            counts,
+        });
     }
     async fn on_node_skipped(&self, node_id: &str, items: &[Item]) {
         let counts = self.take_counts(node_id, items.len());
-        let (items, counts) = self.persist_node_output(node_id, items.to_vec(), NodeRun { status: NodeRunStatus::Skipped, counts }).await;
-        self.emit(ExecutionEventKind::NodeSkipped { node_id: node_id.to_string(), items, counts });
+        let (items, counts) = self
+            .persist_node_output(
+                node_id,
+                items.to_vec(),
+                NodeRun {
+                    status: NodeRunStatus::Skipped,
+                    counts,
+                    ..Default::default()
+                },
+            )
+            .await;
+        self.emit(ExecutionEventKind::NodeSkipped {
+            node_id: node_id.to_string(),
+            items,
+            counts,
+        });
     }
 }
 
@@ -150,6 +286,32 @@ pub async fn start_execution(
     mode: ExecutionMode,
     trigger_items: Option<Vec<Item>>,
     resources: crate::credentials::RunResources,
+) -> anyhow::Result<(Execution, tokio::task::JoinHandle<Execution>)> {
+    start_execution_reusing(
+        storage,
+        events,
+        registry,
+        workflow,
+        mode,
+        trigger_items,
+        resources,
+        HashMap::new(),
+    )
+    .await
+}
+
+/// As `start_execution`, taking unchanged nodes' output from `reuse` (an
+/// earlier run's records, see `reusable_runs`).
+#[allow(clippy::too_many_arguments)]
+pub async fn start_execution_reusing(
+    storage: Arc<dyn Storage>,
+    events: broadcast::Sender<ExecutionEvent>,
+    registry: Arc<NodeRegistry>,
+    workflow: Workflow,
+    mode: ExecutionMode,
+    trigger_items: Option<Vec<Item>>,
+    resources: crate::credentials::RunResources,
+    reuse: HashMap<String, NodeRun>,
 ) -> anyhow::Result<(Execution, tokio::task::JoinHandle<Execution>)> {
     let execution = Execution {
         id: Uuid::new_v4(),
@@ -180,10 +342,11 @@ pub async fn start_execution(
     let handle = tokio::spawn(async move {
         let clock = std::time::Instant::now();
         let execution_id = execution.id;
-        let tracker = LiveExecutionTracker::new(execution, storage.clone(), events.clone());
+        let mut tracker = LiveExecutionTracker::new(execution, storage.clone(), events.clone());
+        tracker.fingerprints = crate::engine::fingerprints(&workflow);
         // A stop drops the run at its next await (an HTTP call, a wait, ...).
         let result = tokio::select! {
-            result = crate::engine::execute_workflow_seeded(&workflow, &registry, trigger_items, &resources, &tracker) => Some(result),
+            result = crate::engine::execute_workflow_reusing(&workflow, &registry, trigger_items, &resources, &tracker, &reuse) => Some(result),
             _ = cancel.cancelled() => None,
         };
         running().lock().unwrap_or_else(|e| e.into_inner()).remove(&execution_id);
@@ -228,6 +391,24 @@ pub async fn start_execution(
         finish(&*storage, &events, workflow.id, final_execution).await
     });
     Ok((started, handle))
+}
+
+/// The records of `previous` (the workflow's last run) a new run may reuse:
+/// nodes that succeeded there and whose fingerprint (their settings and
+/// everything upstream) is still the same. Runs from before fingerprints
+/// were kept give nothing.
+pub fn reusable_runs(workflow: &Workflow, previous: &Execution) -> HashMap<String, NodeRun> {
+    let now = crate::engine::fingerprints(workflow);
+    previous
+        .node_runs
+        .iter()
+        .filter(|(id, run)| {
+            run.status == NodeRunStatus::Success
+                && run.fingerprint.is_some()
+                && run.fingerprint.as_ref() == now.get(*id)
+        })
+        .map(|(id, run)| (id.clone(), run.clone()))
+        .collect()
 }
 
 /// Stamps, persists and announces a finished (or canceled) run.
@@ -293,8 +474,12 @@ pub async fn run_and_track_execution(
 
 #[cfg(test)]
 mod tests {
-    use super::{run_and_track_execution, ExecutionEventKind};
-    use crate::domain::{Connection, Execution, ExecutionMode, ExecutionStatus, NodeInstance, Workflow};
+    use super::{
+        reusable_runs, run_and_track_execution, start_execution_reusing, ExecutionEventKind,
+    };
+    use crate::domain::{
+        Connection, Execution, ExecutionMode, ExecutionStatus, NodeInstance, Workflow,
+    };
     use crate::node::NodeRegistry;
     use crate::storage::sqlite::SqliteStorage;
     use crate::storage::Storage;
@@ -436,6 +621,172 @@ mod tests {
         // runner's own final update = 3, not 1 -- proving this isn't only
         // writing once at the end.
         assert_eq!(counter.load(Ordering::SeqCst), 3);
+    }
+
+    #[tokio::test]
+    async fn records_each_nodes_input_every_output_and_its_full_error() {
+        let storage: Arc<dyn Storage> = Arc::new(
+            SqliteStorage::new("sqlite::memory:", [0u8; 32])
+                .await
+                .unwrap(),
+        );
+        let mut wf = linear_workflow();
+        // set1 -> an If (true/false outputs) -> a Code node that throws.
+        wf.nodes.push(NodeInstance {
+            id: "if1".into(),
+            node_type: "core.if".into(),
+            position: (2.0, 0.0),
+            parameters: serde_json::json!({"condition": false}),
+            disabled: false,
+            settings: Default::default(),
+        });
+        wf.nodes.push(NodeInstance {
+            id: "code1".into(),
+            node_type: "core.code".into(),
+            position: (3.0, 0.0),
+            parameters: serde_json::json!({"script": "throw new Error('boom')"}),
+            disabled: false,
+            settings: Default::default(),
+        });
+        let conn = |from: &str, out: usize, to: &str| Connection {
+            from_node: from.into(),
+            from_output: out,
+            to_node: to.into(),
+            to_input: 0,
+            error: false,
+        };
+        wf.connections.push(conn("set1", 0, "if1"));
+        wf.connections.push(conn("if1", 1, "code1"));
+        storage.create_workflow(&wf).await.unwrap();
+        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        let (started, handle) = start_execution(
+            storage.clone(),
+            events,
+            registry(),
+            wf.clone(),
+            ExecutionMode::Manual,
+            None,
+            Default::default(),
+        )
+        .await
+        .unwrap();
+        handle.await.unwrap();
+        let stored = storage.get_execution(started.id).await.unwrap().unwrap();
+
+        let if_run = &stored.node_runs["if1"];
+        assert_eq!(if_run.input[0].json, serde_json::json!({"greeting": "hi"}));
+        assert_eq!(if_run.outputs.len(), 2, "both outputs are kept");
+        assert!(if_run.outputs[0].is_empty());
+        assert_eq!(
+            if_run.outputs[1][0].json,
+            serde_json::json!({"greeting": "hi"})
+        );
+
+        let code_run = &stored.node_runs["code1"];
+        assert_eq!(code_run.status, NodeRunStatus::Error);
+        assert_eq!(code_run.input.len(), 1);
+        assert!(
+            code_run.error.as_deref().unwrap().contains("boom"),
+            "{:?}",
+            code_run.error
+        );
+    }
+
+    /// trigger -> set1 -> code1 (throws until its script is fixed).
+    fn failing_tail_workflow() -> Workflow {
+        let mut wf = linear_workflow();
+        wf.nodes.push(NodeInstance {
+            id: "code1".into(),
+            node_type: "core.code".into(),
+            position: (2.0, 0.0),
+            parameters: serde_json::json!({"script": "throw new Error('boom')"}),
+            disabled: false,
+            settings: Default::default(),
+        });
+        wf.connections.push(Connection {
+            from_node: "set1".into(),
+            from_output: 0,
+            to_node: "code1".into(),
+            to_input: 0,
+            error: false,
+        });
+        wf
+    }
+
+    async fn run_reusing(
+        storage: &Arc<dyn Storage>,
+        wf: &Workflow,
+        previous: Option<&Execution>,
+    ) -> Execution {
+        let reuse = previous.map(|p| reusable_runs(wf, p)).unwrap_or_default();
+        let (events, _rx) = tokio::sync::broadcast::channel(16);
+        let (started, handle) = start_execution_reusing(
+            storage.clone(),
+            events,
+            registry(),
+            wf.clone(),
+            ExecutionMode::Manual,
+            None,
+            Default::default(),
+            reuse,
+        )
+        .await
+        .unwrap();
+        handle.await.unwrap();
+        storage.get_execution(started.id).await.unwrap().unwrap()
+    }
+
+    #[tokio::test]
+    async fn a_second_run_reuses_unchanged_green_nodes_and_reruns_the_failed_one() {
+        let storage: Arc<dyn Storage> = Arc::new(
+            SqliteStorage::new("sqlite::memory:", [0u8; 32])
+                .await
+                .unwrap(),
+        );
+        let mut wf = failing_tail_workflow();
+        storage.create_workflow(&wf).await.unwrap();
+        let first = run_reusing(&storage, &wf, None).await;
+        assert_eq!(first.node_runs["code1"].status, NodeRunStatus::Error);
+
+        // Fix the failing node: the green ones before it are reused.
+        wf.nodes[2].parameters = serde_json::json!({"script": "return items"});
+        let second = run_reusing(&storage, &wf, Some(&first)).await;
+        assert_eq!(second.status, ExecutionStatus::Success);
+        assert!(second.node_runs["trigger"].reused && second.node_runs["set1"].reused);
+        assert!(!second.node_runs["code1"].reused);
+        assert_eq!(
+            second.node_runs["code1"].outputs[0][0].json,
+            serde_json::json!({"greeting": "hi"}),
+            "fed the reused output"
+        );
+
+        // Change set1: it and everything after it run again; the trigger is still reused.
+        wf.nodes[1].parameters = serde_json::json!({"fields": {"greeting": "hello"}});
+        let third = run_reusing(&storage, &wf, Some(&second)).await;
+        assert!(third.node_runs["trigger"].reused);
+        assert!(!third.node_runs["set1"].reused && !third.node_runs["code1"].reused);
+        assert_eq!(
+            third.node_runs["code1"].outputs[0][0].json["greeting"],
+            "hello"
+        );
+    }
+
+    #[test]
+    fn a_fingerprint_ignores_key_order_but_not_values_or_upstream_changes() {
+        let wf = linear_workflow();
+        let base = crate::engine::fingerprints(&wf);
+        let mut reordered = wf.clone();
+        reordered.nodes[1].parameters =
+            serde_json::from_str(r#"{"fields": {"greeting": "hi"}}"#).unwrap();
+        assert_eq!(crate::engine::fingerprints(&reordered), base);
+        let mut upstream = wf.clone();
+        upstream.nodes[0].disabled = true;
+        let changed = crate::engine::fingerprints(&upstream);
+        assert_ne!(changed["trigger"], base["trigger"]);
+        assert_ne!(
+            changed["set1"], base["set1"],
+            "a change upstream changes everything after it"
+        );
     }
 
     #[tokio::test]

@@ -98,21 +98,41 @@ pub struct Execution {
     pub finished_at: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum NodeRunStatus {
+    #[default]
     Success,
     Error,
     Skipped,
 }
 
 /// One node's outcome in a run.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
 pub struct NodeRun {
     pub status: NodeRunStatus,
     /// Items sent per output, keyed like the editor's handles: "0", "1",
     /// ..., and "error" for the error output.
     pub counts: std::collections::BTreeMap<String, usize>,
+    /// The items it received (all inputs, in order).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub input: Vec<Item>,
+    /// The items it sent, per output (index = the output's handle).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub outputs: Vec<Vec<Item>>,
+    /// Items sent down its error output.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub error_items: Vec<Item>,
+    /// Why it failed, in full (a Code node's includes its stack trace).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+    /// The node's settings and everything upstream of it when it ran; a
+    /// later run may reuse this run's output while it is unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fingerprint: Option<String>,
+    /// Taken from an earlier run instead of running again.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reused: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]

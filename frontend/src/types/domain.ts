@@ -76,6 +76,16 @@ export type NodeRunStatus = 'running' | 'success' | 'error' | 'skipped'
 export interface NodeRun {
   status: NodeRunStatus
   counts: Record<string, number>
+  /** The items it received (all inputs). */
+  input?: Item[]
+  /** The items it sent, per output. */
+  outputs?: Item[][]
+  /** Items sent down its error output. */
+  error_items?: Item[]
+  /** Why it failed, in full (a Code node's includes its stack trace). */
+  error?: string
+  /** Taken from the previous run instead of running again. */
+  reused?: boolean
 }
 
 export interface CredentialSummary {
