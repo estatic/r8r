@@ -134,5 +134,11 @@ function pick(expression: string) {
         Only the main content (no menus, headers, footers)
       </label>
     </template>
+
+    <label class="block text-xs text-gray-600 border-t pt-2">
+      Max requests per minute (empty = no limit)
+      <input :value="form.maxPerMinute" aria-label="Max requests per minute" type="number" min="1" max="6000" placeholder="e.g. 10" class="w-full border rounded px-2 py-1 text-sm" @input="set({ maxPerMinute: ($event.target as HTMLInputElement).value })" />
+      <span class="text-[11px] text-gray-400">Requests with this API key are spaced evenly (10 a minute = one every 6 s), across every run and agent tool call; the rest wait their turn.</span>
+    </label>
   </fieldset>
 </template>

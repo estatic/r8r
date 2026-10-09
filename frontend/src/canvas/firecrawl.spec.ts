@@ -25,6 +25,12 @@ describe('Web Search (Firecrawl) form', () => {
     expect(buildFirecrawl(loadFirecrawl(fields))).toEqual({ fields })
   })
 
+  it('keeps a rate limit for either operation', () => {
+    const fields = { operation: 'scrape', url: 'https://x.example', formats: ['markdown'], max_requests_per_minute: 10 }
+    expect(buildFirecrawl(loadFirecrawl(fields))).toEqual({ fields })
+    expect(buildFirecrawl({ ...loadFirecrawl({ query: 'q' }), maxPerMinute: '0' })).toEqual({ error: 'Max requests per minute must be a whole number from 1 to 6000.' })
+  })
+
   it('says what is missing', () => {
     expect(buildFirecrawl(loadFirecrawl({}))).toEqual({ error: 'Enter a search query.' })
     expect(buildFirecrawl({ ...loadFirecrawl({ query: 'q' }), limit: '500' })).toEqual({ error: 'Results must be between 1 and 100.' })

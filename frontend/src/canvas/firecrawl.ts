@@ -13,6 +13,8 @@ export interface FirecrawlForm {
   url: string
   formats: string[]
   onlyMainContent: boolean
+  /** Requests a minute with this API key (empty = no limit). */
+  maxPerMinute: string
 }
 
 export const SEARCH_SOURCES = [
@@ -38,7 +40,7 @@ export const SCRAPE_FORMATS = [
 
 /** The keys the form owns (rewritten on Apply). */
 export const FIRECRAWL_KEYS = [
-  'operation', 'query', 'limit', 'sources', 'time_range', 'country', 'include_domains', 'exclude_domains', 'scrape_results', 'url', 'formats', 'only_main_content',
+  'operation', 'query', 'limit', 'sources', 'time_range', 'country', 'include_domains', 'exclude_domains', 'scrape_results', 'url', 'formats', 'only_main_content', 'max_requests_per_minute',
 ]
 
 const str = (v: unknown) => (v === undefined || v === null ? '' : String(v))
@@ -59,6 +61,7 @@ export function loadFirecrawl(p: Record<string, unknown>): FirecrawlForm {
     url: str(p.url),
     formats: list(p.formats, ['markdown']),
     onlyMainContent: p.only_main_content !== false,
+    maxPerMinute: str(p.max_requests_per_minute),
   }
 }
 
@@ -66,6 +69,14 @@ const splitDomains = (s: string) => s.split(',').map((d) => d.trim()).filter(Boo
 
 /** The node's parameters, or why the form can't be saved. */
 export function buildFirecrawl(f: FirecrawlForm): { fields: Record<string, unknown> } | { error: string } {
+  const built = buildOperation(f)
+  if ('error' in built || !f.maxPerMinute.trim()) return built
+  const n = Number(f.maxPerMinute)
+  if (!Number.isInteger(n) || n < 1 || n > 6000) return { error: 'Max requests per minute must be a whole number from 1 to 6000.' }
+  return { fields: { ...built.fields, max_requests_per_minute: n } }
+}
+
+function buildOperation(f: FirecrawlForm): { fields: Record<string, unknown> } | { error: string } {
   if (f.operation === 'scrape') {
     if (!f.url.trim()) return { error: 'Enter the URL to read.' }
     if (f.formats.length === 0) return { error: 'Choose at least one format.' }

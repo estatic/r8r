@@ -9,6 +9,7 @@ pub mod loop_node;
 pub mod manual_trigger;
 pub mod merge;
 pub mod noop;
+pub mod rate_limit;
 pub mod schedule;
 pub mod set;
 pub mod switch;

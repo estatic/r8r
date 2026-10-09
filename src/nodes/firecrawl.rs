@@ -180,6 +180,15 @@ fn scrape_body(p: &Value) -> Result<Value, NodeError> {
     Ok(json!({"url": url, "formats": formats, "onlyMainContent": only_main}))
 }
 
+/// The limiter's key for an API key at an address; a hash, so the key
+/// itself isn't held in yet another place.
+fn limiter_key(base: &str, api_key: &str) -> String {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (base, api_key).hash(&mut h);
+    format!("firecrawl:{:x}", h.finish())
+}
+
 /// Firecrawl's reason for a failed call, without anything secret in it.
 fn api_error(status: reqwest::StatusCode, body: &Value) -> NodeError {
     let reason = body.get("error").and_then(Value::as_str).unwrap_or("no reason given");
@@ -201,6 +210,12 @@ async fn execute_with_client(client: &reqwest::Client, ctx: &NodeExecutionContex
         other => return Err(fail(format!("unknown operation \"{other}\" (expected \"search\" or \"scrape\")"))),
     };
     let (key, base) = credential(ctx)?;
+    // Firecrawl limits requests per API key: with a limit set, every request
+    // with this key (any run, any agent tool call) waits for its turn.
+    if let Some(per_minute) = number_param(p, "max_requests_per_minute")? {
+        let interval = super::rate_limit::interval_for(per_minute).ok_or_else(|| fail("\"max_requests_per_minute\" must be between 1 and 6000"))?;
+        super::rate_limit::wait_turn(&limiter_key(&base, &key), interval).await;
+    }
     // Errors never include the reqwest error or the request: the key is in it.
     let response = client
         .post(format!("{base}{path}"))
@@ -377,6 +392,24 @@ mod tests {
             let err = run(&server, params.clone()).await.unwrap_err().to_string();
             assert!(err.contains(says), "{params}: {err}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_rate_limit_spaces_requests_with_the_same_key() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/search"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"success": true, "data": {"web": []}})))
+            .mount(&server)
+            .await;
+        // 600 a minute = one every 100 ms: three requests take at least 200 ms.
+        let started = std::time::Instant::now();
+        for _ in 0..3 {
+            run(&server, json!({"query": "q", "max_requests_per_minute": 600})).await.unwrap();
+        }
+        assert!(started.elapsed() >= Duration::from_millis(200), "{:?}", started.elapsed());
+        let err = run(&server, json!({"query": "q", "max_requests_per_minute": 0})).await.unwrap_err();
+        assert!(err.to_string().contains("between 1 and 6000"), "{err}");
     }
 
     #[tokio::test]
