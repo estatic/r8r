@@ -747,6 +747,79 @@ async fn webhook_answers_with_the_last_nodes_data_or_at_once_and_reads_path_para
 }
 
 #[tokio::test]
+async fn a_protected_webhook_refuses_a_wrong_key_and_keeps_the_key_out_of_the_run() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "webhook-auth@example.com").await;
+    let post = |uri: String, body: serde_json::Value| {
+        let app = app.clone();
+        let token = token.clone();
+        async move {
+            let response = app
+                .oneshot(Request::builder().method("POST").uri(uri)
+                    .header("content-type", "application/json").header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(body.to_string())).unwrap())
+                .await.unwrap();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()
+        }
+    };
+    let cred = post("/rest/r8r/credentials".into(), serde_json::json!({"name": "hook key", "credential_type": "apiKeyHeader", "data": {"header_name": "X-Key", "value": "s3cret"}})).await;
+    let wf = post("/rest/r8r/workflows".into(), serde_json::json!({
+        "name": "protected",
+        "nodes": [
+            {"id": "hook", "node_type": "core.webhook", "position": [0.0, 0.0], "disabled": false,
+             "parameters": {"path": "p", "method": "POST", "respond": "lastNode", "response_code": 200, "auth": {"credential_id": cred["id"]}}},
+            {"id": "set1", "node_type": "core.set", "position": [1.0, 0.0], "parameters": {"fields": {"ok": true}}, "disabled": false}
+        ],
+        "connections": [{"from_node": "hook", "from_output": 0, "to_node": "set1", "to_input": 0}]
+    })).await;
+    let id = wf["id"].as_str().unwrap().to_string();
+    app.clone()
+        .oneshot(Request::builder().method("PATCH").uri(format!("/rest/r8r/workflows/{id}/active"))
+            .header("content-type", "application/json").header("authorization", format!("Bearer {token}"))
+            .body(Body::from(serde_json::json!({"active": true}).to_string())).unwrap())
+        .await.unwrap();
+    let call = |key: &'static str| {
+        let app = app.clone();
+        let id = id.clone();
+        async move {
+            let response = app
+                .oneshot(Request::builder().method("POST").uri(format!("/webhook-r8r/{id}/p")).header("x-key", key).body(Body::empty()).unwrap())
+                .await.unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or_default())
+        }
+    };
+    assert_eq!(call("wrong").await.0, StatusCode::FORBIDDEN);
+    let (status, body) = call("s3cret").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["ok"], true);
+    assert!(body["headers"].is_object(), "the run still gets the other headers: {body}");
+    assert!(body["headers"].get("x-key").is_none(), "the key must not reach the run: {body}");
+}
+
+#[tokio::test]
+async fn a_connection_into_a_huge_input_index_is_refused() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "huge-input@example.com").await;
+    let body = serde_json::json!({
+        "name": "huge",
+        "nodes": [
+            {"id": "a", "node_type": "core.manualTrigger", "position": [0.0, 0.0], "parameters": {}, "disabled": false},
+            {"id": "b", "node_type": "core.merge", "position": [1.0, 0.0], "parameters": {}, "disabled": false}
+        ],
+        "connections": [{"from_node": "a", "from_output": 0, "to_node": "b", "to_input": 1_000_000_000_000u64}]
+    });
+    let response = app
+        .oneshot(Request::builder().method("POST").uri("/rest/r8r/workflows")
+            .header("content-type", "application/json").header("authorization", format!("Bearer {token}"))
+            .body(Body::from(body.to_string())).unwrap())
+        .await.unwrap();
+    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
 async fn webhook_trigger_executes_workflow_end_to_end_then_404s_after_deactivation() {
     let app = test_app().await;
     let token = register_and_get_token(&app, "webhook-e2e@example.com").await;

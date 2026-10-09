@@ -47,7 +47,12 @@ impl Node for MergeNode {
                     let n = if unpaired { one.len().max(two.len()) } else { one.len().min(two.len()) };
                     (0..n).map(|i| join(one.get(i), two.get(i), clash)).collect()
                 }
-                "allCombinations" => one.iter().flat_map(|a| two.iter().map(move |b| join(Some(a), Some(b), clash))).collect(),
+                "allCombinations" => {
+                    if one.len().saturating_mul(two.len()) > MAX_ITEMS {
+                        return Err(fail(format!("all combinations of {} and {} items would be more than {MAX_ITEMS} items", one.len(), two.len())));
+                    }
+                    one.iter().flat_map(|a| two.iter().map(move |b| join(Some(a), Some(b), clash))).collect()
+                }
                 other => return Err(fail(format!("unknown combine_by \"{other}\" (expected matchingFields, position or allCombinations)"))),
             },
             "mergeByKey" => merge_by_key(p, &ctx.input_items)?,
@@ -56,6 +61,9 @@ impl Node for MergeNode {
         Ok(vec![items])
     }
 }
+
+/// Most items a combine may produce, so one step can't exhaust memory.
+const MAX_ITEMS: usize = 1_000_000;
 
 fn fail(msg: impl std::fmt::Display) -> NodeError {
     NodeError::ExecutionFailed(format!("core.merge: {msg}"))
@@ -170,6 +178,10 @@ fn by_fields(p: &Value, one: &[Item], two: &[Item], clash: Clash) -> Result<Vec<
             )))
         }
     }
+    // Many-to-many matches multiply like combinations do.
+    if out.len() > MAX_ITEMS {
+        return Err(fail(format!("matching made more than {MAX_ITEMS} items; match on fields that are more unique")));
+    }
     Ok(out)
 }
 
@@ -245,6 +257,13 @@ mod tests {
         assert_eq!(merge(unpaired, &one, &two).await.unwrap(), vec![serde_json::json!({"a": 1, "b": 1}), serde_json::json!({"a": 2})]);
         let all = serde_json::json!({"mode": "combine", "combine_by": "allCombinations"});
         assert_eq!(merge(all, &one, &[serde_json::json!({"b": 1}), serde_json::json!({"b": 2})]).await.unwrap().len(), 4);
+    }
+
+    #[tokio::test]
+    async fn too_many_combinations_are_refused() {
+        let many: Vec<serde_json::Value> = (0..1001).map(|i| serde_json::json!({"i": i})).collect();
+        let err = merge(serde_json::json!({"mode": "combine", "combine_by": "allCombinations"}), &many, &many).await.unwrap_err();
+        assert!(err.to_string().contains("more than 1000000 items"), "{err}");
     }
 
     #[tokio::test]

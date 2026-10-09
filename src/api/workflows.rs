@@ -42,6 +42,17 @@ pub struct UpdateWorkflowRequest {
     pub connections: Vec<Connection>,
 }
 
+/// A connection's input and output indexes are small; huge ones from a
+/// crafted request would make the engine allocate for them.
+fn validate_connections(connections: &[Connection]) -> Result<(), String> {
+    for c in connections {
+        if c.to_input >= crate::engine::MAX_INPUTS || c.from_output >= 1024 {
+            return Err(format!("connection {} -> {}: input or output index out of range", c.from_node, c.to_node));
+        }
+    }
+    Ok(())
+}
+
 /// Range-checks every node's `settings` (Plan 8.5). Returns the first
 /// violation as a user-facing message naming the node and field.
 fn validate_nodes(nodes: &[NodeInstance]) -> Result<(), String> {
@@ -68,7 +79,7 @@ pub async fn create_workflow(
     AuthUser(_user_id): AuthUser,
     Json(payload): Json<CreateWorkflowRequest>,
 ) -> impl IntoResponse {
-    if let Err(msg) = validate_nodes(&payload.nodes) {
+    if let Err(msg) = validate_nodes(&payload.nodes).and_then(|()| validate_connections(&payload.connections)) {
         return (StatusCode::BAD_REQUEST, msg).into_response();
     }
     let now = chrono::Utc::now();
@@ -213,7 +224,7 @@ pub async fn execute_workflow(
             if workflow.active {
                 // Its poller owns the bot's updates (Telegram allows one
                 // reader), so run again with the last message it handled.
-                match crate::telegram_poller::last_received_update(state.storage.as_ref(), workflow.id, &node.id).await {
+                match crate::telegram_poller::last_received_update(state.storage.as_ref(), workflow.id, node).await {
                     Ok(Some(item)) => {
                         tracing::info!(workflow_id = %workflow.id, "manual run of an active workflow: replaying the last Telegram message");
                         Some(vec![item])
@@ -278,7 +289,7 @@ pub async fn update_workflow(
     Path(id): Path<Uuid>,
     Json(payload): Json<UpdateWorkflowRequest>,
 ) -> impl IntoResponse {
-    if let Err(msg) = validate_nodes(&payload.nodes) {
+    if let Err(msg) = validate_nodes(&payload.nodes).and_then(|()| validate_connections(&payload.connections)) {
         return (StatusCode::BAD_REQUEST, msg).into_response();
     }
     let mut workflow = match state.storage.get_workflow(id).await {

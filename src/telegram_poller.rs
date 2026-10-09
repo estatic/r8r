@@ -315,7 +315,16 @@ mod last_update_tests {
             updated_at: chrono::Utc::now(),
         };
         storage.create_workflow(&wf).await.unwrap();
-        assert!(last_received_update(&storage, wf.id, "tg").await.unwrap().is_none());
+        let tg = |params: serde_json::Value| NodeInstance {
+            id: "tg".into(),
+            node_type: "telegram.trigger".into(),
+            position: (0.0, 0.0),
+            parameters: params,
+            disabled: false,
+            settings: Default::default(),
+        };
+        let open = tg(serde_json::json!({}));
+        assert!(last_received_update(&storage, wf.id, &open).await.unwrap().is_none());
 
         storage.create_execution(&run(wf.id, 10, Some(serde_json::json!({"update_id": 1, "message": {"text": "older"}})))).await.unwrap();
         storage.create_execution(&run(wf.id, 5, Some(serde_json::json!({"update_id": 2, "message": {"text": "newest"}})))).await.unwrap();
@@ -323,8 +332,38 @@ mod last_update_tests {
         storage.create_execution(&run(wf.id, 1, Some(serde_json::json!({})))).await.unwrap();
         storage.create_execution(&run(wf.id, 0, None)).await.unwrap();
 
-        let item = last_received_update(&storage, wf.id, "tg").await.unwrap().unwrap();
+        let item = last_received_update(&storage, wf.id, &open).await.unwrap().unwrap();
         assert_eq!(item.json["message"]["text"], "newest");
+    }
+
+    #[tokio::test]
+    async fn a_replay_skips_updates_the_trigger_now_restricts_away() {
+        let storage = SqliteStorage::new("sqlite::memory:", [0u8; 32]).await.unwrap();
+        let wf = Workflow {
+            id: Uuid::new_v4(),
+            name: "bot".into(),
+            active: true,
+            nodes: vec![],
+            connections: vec![],
+            created_at: chrono::Utc::now(),
+            updated_at: chrono::Utc::now(),
+        };
+        storage.create_workflow(&wf).await.unwrap();
+        let msg = |id: i64, chat: i64| serde_json::json!({"update_id": id, "message": {"chat": {"id": chat}, "from": {"id": 7}, "text": format!("chat {chat}")}});
+        storage.create_execution(&run(wf.id, 10, Some(msg(1, 42)))).await.unwrap();
+        storage.create_execution(&run(wf.id, 5, Some(msg(2, 99)))).await.unwrap();
+        let only_42 = NodeInstance {
+            id: "tg".into(),
+            node_type: "telegram.trigger".into(),
+            position: (0.0, 0.0),
+            parameters: serde_json::json!({"restrict_chat_ids": "42"}),
+            disabled: false,
+            settings: Default::default(),
+        };
+        let item = last_received_update(&storage, wf.id, &only_42).await.unwrap().unwrap();
+        assert_eq!(item.json["message"]["text"], "chat 42");
+        let callbacks_only = NodeInstance { parameters: serde_json::json!({"updates": ["callback_query"]}), ..only_42 };
+        assert!(last_received_update(&storage, wf.id, &callbacks_only).await.unwrap().is_none());
     }
 }
 
@@ -578,13 +617,18 @@ pub async fn activate_telegram_trigger(
 /// The last Telegram update this workflow's trigger (`trigger_id`) handled,
 /// from its recent runs: what a manual run of an *active* workflow replays,
 /// since its poller owns the bot's updates. None before any message.
-pub async fn last_received_update(storage: &dyn Storage, workflow_id: Uuid, trigger_id: &str) -> anyhow::Result<Option<Item>> {
+pub async fn last_received_update(storage: &dyn Storage, workflow_id: Uuid, trigger_node: &NodeInstance) -> anyhow::Result<Option<Item>> {
+    // Only an update the trigger would run today: its update types and chat
+    // or user restrictions may have narrowed since that run.
+    let allowed = trigger_updates(trigger_node);
+    let restrictions = Restrictions::of(trigger_node);
     let runs = storage.list_executions_for_workflow(workflow_id, 50).await?;
     Ok(runs.into_iter().find_map(|run| {
         run.node_outputs
-            .get(trigger_id)
+            .get(&trigger_node.id)
             .and_then(|items| items.first())
             .filter(|item| item.json.get("update_id").is_some())
+            .filter(|item| wanted(&item.json, &allowed) && restrictions.admits(&item.json))
             .cloned()
     }))
 }

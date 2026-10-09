@@ -276,6 +276,11 @@ impl<'a> Run<'a> {
                 self.produced.get(&conn.from_node).and_then(|outputs| outputs.get(conn.from_output)).map(Vec::as_slice).unwrap_or_default()
             };
             input_items.extend(arrived.iter().cloned());
+            // A node has a handful of inputs; an index from the JSON beyond
+            // that would only allocate a huge list.
+            if conn.to_input >= MAX_INPUTS {
+                return Err(anyhow::anyhow!("connection into {} uses input {}; a node has at most {MAX_INPUTS} inputs", node_instance.id, conn.to_input));
+            }
             if input_groups.len() <= conn.to_input {
                 input_groups.resize_with(conn.to_input + 1, Vec::new);
             }
@@ -547,6 +552,9 @@ fn with_input_fields(output: crate::node::NodeOutput, input: &[Item]) -> crate::
 fn port_counts(lens: &[usize]) -> BTreeMap<String, usize> {
     lens.iter().enumerate().map(|(i, n)| (i.to_string(), *n)).collect()
 }
+
+/// The most inputs any node has (Merge has 2); also enforced when saving.
+pub const MAX_INPUTS: usize = 16;
 
 pub(crate) fn topological_order(workflow: &Workflow) -> anyhow::Result<Vec<NodeInstance>> {
     if workflow.nodes.is_empty() {

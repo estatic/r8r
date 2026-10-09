@@ -73,6 +73,9 @@ impl Node for SetNode {
                     other => return Err(fail(format!("unknown include \"{other}\" (expected all, none, selected or except)"))),
                 };
                 for (name, value) in &fields {
+                    if dot_notation && name.split('.').count() > MAX_DEPTH {
+                        return Err(fail(format!("the field name \"{}…\" nests deeper than {MAX_DEPTH} levels", name.chars().take(40).collect::<String>())));
+                    }
                     if dot_notation && name.contains('.') {
                         set_path(&mut out, name, value.clone());
                     } else {
@@ -86,6 +89,10 @@ impl Node for SetNode {
         Ok(vec![items])
     }
 }
+
+/// Deepest `a.b.c` a field name may reach: far deeper data overflows the
+/// stack when it is stored or sent on.
+const MAX_DEPTH: usize = 64;
 
 /// `a.b.c` = value: creates (or replaces non-object) parents on the way.
 fn set_path(obj: &mut Map<String, Value>, path: &str, value: Value) {
@@ -129,6 +136,13 @@ mod tests {
         assert_eq!(set(json!({"fields": {"user.age": 36}}), input.clone()).await.unwrap(), json!({"user": {"name": "Ada", "age": 36}, "x": 1}));
         assert_eq!(set(json!({"fields": {"x.y": true}}), input.clone()).await.unwrap()["x"], json!({"y": true}));
         assert_eq!(set(json!({"fields": {"user.age": 36}, "dot_notation": false}), input).await.unwrap()["user.age"], json!(36));
+    }
+
+    #[tokio::test]
+    async fn a_field_name_nesting_too_deep_is_refused() {
+        let deep = vec!["a"; 10_000].join(".");
+        let err = set(json!({"fields": {deep: 1}}), json!({})).await.unwrap_err();
+        assert!(err.to_string().contains("deeper than 64 levels"), "{err}");
     }
 
     #[tokio::test]

@@ -55,8 +55,16 @@ pub async fn handle_webhook(
         }
     };
 
-    if let Err(refusal) = check_auth(start_node, &headers, &resources) {
-        return refusal;
+    match check_auth(start_node, &headers, &resources) {
+        // The secret it was checked with stays out of the run's data, and so
+        // out of execution history, where anyone viewing runs could read it.
+        Ok(Some(secret_header)) => {
+            if let Some(h) = trigger_item.json.get_mut("headers").and_then(|h| h.as_object_mut()) {
+                h.remove(&secret_header);
+            }
+        }
+        Ok(None) => {}
+        Err(refusal) => return refusal,
     }
 
     // The run is always a detached background task (Plan 8.7), so a caller
@@ -133,11 +141,12 @@ fn last_node_items(workflow: &crate::domain::Workflow, execution: &crate::domain
 
 /// The node's credential, when it has one: Basic Auth (user and password)
 /// or API Key (Header) (a header and its value), checked as n8n does.
+/// Ok names the (lowercase) header that carried the secret, if any.
 fn check_auth(
     node: &crate::domain::NodeInstance,
     headers: &HeaderMap,
     resources: &crate::credentials::RunResources,
-) -> Result<(), axum::response::Response> {
+) -> Result<Option<String>, axum::response::Response> {
     let Some(id) = node
         .parameters
         .get("auth")
@@ -145,7 +154,7 @@ fn check_auth(
         .and_then(|v| v.as_str())
         .and_then(|s| Uuid::parse_str(s).ok())
     else {
-        return Ok(());
+        return Ok(None);
     };
     let refuse = |code: StatusCode, message: &str| {
         let mut response = (code, Json(serde_json::json!({ "message": message }))).into_response();
@@ -160,13 +169,20 @@ fn check_auth(
     let field = |k: &str| data.get(k).and_then(|v| v.as_str()).unwrap_or("");
     match kind.as_str() {
         "basicAuth" => {
-            let Some(given) = headers.get("authorization").and_then(|v| v.to_str().ok()).and_then(|v| v.strip_prefix("Basic ")) else {
+            // The scheme is case-insensitive (RFC 7617).
+            let Some(given) = headers
+                .get("authorization")
+                .and_then(|v| v.to_str().ok())
+                .and_then(|v| v.split_once(' '))
+                .filter(|(scheme, _)| scheme.eq_ignore_ascii_case("basic"))
+                .map(|(_, rest)| rest)
+            else {
                 return Err(refuse(StatusCode::UNAUTHORIZED, "Authorization is required!"));
             };
             use base64::Engine;
             let expected = base64::engine::general_purpose::STANDARD.encode(format!("{}:{}", field("username"), field("password")));
             if constant_time_eq(given.trim().as_bytes(), expected.as_bytes()) {
-                Ok(())
+                Ok(Some("authorization".into()))
             } else {
                 Err(refuse(StatusCode::FORBIDDEN, "Authorization data is wrong!"))
             }
@@ -174,7 +190,7 @@ fn check_auth(
         "apiKeyHeader" => {
             let given = headers.get(field("header_name")).and_then(|v| v.to_str().ok()).unwrap_or("");
             if !field("value").is_empty() && constant_time_eq(given.as_bytes(), field("value").as_bytes()) {
-                Ok(())
+                Ok(Some(field("header_name").to_ascii_lowercase()))
             } else {
                 Err(refuse(StatusCode::FORBIDDEN, "Authorization data is wrong!"))
             }
@@ -286,7 +302,8 @@ mod tests {
     fn basic_auth_needs_the_credentials_user_and_password() {
         let (node, r) = resources("basicAuth", serde_json::json!({"username": "u", "password": "p"}));
         // base64("u:p") = dTpw
-        assert!(check_auth(&node, &headers(&[("authorization", "Basic dTpw")]), &r).is_ok());
+        assert_eq!(check_auth(&node, &headers(&[("authorization", "Basic dTpw")]), &r).unwrap(), Some("authorization".into()));
+        assert!(check_auth(&node, &headers(&[("authorization", "basic dTpw")]), &r).is_ok());
         assert_eq!(check_auth(&node, &headers(&[]), &r).unwrap_err().status(), StatusCode::UNAUTHORIZED);
         assert_eq!(check_auth(&node, &headers(&[("authorization", "Basic dTp4")]), &r).unwrap_err().status(), StatusCode::FORBIDDEN);
     }
@@ -294,7 +311,7 @@ mod tests {
     #[test]
     fn header_auth_needs_the_header_and_its_value() {
         let (node, r) = resources("apiKeyHeader", serde_json::json!({"header_name": "x-key", "value": "s3cret"}));
-        assert!(check_auth(&node, &headers(&[("x-key", "s3cret")]), &r).is_ok());
+        assert_eq!(check_auth(&node, &headers(&[("x-key", "s3cret")]), &r).unwrap(), Some("x-key".into()));
         assert_eq!(check_auth(&node, &headers(&[("x-key", "nope")]), &r).unwrap_err().status(), StatusCode::FORBIDDEN);
         assert_eq!(check_auth(&node, &headers(&[]), &r).unwrap_err().status(), StatusCode::FORBIDDEN);
     }

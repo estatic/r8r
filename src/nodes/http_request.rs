@@ -123,7 +123,8 @@ async fn execute_with_client(
     }
     // Per request, within the client's own limit.
     if let Some(ms) = ctx.parameters.get("timeout_ms").and_then(|v| v.as_u64()).filter(|ms| *ms > 0) {
-        request = request.timeout(std::time::Duration::from_millis(ms));
+        // At most an hour, as the node's own timeout setting allows.
+        request = request.timeout(std::time::Duration::from_millis(ms.min(3_600_000)));
     }
 
     request = apply_auth(request, &ctx.parameters, &ctx.credentials, &ctx.credential_types)?;
