@@ -74,6 +74,10 @@ pub fn eval_js(script: &str, ctx: &EvalContext) -> Result<serde_json::Value, Exp
         if crate::intl::is_used_by(script) {
             crate::intl::install(&js).map_err(|e| ExprError::Runtime(format!("could not set up Intl: {e}")))?;
         }
+        if crate::url_js::is_used_by(script) {
+            crate::url_js::install(&js)
+                .map_err(|e| ExprError::Runtime(format!("could not set up URL: {e}")))?;
+        }
         let globals = js.globals();
 
         let json_val = json_to_js(&js, &ctx.json)?;
@@ -269,7 +273,7 @@ fn resolve_string(s: &str, ctx: &EvalContext) -> Result<serde_json::Value, ExprE
     if let Some(inner) = trimmed.strip_prefix("{{").and_then(|r| r.strip_suffix("}}")) {
         if !inner.contains("}}") {
             // The whole string is exactly one expression: return its raw value.
-            return eval_js(inner.trim(), ctx);
+            return eval_js(inner.trim(), ctx).map_err(|e| explain(inner.trim(), e));
         }
     }
 
@@ -287,12 +291,43 @@ fn resolve_string(s: &str, ctx: &EvalContext) -> Result<serde_json::Value, ExprE
             .find("}}")
             .ok_or_else(|| ExprError::Runtime(format!("unterminated expression in: {s}")))?;
         let expr_src = after_open[..end].trim();
-        let value = eval_js(expr_src, ctx)?;
+        let value = eval_js(expr_src, ctx).map_err(|e| explain(expr_src, e))?;
         result.push_str(&stringify_for_splice(&value));
         rest = &after_open[end + 2..];
     }
     result.push_str(rest);
     Ok(serde_json::Value::String(result))
+}
+
+/// A syntax error in an expression, with the line it is on and, for the
+/// common slip of a quoted string running onto the next line, the fix.
+fn explain(src: &str, err: ExprError) -> ExprError {
+    let ExprError::Thrown { message, stack } = err else {
+        return err;
+    };
+    if !message.starts_with("SyntaxError") {
+        return ExprError::Thrown { message, stack };
+    }
+    let line_no = stack
+        .as_deref()
+        .and_then(|s| s.split("eval_script:").nth(1))
+        .and_then(|rest| rest.split(':').next())
+        .and_then(|n| n.parse::<usize>().ok());
+    let mut text = message.clone();
+    if let Some(n) = line_no {
+        // For an unclosed string, the line the string opened on.
+        let shown = n.max(1);
+        if let Some(line) = src.lines().nth(shown - 1) {
+            text.push_str(&format!(" (expression line {shown}: {})", line.trim()));
+        }
+    }
+    if message.contains("unexpected end of string") {
+        text.push_str(". A '…' or \"…\" string can't continue on the next line: close it on the same line (write \\n for a line break), or use a `backtick` string, which may span lines");
+    }
+    ExprError::Thrown {
+        message: text,
+        stack,
+    }
 }
 
 /// Stringifies an evaluated expression's result for splicing into
@@ -312,6 +347,42 @@ fn stringify_for_splice(value: &serde_json::Value) -> String {
 mod tests {
     use super::*;
     use std::collections::HashMap;
+
+    #[test]
+    fn emoji_and_cyrillic_survive_expressions() {
+        let ctx = EvalContext {
+            json: serde_json::json!({"sentence": "Кот 🐱 спит 😴", "index": 1, "total": 3}),
+            ..empty_ctx()
+        };
+        let out = resolve_parameters(&serde_json::json!({"c": "📸 {{ $json.index + '/' + $json.total }} — {{ $json.sentence + ' ✅' }}"}), &ctx).unwrap();
+        assert_eq!(out["c"], "📸 1/3 — Кот 🐱 спит 😴 ✅");
+    }
+
+    #[test]
+    fn the_caption_expression_as_pasted() {
+        let ctx = EvalContext {
+            json: serde_json::json!({"index": 2, "total": 5, "sentence": "Кот 🐱", "search_query": "cat", "image_source": "Wikimedia", "source_page": "https://x.org"}),
+            ..empty_ctx()
+        };
+        let caption = "{{\n$json.index + '/' +\n$json.total +\n'\\n\\n\n' + $json.sentence +\n'\\n\\n\n' + ($json.third_search_query || $json.fallback_search_query || $json.search_query ||\n$json.first_search_query || '') +\n'\\n\nИсточник: ' + ($json.image_source || '') +\n'\\n\n' + ($json.source_page || '')\n}}";
+        // A quoted string can't span lines in JavaScript: the error says so and where.
+        let err = resolve_parameters(&serde_json::json!({"caption": caption}), &ctx)
+            .unwrap_err()
+            .to_string();
+        assert!(
+            err.contains("unexpected end of string (expression line 3: '\\n\\n"),
+            "{err}"
+        );
+        assert!(err.contains("use a `backtick` string"), "{err}");
+
+        // The same caption as a backtick string, line breaks and all, works.
+        let fixed = "{{ `${$json.index}/${$json.total}\n\n${$json.sentence}\n\n${$json.third_search_query || $json.fallback_search_query || $json.search_query || $json.first_search_query || ''}\nИсточник: ${$json.image_source || ''}\n${$json.source_page || ''}` }}";
+        let out = resolve_parameters(&serde_json::json!({"caption": fixed}), &ctx).unwrap();
+        assert_eq!(
+            out["caption"],
+            "2/5\n\nКот 🐱\n\ncat\nИсточник: Wikimedia\nhttps://x.org"
+        );
+    }
 
     fn empty_ctx() -> EvalContext<'static> {
         EvalContext {

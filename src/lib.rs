@@ -22,3 +22,4 @@ pub mod telegram_poller;
 pub mod tools;
 pub mod trigger_registry;
 pub mod triggers;
+pub mod url_js;

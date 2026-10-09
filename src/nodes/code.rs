@@ -223,12 +223,33 @@ fn n8n_helpers(upstream: &HashMap<String, Vec<serde_json::Value>>) -> String {
     )
 }
 
+/// What a call at `column` (1-based) of `line` calls: the expression right
+/// before the next "(" (`images.slice` in `const c = images.slice(0, 30);`).
+fn callee_at(line: &str, column: usize) -> Option<String> {
+    let chars: Vec<char> = line.chars().collect();
+    let from = column.saturating_sub(1).min(chars.len());
+    let open = (from..chars.len()).find(|&i| chars[i] == '(')?;
+    let mut start = open;
+    while start > 0
+        && (chars[start - 1].is_alphanumeric() || matches!(chars[start - 1], '_' | '$' | '.' | '?'))
+    {
+        start -= 1;
+    }
+    let callee: String = chars[start..open]
+        .iter()
+        .collect::<String>()
+        .replace("?.", ".");
+    let callee = callee.trim_matches('.').to_string();
+    (!callee.is_empty()).then_some(callee)
+}
+
 /// The error, then each frame in the user's code, nearest first:
 /// `at f (line 3:20)    return x.missing.deep;`. Lines and columns count
 /// from the top of the code box; r8r's own wrapper frame is left out.
 fn js_trace(script: &str, message: &str, stack: Option<&str>, prefix_len: usize) -> String {
     let lines: Vec<&str> = script.lines().collect();
     let mut out = message.to_string();
+    let mut named = false;
     for frame in stack.unwrap_or_default().lines() {
         let frame = frame.trim().trim_start_matches("at ");
         let Some((name, place)) = frame.rsplit_once(" (") else { continue };
@@ -237,10 +258,34 @@ fn js_trace(script: &str, message: &str, stack: Option<&str>, prefix_len: usize)
         }
         let mut parts = place.trim_end_matches(')').rsplit(':');
         let column: usize = parts.next().and_then(|c| c.parse().ok()).unwrap_or(0);
-        let Some(line) = parts.next().and_then(|l| l.parse::<usize>().ok()) else { continue };
-        let column = if line == 1 { column.saturating_sub(prefix_len) } else { column };
-        let name = if name == "<anonymous>" { "main code" } else { name };
-        let source = lines.get(line.saturating_sub(1)).map(|l| l.trim()).unwrap_or("");
+        let Some(line) = parts.next().and_then(|l| l.parse::<usize>().ok()) else {
+            continue;
+        };
+        let column = if line == 1 {
+            column.saturating_sub(prefix_len)
+        } else {
+            column
+        };
+        let name = if name == "<anonymous>" {
+            "main code"
+        } else {
+            name
+        };
+        let raw = lines.get(line.saturating_sub(1)).copied().unwrap_or("");
+        // QuickJS says only "not a function"; name what was called, as V8 does.
+        if !named && out.ends_with("not a function") {
+            named = true;
+            if let Some(callee) = callee_at(raw, column) {
+                out = format!(
+                    "{}{callee} is not a function",
+                    out.trim_end_matches("not a function")
+                );
+                if let Some((object, method)) = callee.rsplit_once('.') {
+                    out.push_str(&format!(" ({object} has no {method}() here: check what {object} holds, e.g. an object or text where a list was expected)"));
+                }
+            }
+        }
+        let source = raw.trim();
         out.push_str(&format!("\n  at {name} (line {line}:{column})    {source}"));
     }
     out
@@ -448,6 +493,65 @@ mod tests {
     async fn the_n8n_helpers_do_not_shift_error_lines() {
         let err = CodeNode.execute(&n8n_ctx("const a = 1;\nreturn null.x;")).await.unwrap_err().to_string();
         assert!(err.contains("at main code (line 2:"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn calling_a_list_method_on_an_object_names_it() {
+        let script = "const images = $json.images;\nconst candidates = images.slice(0, 30);\nreturn candidates;";
+        let ctx = ctx_with(
+            serde_json::json!({"mode": "runOnceForEachItem", "script": script}),
+            vec![serde_json::json!({"images": {"first": {"original": "https://x/a.jpg"}}})],
+        );
+        let err = CodeNode.execute(&ctx).await.unwrap_err().to_string();
+        assert!(
+            err.contains("images.slice is not a function (images has no slice() here"),
+            "{err}"
+        );
+        assert!(err.contains("line 2:"), "{err}");
+    }
+
+    #[test]
+    fn finds_the_callee_of_a_call() {
+        assert_eq!(
+            callee_at("    const candidates = images.slice(0, 30);", 27).as_deref(),
+            Some("images.slice")
+        );
+        assert_eq!(callee_at("return foo(1)", 1).as_deref(), Some("foo"));
+        assert_eq!(callee_at("x = a?.b.c(1)", 5).as_deref(), Some("a.b.c"));
+        assert_eq!(callee_at("no call here", 1), None);
+    }
+
+    #[tokio::test]
+    async fn code_can_pick_images_by_domain_with_url() {
+        let script = r#"
+const images = $json.images;
+const blockedDomains = ['pinterest.'];
+const reliableDomains = ['wikimedia.org', 'unsplash.com'];
+const getDomain = (u) => { try { return new URL(u).hostname.replace(/^www\./, ''); } catch { return ''; } };
+const isDirectImage = (u) => /\.(jpe?g|png|webp|gif)(\?|$)/i.test(new URL(u).pathname);
+const candidates = images.slice(0, 30);
+const selected = candidates.find(img => {
+    if (!img.original) return false;
+    if (img.is_product === true) return false;
+    if (!isDirectImage(img.original)) return false;
+    const domain = getDomain(img.original);
+    if (blockedDomains.some(d => domain.includes(d))) return false;
+    return reliableDomains.some(d => domain.includes(d));
+});
+return [{ json: { picked: selected ? selected.original : null } }];
+"#;
+        let images = serde_json::json!({"images": [
+            {"original": "https://i.pinimg.com/x.jpg"},
+            {"original": "https://shop.example/p.jpg", "is_product": true},
+            {"original": "https://upload.wikimedia.org/wiki/page"},
+            {"original": "https://upload.wikimedia.org/a/b/Cat.jpg?width=800"}
+        ]});
+        let ctx = ctx_with(serde_json::json!({"script": script}), vec![images]);
+        let out = CodeNode.execute(&ctx).await.unwrap();
+        assert_eq!(
+            out[0][0].json["picked"],
+            "https://upload.wikimedia.org/a/b/Cat.jpg?width=800"
+        );
     }
 
     #[tokio::test]
