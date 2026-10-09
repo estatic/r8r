@@ -1,5 +1,8 @@
 # r8r
 
+> [!WARNING]
+> **AI slop. Use at your own risk.** This code was written by an AI. No human has read it, and nobody has tested it in production. Passing tests are the only evidence that it works. Don't trust it with anything you care about.
+
 r8r is a reimplementation of [n8n](https://n8n.io) in Rust: a workflow automation server that stays behaviourally compatible with n8n 2.x. Workflows, credentials, expressions, webhooks and the REST APIs work the way n8n's do, so an n8n instance can be moved to r8r and back.
 
 Compatibility is defined by tests, not by porting n8n's code line by line. The BDD conformance suite in `tests/bdd/` runs the same scenarios against r8r and against real n8n 2.35.7.
