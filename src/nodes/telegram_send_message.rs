@@ -54,7 +54,7 @@ impl Node for TelegramSendMessageNode {
         "Send Telegram Message"
     }
     fn description(&self) -> &'static str {
-        "Sends a message via the configured Telegram bot."
+        "Sends a message, photo, document, video, audio or animation via the configured Telegram bot."
     }
     fn category(&self) -> crate::node::NodeCategory {
         crate::node::NodeCategory::Action
@@ -106,6 +106,92 @@ fn message_body(p: &serde_json::Value, chat_id: serde_json::Value, text: &str) -
     body
 }
 
+/// The operations: the Bot API method, and the field its file goes in
+/// (None for a text message).
+const OPERATIONS: [(&str, Option<&str>); 6] = [
+    ("sendMessage", None),
+    ("sendPhoto", Some("photo")),
+    ("sendDocument", Some("document")),
+    ("sendVideo", Some("video")),
+    ("sendAudio", Some("audio")),
+    ("sendAnimation", Some("animation")),
+];
+
+/// The Bot API method and its body for the node's `operation` (a text
+/// message by default; a photo, document, video, audio or animation by
+/// link or file_id, with an optional caption).
+fn request_body(
+    p: &serde_json::Value,
+    chat_id: serde_json::Value,
+) -> Result<(&'static str, serde_json::Value), NodeError> {
+    let fail = |m: String| NodeError::ExecutionFailed(format!("telegram.sendMessage: {m}"));
+    let op = p
+        .get("operation")
+        .and_then(|v| v.as_str())
+        .unwrap_or("sendMessage");
+    let (method, field) = OPERATIONS
+        .iter()
+        .find(|(m, _)| *m == op)
+        .copied()
+        .ok_or_else(|| {
+            fail(format!(
+                "unknown operation \"{op}\" (expected one of {})",
+                OPERATIONS.map(|(m, _)| m).join(", ")
+            ))
+        })?;
+    let Some(field) = field else {
+        let text = p.get("text").and_then(|v| v.as_str()).ok_or_else(|| {
+            NodeError::ExecutionFailed("telegram.sendMessage requires a \"text\" parameter".into())
+        })?;
+        return Ok((method, message_body(p, chat_id, text)));
+    };
+    let file = p
+        .get("file")
+        .and_then(|v| v.as_str())
+        .map(str::trim)
+        .filter(|f| !f.is_empty())
+        .ok_or_else(|| fail(format!("enter the {field}'s link (or a Telegram file_id)")))?;
+    // A link Telegram downloads itself; anything without "://" is a file_id.
+    if file.contains("://") && !(file.starts_with("https://") || file.starts_with("http://")) {
+        return Err(fail(format!("\"{file}\" isn't an http(s) link")));
+    }
+    let mut body = message_body(p, chat_id, "");
+    let obj = body.as_object_mut().expect("message_body builds an object");
+    obj.remove("text");
+    // Link previews are for text messages only.
+    obj.remove("link_preview_options");
+    obj.insert(field.to_string(), serde_json::json!(file));
+    if let Some(caption) = p
+        .get("caption")
+        .and_then(|v| v.as_str())
+        .filter(|c| !c.is_empty())
+    {
+        obj.insert("caption".into(), serde_json::json!(caption));
+    }
+    // The additional fields each kind of file takes, when set.
+    let extras: &[&str] = match field {
+        "photo" => &["has_spoiler"],
+        "video" => &[
+            "has_spoiler",
+            "supports_streaming",
+            "duration",
+            "width",
+            "height",
+        ],
+        "animation" => &["has_spoiler", "duration", "width", "height"],
+        "audio" => &["performer", "title", "duration"],
+        _ => &[],
+    };
+    for key in extras {
+        if let Some(v) = p.get(*key).filter(|v| {
+            !(v.is_null() || **v == serde_json::json!("") || **v == serde_json::json!(false))
+        }) {
+            obj.insert(key.to_string(), v.clone());
+        }
+    }
+    Ok((method, body))
+}
+
 async fn execute_with_client(
     client: &reqwest::Client,
     ctx: &NodeExecutionContext,
@@ -115,11 +201,7 @@ async fn execute_with_client(
         .get("chat_id")
         .ok_or_else(|| NodeError::ExecutionFailed("telegram.sendMessage requires a \"chat_id\" parameter".into()))?
         .clone();
-    let text = ctx
-        .parameters
-        .get("text")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| NodeError::ExecutionFailed("telegram.sendMessage requires a \"text\" parameter".into()))?;
+    let (method, body) = request_body(&ctx.parameters, chat_id)?;
 
     let credential_id_str = ctx
         .parameters
@@ -151,18 +233,15 @@ async fn execute_with_client(
         .filter(|s| !s.is_empty())
         .unwrap_or(DEFAULT_API_BASE_URL)
         .trim_end_matches('/');
-    let url = format!("{base_url}/bot{bot_token}/sendMessage");
+    let url = format!("{base_url}/bot{bot_token}/{method}");
 
     // Never interpolate `e` (the reqwest::Error) or `url` into any error
     // message below -- both can carry the bot token embedded in `url`,
     // unlike core.httpRequest where the URL is never secret. See this
     // plan's Global Constraints.
-    let response = client
-        .post(&url)
-        .json(&message_body(&ctx.parameters, chat_id, text))
-        .send()
-        .await
-        .map_err(|_| NodeError::ExecutionFailed("telegram.sendMessage: request to Telegram API failed".into()))?;
+    let response = client.post(&url).json(&body).send().await.map_err(|_| {
+        NodeError::ExecutionFailed("telegram.sendMessage: request to Telegram API failed".into())
+    })?;
 
     let status = response.status();
     let response_json: serde_json::Value = response.json().await.map_err(|_| {
@@ -270,6 +349,100 @@ mod tests {
             "disable_web_page_preview": true
         }));
         TelegramSendMessageNode.execute(&ctx).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sends_a_photo_by_link_with_a_caption_and_buttons() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/bot123:ABC/sendPhoto$"))
+            .and(body_json(serde_json::json!({
+                "chat_id": 42,
+                "photo": "https://upload.wikimedia.org/a/Cat.jpg",
+                "caption": "<b>A cat</b>",
+                "parse_mode": "HTML",
+                "reply_markup": {"inline_keyboard": [[{"text": "Source", "url": "https://commons.wikimedia.org"}]]}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true, "result": {"message_id": 2, "photo": []}})))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let ctx = send_ctx(
+            &server.uri(),
+            serde_json::json!({
+                "operation": "sendPhoto",
+                "chat_id": 42,
+                "file": "https://upload.wikimedia.org/a/Cat.jpg",
+                "caption": "<b>A cat</b>",
+                "parse_mode": "HTML",
+                "reply_markup": {"inline_keyboard": [[{"text": "Source", "url": "https://commons.wikimedia.org"}]]},
+                "disable_web_page_preview": true
+            }),
+        );
+        TelegramSendMessageNode.execute(&ctx).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn sends_a_document_by_file_id_without_a_caption() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path_regex(r"^/bot123:ABC/sendDocument$"))
+            .and(body_json(
+                serde_json::json!({"chat_id": "42", "document": "BQACAgIAAxkBAAI"}),
+            ))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({"ok": true, "result": {}})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+        let ctx = send_ctx(
+            &server.uri(),
+            serde_json::json!({"operation": "sendDocument", "chat_id": "42", "file": "BQACAgIAAxkBAAI"}),
+        );
+        TelegramSendMessageNode.execute(&ctx).await.unwrap();
+    }
+
+    #[test]
+    fn a_media_operation_needs_a_file_and_an_http_link() {
+        let body = |p: serde_json::Value| {
+            request_body(&p, serde_json::json!(1))
+                .map(|(m, b)| (m, b))
+                .map_err(|e| e.to_string())
+        };
+        assert!(body(serde_json::json!({"operation": "sendPhoto"}))
+            .unwrap_err()
+            .contains("enter the photo's link"));
+        assert!(
+            body(serde_json::json!({"operation": "sendVideo", "file": "ftp://x/v.mp4"}))
+                .unwrap_err()
+                .contains("isn't an http(s) link")
+        );
+        assert!(
+            body(serde_json::json!({"operation": "sendSticker", "file": "x"}))
+                .unwrap_err()
+                .contains("unknown operation")
+        );
+        assert_eq!(
+            body(serde_json::json!({"text": "hi"})).unwrap().0,
+            "sendMessage",
+            "a text message by default"
+        );
+        // Each kind keeps only its own additional fields.
+        let (m, b) = body(serde_json::json!({"operation": "sendAudio", "file": "https://x/a.mp3", "performer": "Ada", "title": "Song", "has_spoiler": true})).unwrap();
+        assert_eq!(
+            (m, b),
+            (
+                "sendAudio",
+                serde_json::json!({"chat_id": 1, "audio": "https://x/a.mp3", "performer": "Ada", "title": "Song"})
+            )
+        );
+        let (_, v) = body(serde_json::json!({"operation": "sendVideo", "file": "https://x/v.mp4", "has_spoiler": true, "supports_streaming": true, "duration": 30})).unwrap();
+        assert_eq!(
+            v,
+            serde_json::json!({"chat_id": 1, "video": "https://x/v.mp4", "has_spoiler": true, "supports_streaming": true, "duration": 30})
+        );
     }
 
     #[tokio::test]

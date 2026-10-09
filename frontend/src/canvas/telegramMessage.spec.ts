@@ -46,3 +46,31 @@ describe('Telegram message form', () => {
     expect(buildMessage(n)).toEqual({ error: 'Button "Go" needs its URL or callback data.' })
   })
 })
+
+describe('Telegram media', () => {
+  it('round-trips a photo by link with an HTML caption and buttons', () => {
+    const p = {
+      operation: 'sendPhoto',
+      chat_id: '{{ $json.message.chat.id }}',
+      file: '{{ $json.image_url }}',
+      caption: '<b>A cat</b>',
+      parse_mode: 'HTML',
+      reply_markup: { inline_keyboard: [[{ text: 'Source', url: 'https://x.org' }]] },
+      has_spoiler: true,
+    }
+    expect(buildMessage(loadMessage(p))).toEqual({ fields: p })
+  })
+
+  it('keeps each kind\'s own additional fields only', () => {
+    const audio = { operation: 'sendAudio', chat_id: '1', file: 'https://x/a.mp3', performer: 'Ada', title: 'Song', duration: 200 }
+    expect(buildMessage(loadMessage({ ...audio, has_spoiler: true }))).toEqual({ fields: audio })
+    const video = { operation: 'sendVideo', chat_id: '1', file: 'https://x/v.mp4', supports_streaming: true }
+    expect(buildMessage(loadMessage(video))).toEqual({ fields: video })
+  })
+
+  it('needs a link, not text, for a file', () => {
+    expect(buildMessage({ ...loadMessage({ operation: 'sendVideo', chat_id: '1' }) })).toEqual({ error: "Enter the video's link (or a Telegram file_id)." })
+    expect(buildMessage({ ...loadMessage({ operation: 'sendPhoto', chat_id: '1', file: 'ftp://x/p.jpg' }) })).toEqual({ error: "The photo's link must start with http:// or https://." })
+    expect(buildMessage(loadMessage({ chat_id: '1', text: 'hi' }))).toEqual({ fields: { chat_id: '1', text: 'hi' } })
+  })
+})

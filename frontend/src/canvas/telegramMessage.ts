@@ -14,7 +14,29 @@ export type Markup =
   | { kind: 'remove' }
   | { kind: 'forceReply'; placeholder: string }
 
+/** What the node sends: a text message, or a file by link (or file_id). */
+export type TelegramOperation = 'sendMessage' | 'sendPhoto' | 'sendDocument' | 'sendVideo' | 'sendAudio' | 'sendAnimation'
+
+export const TELEGRAM_OPERATIONS: { value: TelegramOperation; label: string; file?: string }[] = [
+  { value: 'sendMessage', label: 'Send Message' },
+  { value: 'sendPhoto', label: 'Send Photo', file: 'Photo' },
+  { value: 'sendDocument', label: 'Send Document', file: 'Document' },
+  { value: 'sendVideo', label: 'Send Video', file: 'Video' },
+  { value: 'sendAudio', label: 'Send Audio', file: 'Audio' },
+  { value: 'sendAnimation', label: 'Send Animation (GIF)', file: 'Animation' },
+]
+
 export interface MessageForm {
+  operation: TelegramOperation
+  /** The file's link, or a Telegram file_id (media operations). */
+  file: string
+  caption: string
+  /** Media additional fields (each kind uses its own). */
+  spoiler: boolean
+  supportsStreaming: boolean
+  duration: string
+  performer: string
+  title: string
   chatId: string
   text: string
   parseMode: '' | 'HTML' | 'Markdown' | 'MarkdownV2'
@@ -54,7 +76,16 @@ function loadMarkup(m: unknown): Markup {
 
 export function loadMessage(p: Record<string, unknown>): MessageForm {
   const mode = str(p.parse_mode)
+  const op = TELEGRAM_OPERATIONS.find((o) => o.value === p.operation)?.value ?? 'sendMessage'
   return {
+    operation: op,
+    file: str(p.file),
+    caption: str(p.caption),
+    spoiler: p.has_spoiler === true,
+    supportsStreaming: p.supports_streaming === true,
+    duration: str(p.duration),
+    performer: str(p.performer),
+    title: str(p.title),
     // A new node answers the chat the incoming message came from.
     chatId: p.chat_id === undefined ? '{{ $json.message.chat.id }}' : str(p.chat_id),
     text: str(p.text),
@@ -107,16 +138,31 @@ function buildMarkup(m: Markup): { markup?: Record<string, unknown>; error?: str
 /** The node's parameters (Bot API names), or why the form can't be saved. */
 export function buildMessage(f: MessageForm): { fields: Record<string, unknown> } | { error: string } {
   if (!f.chatId.trim()) return { error: 'Chat ID is required.' }
-  if (!f.text.trim()) return { error: 'Text is required.' }
+  const media = f.operation !== 'sendMessage'
+  const what = TELEGRAM_OPERATIONS.find((o) => o.value === f.operation)?.file?.toLowerCase() ?? 'file'
+  if (media && !f.file.trim()) return { error: `Enter the ${what}'s link (or a Telegram file_id).` }
+  if (media && f.file.includes('://') && !/^https?:\/\//i.test(f.file.trim())) return { error: `The ${what}'s link must start with http:// or https://.` }
+  if (!media && !f.text.trim()) return { error: 'Text is required.' }
   const markup = buildMarkup(f.markup)
   if (markup.error) return { error: markup.error }
   // The chat ID as typed: Telegram takes it as a number or a string.
-  const fields: Record<string, unknown> = { chat_id: f.chatId.trim(), text: f.text }
+  const fields: Record<string, unknown> = media
+    ? { operation: f.operation, chat_id: f.chatId.trim(), file: f.file.trim(), ...(f.caption.trim() ? { caption: f.caption } : {}) }
+    : { chat_id: f.chatId.trim(), text: f.text }
   if (f.parseMode) fields.parse_mode = f.parseMode
   if (markup.markup) fields.reply_markup = markup.markup
   if (f.disableNotification) fields.disable_notification = true
   if (f.protectContent) fields.protect_content = true
-  if (f.disableLinkPreview) fields.disable_web_page_preview = true
+  if (f.disableLinkPreview && !media) fields.disable_web_page_preview = true
+  const op = f.operation
+  if (f.spoiler && ['sendPhoto', 'sendVideo', 'sendAnimation'].includes(op)) fields.has_spoiler = true
+  if (f.supportsStreaming && op === 'sendVideo') fields.supports_streaming = true
+  if (f.duration.trim() && ['sendVideo', 'sendAudio', 'sendAnimation'].includes(op)) {
+    if (!/^\d+$/.test(f.duration.trim())) return { error: 'Duration is a whole number of seconds.' }
+    fields.duration = Number(f.duration.trim())
+  }
+  if (op === 'sendAudio' && f.performer.trim()) fields.performer = f.performer.trim()
+  if (op === 'sendAudio' && f.title.trim()) fields.title = f.title.trim()
   if (f.replyToMessageId.trim()) fields.reply_to_message_id = numberOrText(f.replyToMessageId)
   if (f.messageThreadId.trim()) fields.message_thread_id = numberOrText(f.messageThreadId)
   return { fields }

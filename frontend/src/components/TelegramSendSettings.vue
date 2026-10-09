@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import PromptBox from './PromptBox.vue'
-import type { InlineButton, Markup, MessageForm } from '../canvas/telegramMessage'
+import { computed } from 'vue'
+import { TELEGRAM_OPERATIONS, type InlineButton, type Markup, type MessageForm } from '../canvas/telegramMessage'
 
 /** Telegram Send Message: chat, text, formatting, reply markup, additional fields. */
 const form = defineModel<MessageForm>({ required: true })
 
 const set = (patch: Partial<MessageForm>) => (form.value = { ...form.value, ...patch })
+const fileLabel = computed(() => TELEGRAM_OPERATIONS.find((o) => o.value === form.value.operation)?.file ?? null)
 const setMarkup = (markup: Markup) => set({ markup })
 
 function setKind(kind: Markup['kind']) {
@@ -44,7 +46,14 @@ function setKeyboard(patch: Partial<Extract<Markup, { kind: 'keyboard' }>>) {
 
 <template>
   <fieldset class="border rounded p-2 space-y-2 min-w-0" data-testid="telegram-send-settings">
-    <legend class="text-sm text-gray-600 px-1">Send Message</legend>
+    <legend class="text-sm text-gray-600 px-1">Telegram</legend>
+
+    <label class="block text-xs text-gray-600">
+      Operation
+      <select :value="form.operation" aria-label="Operation" class="w-full border rounded px-2 py-1 text-sm" @change="set({ operation: ($event.target as HTMLSelectElement).value as MessageForm['operation'] })">
+        <option v-for="o in TELEGRAM_OPERATIONS" :key="o.value" :value="o.value">{{ o.label }}</option>
+      </select>
+    </label>
 
     <label class="block text-xs text-gray-600">
       <span class="flex justify-between">
@@ -62,7 +71,28 @@ function setKeyboard(patch: Partial<Extract<Markup, { kind: 'keyboard' }>>) {
       />
     </label>
 
+    <template v-if="fileLabel">
+      <label class="block text-xs text-gray-600">
+        {{ fileLabel }} link
+        <input
+          :value="form.file"
+          :aria-label="`${fileLabel} link`"
+          placeholder="https://… or {{ $json.image_url }}"
+          class="w-full border rounded px-2 py-1 text-sm font-mono"
+          @input="set({ file: ($event.target as HTMLInputElement).value })"
+        />
+        <span class="text-[11px] text-gray-400">Telegram downloads it from this link (photos up to 5 MB, other files up to 20 MB); a Telegram file_id works too.</span>
+      </label>
+      <PromptBox
+        :model-value="form.caption"
+        label="Caption (optional)"
+        :rows="3"
+        :hint="'Up to 1024 characters; the parse mode below applies to it.'"
+        @update:model-value="(caption: string) => set({ caption })"
+      />
+    </template>
     <PromptBox
+      v-else
       :model-value="form.text"
       label="Text"
       :rows="5"
@@ -156,7 +186,29 @@ function setKeyboard(patch: Partial<Extract<Markup, { kind: 'keyboard' }>>) {
       <div class="mt-1.5 space-y-1.5">
         <label class="flex items-center gap-2 text-xs"><input type="checkbox" aria-label="Disable notification" :checked="form.disableNotification" @change="set({ disableNotification: ($event.target as HTMLInputElement).checked })" /> Send silently (no notification)</label>
         <label class="flex items-center gap-2 text-xs"><input type="checkbox" aria-label="Protect content" :checked="form.protectContent" @change="set({ protectContent: ($event.target as HTMLInputElement).checked })" /> Protect from forwarding and saving</label>
-        <label class="flex items-center gap-2 text-xs"><input type="checkbox" aria-label="Disable link preview" :checked="form.disableLinkPreview" @change="set({ disableLinkPreview: ($event.target as HTMLInputElement).checked })" /> Disable link preview</label>
+        <template v-if="fileLabel">
+          <label v-if="['sendPhoto', 'sendVideo', 'sendAnimation'].includes(form.operation)" class="flex items-center gap-2 text-xs">
+            <input type="checkbox" aria-label="Spoiler" :checked="form.spoiler" @change="set({ spoiler: ($event.target as HTMLInputElement).checked })" /> Blur it as a spoiler
+          </label>
+          <label v-if="form.operation === 'sendVideo'" class="flex items-center gap-2 text-xs">
+            <input type="checkbox" aria-label="Supports streaming" :checked="form.supportsStreaming" @change="set({ supportsStreaming: ($event.target as HTMLInputElement).checked })" /> Suitable for streaming
+          </label>
+          <label v-if="['sendVideo', 'sendAudio', 'sendAnimation'].includes(form.operation)" class="block text-xs text-gray-600">
+            Duration (seconds)
+            <input :value="form.duration" aria-label="Duration" class="w-full border rounded px-2 py-1 text-xs" @input="set({ duration: ($event.target as HTMLInputElement).value })" />
+          </label>
+          <template v-if="form.operation === 'sendAudio'">
+            <label class="block text-xs text-gray-600">
+              Performer
+              <input :value="form.performer" aria-label="Performer" class="w-full border rounded px-2 py-1 text-xs" @input="set({ performer: ($event.target as HTMLInputElement).value })" />
+            </label>
+            <label class="block text-xs text-gray-600">
+              Track title
+              <input :value="form.title" aria-label="Track title" class="w-full border rounded px-2 py-1 text-xs" @input="set({ title: ($event.target as HTMLInputElement).value })" />
+            </label>
+          </template>
+        </template>
+        <label v-if="!fileLabel" class="flex items-center gap-2 text-xs"><input type="checkbox" aria-label="Disable link preview" :checked="form.disableLinkPreview" @change="set({ disableLinkPreview: ($event.target as HTMLInputElement).checked })" /> Disable link preview</label>
         <label class="block text-xs text-gray-600">
           Reply to message ID
           <input :value="form.replyToMessageId" aria-label="Reply to message ID" placeholder="{{ $json.message.message_id }}" class="w-full border rounded px-2 py-1 text-xs font-mono" @input="set({ replyToMessageId: ($event.target as HTMLInputElement).value })" />
