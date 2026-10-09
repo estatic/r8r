@@ -43,6 +43,20 @@ describe('NodeConfigPanel', () => {
     const tg = (parameters: Record<string, unknown>): NodeInstance => ({ ...node, node_type: 'telegram.trigger', parameters })
     const box = (w: ReturnType<typeof mount>, value: string) => w.find(`[data-testid="tg-update-${value}"]`)
 
+    it('restricts to chat and user IDs, and refuses ones that aren\'t numbers', async () => {
+      const wrapper = mount(NodeConfigPanel, { props: { node: tg({ restrict_chat_ids: ['42'] }) } })
+      expect((wrapper.find('input[aria-label="Restrict to chat IDs"]').element as HTMLInputElement).value).toBe('42')
+      await wrapper.find('input[aria-label="Restrict to chat IDs"]').setValue('42, -1001')
+      await wrapper.find('input[aria-label="Restrict to user IDs"]').setValue('7')
+      await clickApply(wrapper)
+      expect((wrapper.emitted('update')![0][0] as NodeInstance).parameters).toMatchObject({ restrict_chat_ids: ['42', '-1001'], restrict_user_ids: ['7'] })
+
+      const bad = mount(NodeConfigPanel, { props: { node: tg({}) } })
+      await bad.find('input[aria-label="Restrict to user IDs"]').setValue('@ada')
+      await clickApply(bad)
+      expect(bad.text()).toContain('Chat and user IDs are numbers')
+    })
+
     it('starts on "All updates" when nothing is chosen, and keeps it on Apply', async () => {
       const wrapper = mount(NodeConfigPanel, { props: { node: tg({}) } })
       expect((box(wrapper, '*').element as HTMLInputElement).checked).toBe(true)
@@ -300,7 +314,7 @@ describe('NodeConfigPanel', () => {
       parameters: { foo: 'bar', auth: { credential_id: 'cred-1' } },
     }
     const wrapper = mount(NodeConfigPanel, { props: { node: withCred } })
-    await wrapper.find('select').setValue('')
+    await wrapper.find('[data-testid="credential-section"] select').setValue('')
     await clickApply(wrapper)
     const events = wrapper.emitted('update')
     expect((events![0][0] as NodeInstance).parameters).toEqual({ foo: 'bar' })

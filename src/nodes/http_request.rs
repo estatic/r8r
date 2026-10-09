@@ -97,10 +97,33 @@ async fn execute_with_client(
         let pairs: Vec<(String, String)> = query.iter().filter_map(|(k, v)| scalar_text(v).map(|s| (k.clone(), s))).collect();
         request = request.query(&pairs);
     }
-    if let Some(body) = ctx.parameters.get("body") {
-        if !body.is_null() {
-            request = request.json(body);
-        }
+    // The body as JSON (default), a form (`body_type: "form"`, an object of
+    // fields) or plain text (`"text"`).
+    if let Some(body) = ctx.parameters.get("body").filter(|b| !b.is_null()) {
+        request = match ctx.parameters.get("body_type").and_then(|v| v.as_str()).unwrap_or("json") {
+            "json" => request.json(body),
+            "form" => {
+                let fields = body
+                    .as_object()
+                    .ok_or_else(|| NodeError::ExecutionFailed("core.httpRequest: a form body must be an object of fields".into()))?;
+                let pairs: Vec<(String, String)> = fields
+                    .iter()
+                    .map(|(k, v)| (k.clone(), scalar_text(v).unwrap_or_else(|| v.to_string())))
+                    .collect();
+                request.form(&pairs)
+            }
+            "text" => {
+                let text = body.as_str().map(str::to_string).unwrap_or_else(|| body.to_string());
+                let has_type = ctx.parameters.get("headers").and_then(|h| h.as_object()).is_some_and(|h| h.keys().any(|k| k.eq_ignore_ascii_case("content-type")));
+                let request = request.body(text);
+                if has_type { request } else { request.header("content-type", "text/plain; charset=utf-8") }
+            }
+            other => return Err(NodeError::ExecutionFailed(format!("core.httpRequest: unknown body_type \"{other}\" (expected json, form or text)"))),
+        };
+    }
+    // Per request, within the client's own limit.
+    if let Some(ms) = ctx.parameters.get("timeout_ms").and_then(|v| v.as_u64()).filter(|ms| *ms > 0) {
+        request = request.timeout(std::time::Duration::from_millis(ms));
     }
 
     request = apply_auth(request, &ctx.parameters, &ctx.credentials, &ctx.credential_types)?;
@@ -112,8 +135,15 @@ async fn execute_with_client(
 
     let status = response.status();
     let text = response.text().await.map_err(|e| NodeError::ExecutionFailed(format!("reading the response failed: {e}")))?;
-    // JSON as itself; anything else (HTML, plain text) under `data`.
-    let body: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "data": text }));
+    // `response_format`: auto (JSON as itself, anything else under `data`),
+    // json (must be JSON) or text (always under `data`).
+    let body: serde_json::Value = match ctx.parameters.get("response_format").and_then(|v| v.as_str()).unwrap_or("auto") {
+        "text" => serde_json::json!({ "data": text }),
+        "json" => serde_json::from_str(&text).map_err(|_| {
+            NodeError::ExecutionFailed(format!("core.httpRequest: the response isn't JSON (HTTP {status}); set the response format to text to take it as it is"))
+        })?,
+        _ => serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "data": text })),
+    };
 
     if !status.is_success() {
         return Err(NodeError::ExecutionFailed(format!("HTTP {status}: {body}")));
@@ -222,6 +252,44 @@ mod tests {
     async fn get(_server: &MockServer, parameters: serde_json::Value, credential_types: std::collections::HashMap<Uuid, String>, credentials: std::collections::HashMap<Uuid, serde_json::Value>) -> Vec<serde_json::Value> {
         let ctx = NodeExecutionContext { parameters, credentials, credential_types, ..Default::default() };
         HttpRequestNode.execute(&ctx).await.unwrap()[0].iter().map(|i| i.json.clone()).collect()
+    }
+
+    #[tokio::test]
+    async fn sends_a_form_or_text_body_and_reads_the_response_as_asked() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/form"))
+            .and(header("content-type", "application/x-www-form-urlencoded"))
+            .and(wiremock::matchers::body_string("name=Ada&n=2"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{\"ok\": true}"))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/text"))
+            .and(header("content-type", "text/plain; charset=utf-8"))
+            .and(wiremock::matchers::body_string("hello"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{\"ok\": true}"))
+            .mount(&server)
+            .await;
+        let form = serde_json::json!({"method": "POST", "url": format!("{}/form", server.uri()), "body_type": "form", "body": {"name": "Ada", "n": 2}});
+        assert_eq!(get(&server, form, Default::default(), Default::default()).await, vec![serde_json::json!({"ok": true})]);
+        let text = serde_json::json!({"method": "POST", "url": format!("{}/text", server.uri()), "body_type": "text", "body": "hello", "response_format": "text"});
+        assert_eq!(get(&server, text, Default::default(), Default::default()).await, vec![serde_json::json!({"data": "{\"ok\": true}"})]);
+    }
+
+    #[tokio::test]
+    async fn json_response_format_refuses_text_and_a_short_timeout_stops_the_wait() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET")).and(path("/html")).respond_with(ResponseTemplate::new(200).set_body_string("<p>hi</p>")).mount(&server).await;
+        Mock::given(method("GET"))
+            .and(path("/slow"))
+            .respond_with(ResponseTemplate::new(200).set_delay(std::time::Duration::from_millis(500)))
+            .mount(&server)
+            .await;
+        let run = |p: serde_json::Value| async move { HttpRequestNode.execute(&NodeExecutionContext { parameters: p, ..Default::default() }).await };
+        let err = run(serde_json::json!({"url": format!("{}/html", server.uri()), "response_format": "json"})).await.unwrap_err();
+        assert!(err.to_string().contains("isn't JSON"), "{err}");
+        assert!(run(serde_json::json!({"url": format!("{}/slow", server.uri()), "timeout_ms": 50})).await.is_err());
     }
 
     #[tokio::test]

@@ -264,19 +264,22 @@ impl<'a> Run<'a> {
         // instead, since error output isn't a real port index into a
         // NodeOutput.
         let mut input_items: Vec<Item> = Vec::new();
+        // The same items by the input they arrive on, for Merge.
+        let mut input_groups: Vec<Vec<Item>> = Vec::new();
         for (index, conn) in self.workflow.connections.iter().enumerate() {
             if conn.to_node != node_instance.id || self.back.contains(&index) {
                 continue;
             }
-            if conn.error {
-                if let Some(items) = self.error_produced.get(&conn.from_node) {
-                    input_items.extend(items.iter().cloned());
-                }
-            } else if let Some(outputs) = self.produced.get(&conn.from_node) {
-                if let Some(port_items) = outputs.get(conn.from_output) {
-                    input_items.extend(port_items.iter().cloned());
-                }
+            let arrived: &[Item] = if conn.error {
+                self.error_produced.get(&conn.from_node).map(Vec::as_slice).unwrap_or_default()
+            } else {
+                self.produced.get(&conn.from_node).and_then(|outputs| outputs.get(conn.from_output)).map(Vec::as_slice).unwrap_or_default()
+            };
+            input_items.extend(arrived.iter().cloned());
+            if input_groups.len() <= conn.to_input {
+                input_groups.resize_with(conn.to_input + 1, Vec::new);
             }
+            input_groups[conn.to_input].extend(arrived.iter().cloned());
         }
 
         if node_instance.disabled {
@@ -392,6 +395,7 @@ impl<'a> Run<'a> {
 
             let ctx = NodeExecutionContext {
                 parameters,
+                input_groups: if node.runs_per_item() { Vec::new() } else { input_groups.clone() },
                 input_items: batch,
                 credentials: self.resources.credentials.clone(),
                 credential_types: self.resources.credential_types.clone(),
@@ -544,7 +548,7 @@ fn port_counts(lens: &[usize]) -> BTreeMap<String, usize> {
     lens.iter().enumerate().map(|(i, n)| (i.to_string(), *n)).collect()
 }
 
-fn topological_order(workflow: &Workflow) -> anyhow::Result<Vec<NodeInstance>> {
+pub(crate) fn topological_order(workflow: &Workflow) -> anyhow::Result<Vec<NodeInstance>> {
     if workflow.nodes.is_empty() {
         return Ok(Vec::new());
     }
@@ -902,6 +906,27 @@ mod tests {
         let outputs = execute_workflow_seeded(&wf, &per_item_registry(), Some(seed), &Default::default(), &NoopObserver).await.unwrap();
         let said: Vec<_> = outputs["set1"].iter().map(|i| (i.json["said"].clone(), i.json["inputs"].clone())).collect();
         assert_eq!(said, vec![("a".into(), 1.into()), ("b".into(), 1.into()), ("c".into(), 1.into())]);
+    }
+
+    #[tokio::test]
+    async fn merge_gets_each_inputs_items_apart_and_appends_input_1_first() {
+        // trigger -> a (Set) -> merge input 1; trigger -> b (Set) -> merge input 0.
+        let mut wf = linear_workflow();
+        let set = |id: &str, field: &str| NodeInstance {
+            id: id.into(),
+            node_type: "core.set".into(),
+            position: (1.0, 0.0),
+            parameters: serde_json::json!({"fields": {field: true}}),
+            disabled: false,
+            settings: Default::default(),
+        };
+        wf.nodes = vec![wf.nodes[0].clone(), set("a", "from_a"), set("b", "from_b")];
+        wf.nodes.push(NodeInstance { id: "merge".into(), node_type: "core.merge".into(), parameters: serde_json::json!({"mode": "append"}), ..set("merge", "x") });
+        let conn = |from: &str, to: &str, to_input: usize| Connection { from_node: from.into(), from_output: 0, to_node: to.into(), to_input, error: false };
+        wf.connections = vec![conn("trigger", "a", 0), conn("trigger", "b", 0), conn("a", "merge", 1), conn("b", "merge", 0)];
+        let outputs = execute_workflow(&wf, &registry()).await.unwrap();
+        let merged: Vec<_> = outputs["merge"].iter().map(|i| i.json.clone()).collect();
+        assert_eq!(merged, vec![serde_json::json!({"from_b": true}), serde_json::json!({"from_a": true})]);
     }
 
     #[tokio::test]

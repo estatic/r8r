@@ -5,9 +5,19 @@ import CredentialPicker from './CredentialPicker.vue'
 import AgentSettings from './AgentSettings.vue'
 import TelegramTriggerSettings from './TelegramTriggerSettings.vue'
 import SetFieldsEditor from './SetFieldsEditor.vue'
+import SetOptionsEditor from './SetOptionsEditor.vue'
 import ConditionsEditor from './ConditionsEditor.vue'
 import FirecrawlSettings from './FirecrawlSettings.vue'
 import HttpRequestSettings from './HttpRequestSettings.vue'
+import SwitchSettings from './SwitchSettings.vue'
+import MergeSettings from './MergeSettings.vue'
+import ScheduleSettings from './ScheduleSettings.vue'
+import WebhookSettings from './WebhookSettings.vue'
+import { WEBHOOK_KEYS, buildWebhook, loadWebhook, type WebhookForm } from '../canvas/webhook'
+import WaitSettings from './WaitSettings.vue'
+import { SCHEDULE_KEYS, WAIT_KEYS, buildSchedule, buildWait, loadSchedule, loadWait, type ScheduleForm, type WaitForm } from '../canvas/schedule'
+import { MERGE_KEYS, buildMerge, loadMerge, type MergeForm } from '../canvas/merge'
+import { SWITCH_KEYS, buildSwitch, loadSwitch, type SwitchForm } from '../canvas/switchRules'
 import { HTTP_KEYS, buildHttp, loadHttp, type HttpForm } from '../canvas/httpRequest'
 import { authForCredentialType } from '../tools/schema'
 import { FIRECRAWL_KEYS, buildFirecrawl, loadFirecrawl, type FirecrawlForm } from '../canvas/firecrawl'
@@ -16,7 +26,7 @@ import CodeSettings from './CodeSettings.vue'
 import TelegramSendSettings from './TelegramSendSettings.vue'
 import { buildMessage, loadMessage, type MessageForm } from '../canvas/telegramMessage'
 import { codeExample, type CodeLanguage, type CodeMode } from '../canvas/codeExamples'
-import { buildFields, loadRows, type SetFieldRow } from '../canvas/setFields'
+import { buildFields, loadRows, type SetFieldRow, SET_OPTION_KEYS, buildSetOptions, loadSetOptions, type SetOptions } from '../canvas/setFields'
 import type { UpstreamSource } from '../canvas/inputData'
 import { useCredentialsStore } from '../stores/credentials'
 import { useNodeTypesStore } from '../stores/nodeTypes'
@@ -34,6 +44,8 @@ const props = withDefaults(
     /** The data reaching the node, for the Set form's picker. */
     inputSources?: UpstreamSource[]
     nodeLabels?: Record<string, string>
+    /** The workflow's id, for the Webhook's URL. */
+    workflowId?: string
     /** A section to bring into view (an agent port was clicked); `at` makes repeats count. */
     focus?: { section: string; at: number } | null
   }>(),
@@ -102,19 +114,33 @@ const batchSize = ref<number | string>(1)
 
 const isSet = computed(() => props.node?.node_type === 'core.set')
 const setRows = ref<SetFieldRow[]>([])
+const setOptions = ref<SetOptions>(loadSetOptions({}))
 
 const hasConditions = computed(() => props.node?.node_type === 'core.if' || props.node?.node_type === 'core.filter')
 const conditions = ref<ConditionsForm>(loadConditions({}))
+const isWebhook = computed(() => props.node?.node_type === 'core.webhook')
+const webhookForm = ref<WebhookForm>(loadWebhook({}))
+const isSchedule = computed(() => props.node?.node_type === 'core.schedule')
+const scheduleForm = ref<ScheduleForm>(loadSchedule({}))
+const isWait = computed(() => props.node?.node_type === 'core.wait')
+const waitForm = ref<WaitForm>(loadWait({}))
+const isMerge = computed(() => props.node?.node_type === 'core.merge')
+const mergeForm = ref<MergeForm>(loadMerge({}))
+const isSwitch = computed(() => props.node?.node_type === 'core.switch')
+const switchForm = ref<SwitchForm>(loadSwitch({}))
 const isHttp = computed(() => props.node?.node_type === 'core.httpRequest')
 const http = ref<HttpForm>(loadHttp({}))
 const isFirecrawl = computed(() => props.node?.node_type === 'firecrawl.search')
 const firecrawl = ref<FirecrawlForm>(loadFirecrawl({}))
 // Nodes with their own form keep the raw JSON under "Advanced".
-const hasForm = computed(() => isAgent.value || isSet.value || isCode.value || isLoop.value || isTelegramSend.value || hasConditions.value || isFirecrawl.value || isHttp.value)
+const hasForm = computed(() => isAgent.value || isSet.value || isCode.value || isLoop.value || isTelegramSend.value || hasConditions.value || isFirecrawl.value || isHttp.value || isSwitch.value || isMerge.value || isSchedule.value || isWait.value || isWebhook.value)
 
 const isTelegramTrigger = computed(() => props.node?.node_type === 'telegram.trigger')
 // Nothing chosen yet means every update, as the trigger treats it.
 const telegramUpdates = ref<string[]>(['*'])
+// n8n's "Restrict to Chat IDs / User IDs", comma-separated.
+const telegramRestrict = ref({ chats: '', users: '' })
+const idList = (v: unknown) => (Array.isArray(v) ? v.join(', ') : typeof v === 'string' || typeof v === 'number' ? String(v) : '')
 function loadTelegramUpdates(parameters: Record<string, unknown>): string[] {
   const u = parameters.updates
   const chosen = Array.isArray(u) ? u.filter((v): v is string => typeof v === 'string') : []
@@ -167,10 +193,17 @@ const formSnapshot = computed(() =>
     batchSize.value,
     isTelegramSend.value ? telegramMessage.value : null,
     telegramUpdates.value,
+    isTelegramTrigger.value ? telegramRestrict.value : null,
     setRows.value,
+    isSet.value ? setOptions.value : null,
     hasConditions.value ? conditions.value : null,
     isFirecrawl.value ? firecrawl.value : null,
     isHttp.value ? http.value : null,
+    isSwitch.value ? switchForm.value : null,
+    isMerge.value ? mergeForm.value : null,
+    isSchedule.value ? scheduleForm.value : null,
+    isWebhook.value ? webhookForm.value : null,
+    isWait.value ? waitForm.value : null,
   ]),
 )
 const loaded = ref('')
@@ -192,7 +225,14 @@ watch(
       credentialId.value = auth?.credential_id ?? null
       agentFields.value = node.node_type === 'ai.agent' ? loadAgentFields(node.parameters ?? {}) : emptyAgentFields()
       telegramUpdates.value = loadTelegramUpdates(node.parameters ?? {})
+      telegramRestrict.value = { chats: idList(node.parameters?.restrict_chat_ids), users: idList(node.parameters?.restrict_user_ids) }
       setRows.value = node.node_type === 'core.set' ? loadRows(node.parameters?.fields) : []
+      setOptions.value = loadSetOptions(node.node_type === 'core.set' ? (node.parameters ?? {}) : {})
+      webhookForm.value = loadWebhook(node.node_type === 'core.webhook' ? (node.parameters ?? {}) : {})
+      scheduleForm.value = loadSchedule(node.node_type === 'core.schedule' ? (node.parameters ?? {}) : {})
+      waitForm.value = loadWait(node.node_type === 'core.wait' ? (node.parameters ?? {}) : {})
+      mergeForm.value = loadMerge(node.node_type === 'core.merge' ? (node.parameters ?? {}) : {})
+      switchForm.value = loadSwitch(node.node_type === 'core.switch' ? (node.parameters ?? {}) : {})
       http.value = loadHttp(node.node_type === 'core.httpRequest' ? (node.parameters ?? {}) : {})
       firecrawl.value = loadFirecrawl(node.node_type === 'firecrawl.search' ? (node.parameters ?? {}) : {})
       conditions.value = loadConditions(node.node_type === 'core.if' || node.node_type === 'core.filter' ? (node.parameters ?? {}) : {})
@@ -269,6 +309,36 @@ function build(): NodeInstance | string {
     if (codeFields.value.mode === 'runOnceForEachItem') parsed.mode = 'runOnceForEachItem'
     else delete parsed.mode
   }
+  if (isWebhook.value) {
+    const built = buildWebhook(webhookForm.value)
+    if ('error' in built) return built.error
+    for (const key of WEBHOOK_KEYS) delete parsed[key]
+    Object.assign(parsed, built.fields)
+  }
+  if (isSchedule.value) {
+    const built = buildSchedule(scheduleForm.value)
+    if ('error' in built) return built.error
+    for (const key of SCHEDULE_KEYS) delete parsed[key]
+    Object.assign(parsed, built.fields)
+  }
+  if (isWait.value) {
+    const built = buildWait(waitForm.value)
+    if ('error' in built) return built.error
+    for (const key of WAIT_KEYS) delete parsed[key]
+    Object.assign(parsed, built.fields)
+  }
+  if (isMerge.value) {
+    const built = buildMerge(mergeForm.value)
+    if ('error' in built) return built.error
+    for (const key of MERGE_KEYS) delete parsed[key]
+    Object.assign(parsed, built.fields)
+  }
+  if (isSwitch.value) {
+    const built = buildSwitch(switchForm.value)
+    if ('error' in built) return built.error
+    for (const key of SWITCH_KEYS) delete parsed[key]
+    Object.assign(parsed, built.fields)
+  }
   if (isHttp.value) {
     const built = buildHttp(http.value)
     if ('error' in built) return built.error
@@ -289,6 +359,12 @@ function build(): NodeInstance | string {
     parsed.conditions = built.conditions
   }
   if (isSet.value) {
+    const options = buildSetOptions(setOptions.value)
+    if ('error' in options) return options.error
+    for (const key of SET_OPTION_KEYS) delete parsed[key]
+    Object.assign(parsed, options.fields)
+  }
+  if (isSet.value && setOptions.value.mode === 'manual') {
     const built = buildFields(setRows.value)
     if ('error' in built) return built.error
     // Don't invent an empty `fields` the node never had.
@@ -297,6 +373,12 @@ function build(): NodeInstance | string {
   if (isTelegramTrigger.value) {
     if (telegramUpdates.value.length === 0) return 'Choose at least one update type, or All updates.'
     parsed.updates = [...telegramUpdates.value]
+    for (const [key, text] of [['restrict_chat_ids', telegramRestrict.value.chats], ['restrict_user_ids', telegramRestrict.value.users]] as const) {
+      const ids = text.split(',').map((s) => s.trim()).filter(Boolean)
+      if (ids.some((id) => !/^-?\d+$/.test(id))) return 'Chat and user IDs are numbers, separated by commas.'
+      if (ids.length > 0) parsed[key] = ids
+      else delete parsed[key]
+    }
   }
   if (isAgent.value) {
     // The form is the source of truth for the fields it shows; everything
@@ -431,6 +513,18 @@ onBeforeUnmount(() => {
       </fieldset>
       <AgentSettings v-if="isAgent" v-model="agentFields" :inline-tool-count="inlineToolCount" />
       <TelegramTriggerSettings v-if="isTelegramTrigger" v-model="telegramUpdates" />
+      <fieldset v-if="isTelegramTrigger" class="border rounded p-2 space-y-1.5 min-w-0" data-testid="telegram-restrict">
+        <legend class="text-sm text-gray-600 px-1">Only from</legend>
+        <label class="block text-xs text-gray-600">
+          Chat IDs (empty = any chat)
+          <input v-model="telegramRestrict.chats" aria-label="Restrict to chat IDs" placeholder="123456789, -1001234567890" class="w-full border rounded px-2 py-1 text-sm font-mono" />
+        </label>
+        <label class="block text-xs text-gray-600">
+          User IDs (empty = anyone)
+          <input v-model="telegramRestrict.users" aria-label="Restrict to user IDs" placeholder="123456789" class="w-full border rounded px-2 py-1 text-sm font-mono" />
+        </label>
+        <p class="text-[11px] text-gray-400">Other updates are confirmed to Telegram but don't run the workflow.</p>
+      </fieldset>
       <fieldset v-if="isLoop" class="border rounded p-2 space-y-1 min-w-0" data-testid="loop-settings">
         <legend class="text-sm text-gray-600 px-1">Loop Over Items</legend>
         <label class="block text-xs text-gray-600">
@@ -444,6 +538,11 @@ onBeforeUnmount(() => {
       </fieldset>
       <TelegramSendSettings v-if="isTelegramSend" v-model="telegramMessage" />
       <CodeSettings v-if="isCode" v-model="codeFields" :sources="inputSources" :node-labels="nodeLabels" />
+      <WebhookSettings v-if="isWebhook" v-model="webhookForm" :workflow-id="workflowId" />
+      <ScheduleSettings v-if="isSchedule" v-model="scheduleForm" />
+      <WaitSettings v-if="isWait" v-model="waitForm" />
+      <MergeSettings v-if="isMerge" v-model="mergeForm" />
+      <SwitchSettings v-if="isSwitch" v-model="switchForm" :sources="inputSources" :node-labels="nodeLabels" />
       <HttpRequestSettings v-if="isHttp" v-model="http" :sources="inputSources" :node-labels="nodeLabels" />
       <FirecrawlSettings v-if="isFirecrawl" v-model="firecrawl" :sources="inputSources" :node-labels="nodeLabels" />
       <ConditionsEditor
@@ -458,7 +557,8 @@ onBeforeUnmount(() => {
             : 'Items that don\'t match are dropped.'
         "
       />
-      <SetFieldsEditor v-if="isSet" v-model="setRows" :sources="inputSources" :node-labels="nodeLabels" />
+      <SetOptionsEditor v-if="isSet" v-model="setOptions" />
+      <SetFieldsEditor v-if="isSet && setOptions.mode === 'manual'" v-model="setRows" :sources="inputSources" :node-labels="nodeLabels" />
       <div v-if="takesCredential" data-testid="credential-section">
         <label class="block text-sm text-gray-600 mb-1">Credential</label>
         <CredentialPicker v-model="credentialId" :node-type="node.node_type" />

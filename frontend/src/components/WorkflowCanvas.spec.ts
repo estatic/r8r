@@ -76,6 +76,22 @@ describe('WorkflowCanvas', () => {
     expect(wrapper.text()).toContain('error')
   })
 
+  it('gives a two-input node (Merge) two labeled input handles', async () => {
+    const types = [...NODE_TYPES, { type_name: 'core.merge', display_name: 'Merge', icon: '🔗', category: 'flowControl', description: '', credential_types: [], output_ports: ['main'], input_count: 2 }]
+    stubFetch(types, ['main'])
+    const nodes: NodeInstance[] = [
+      { id: 't', node_type: 'core.manualTrigger', position: [0, 0], parameters: {}, disabled: false },
+      { id: 'm', node_type: 'core.merge', position: [300, 0], parameters: {}, disabled: false },
+    ]
+    const connections: Connection[] = [{ from_node: 't', from_output: 0, to_node: 'm', to_input: 1, error: false }]
+    const wrapper = mount(WorkflowCanvas, { props: { nodes, connections } })
+    await flush()
+
+    const inputs = wrapper.findAll('.vue-flow__node[data-id="m"] .vue-flow__handle.target')
+    expect(inputs.map((h) => h.attributes('data-handleid'))).toEqual(['0', '1'])
+    expect(wrapper.find('.vue-flow__node[data-id="m"]').text()).toContain('Input 2')
+  })
+
   it('a single-port node still renders exactly one success handle plus the error handle', async () => {
     stubFetch(NODE_TYPES, ['main'])
     const nodes: NodeInstance[] = [{ id: 'a', node_type: 'core.manualTrigger', position: [0, 0], parameters: {}, disabled: false }]

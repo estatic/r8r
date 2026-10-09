@@ -8,6 +8,8 @@ export interface NodeTypeMeta {
   description: string
   credential_types: string[]
   output_ports: string[]
+  /** How many inputs (handles on the left); Merge has 2. Missing means 1. */
+  input_count?: number
 }
 
 export interface RetryPolicy {

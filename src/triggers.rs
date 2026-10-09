@@ -44,7 +44,7 @@ pub async fn activate_workflow_triggers(
         "core.schedule" => tracing::info!(
             workflow_id = %workflow.id,
             workflow_name = %workflow.name,
-            cron = start_node.parameters.get("cron").and_then(|v| v.as_str()).unwrap_or(""),
+            cron = %crate::nodes::schedule::cron_for(&start_node.parameters).unwrap_or_default(),
             "schedule trigger activated"
         ),
         "core.webhook" => tracing::info!(
@@ -68,12 +68,8 @@ async fn activate_schedule_trigger(
     workflow: &crate::domain::Workflow,
     start_node: &crate::domain::NodeInstance,
 ) -> anyhow::Result<()> {
-    let cron_expr = start_node
-        .parameters
-        .get("cron")
-        .and_then(|v| v.as_str())
-        .ok_or_else(|| anyhow::anyhow!("core.schedule node requires a \"cron\" string parameter"))?
-        .to_string();
+    let cron_expr = crate::nodes::schedule::cron_for(&start_node.parameters).map_err(|e| anyhow::anyhow!(e))?;
+    let tz = crate::nodes::schedule::timezone(&start_node.parameters).map_err(|e| anyhow::anyhow!(e))?;
 
     let storage = state.storage.clone();
     let registry = state.registry.clone();
@@ -82,12 +78,12 @@ async fn activate_schedule_trigger(
 
     let job_id = state
         .scheduler
-        .register(&cron_expr, move || {
+        .register_tz(&cron_expr, tz, move || {
             let storage = storage.clone();
             let registry = registry.clone();
             let events = events.clone();
             async move {
-                fire_schedule(storage, registry, events, workflow_id).await;
+                fire_schedule(storage, registry, events, workflow_id, tz).await;
             }
         })
         .await?;
@@ -113,6 +109,7 @@ pub async fn fire_schedule(
     registry: std::sync::Arc<crate::node::NodeRegistry>,
     events: tokio::sync::broadcast::Sender<crate::execution_runner::ExecutionEvent>,
     workflow_id: Uuid,
+    tz: chrono_tz::Tz,
 ) {
     let workflow = match storage.get_workflow(workflow_id).await {
         Ok(Some(wf)) if wf.active => wf,
@@ -130,7 +127,7 @@ pub async fn fire_schedule(
             return;
         }
     };
-    let trigger_items = vec![crate::domain::Item { json: serde_json::json!({}), binary: serde_json::json!({}) }];
+    let trigger_items = vec![crate::nodes::schedule::fired_item(tz)];
     if let Err(e) = crate::execution_runner::run_and_track_execution(
         &storage,
         &events,
@@ -285,7 +282,7 @@ mod tests {
         let wf = schedule_workflow("* * * * * *");
         state.storage.create_workflow(&wf).await.unwrap();
 
-        fire_schedule(state.storage.clone(), state.registry.clone(), state.execution_events.clone(), wf.id).await;
+        fire_schedule(state.storage.clone(), state.registry.clone(), state.execution_events.clone(), wf.id, chrono_tz::Tz::UTC).await;
 
         let executions_are_findable = state.storage.list_workflows().await.unwrap();
         assert_eq!(executions_are_findable.len(), 1); // sanity: workflow itself still there
@@ -308,13 +305,13 @@ mod tests {
         state.storage.create_workflow(&wf).await.unwrap();
 
         // Must not panic even though the workflow is inactive.
-        fire_schedule(state.storage.clone(), state.registry.clone(), state.execution_events.clone(), wf.id).await;
+        fire_schedule(state.storage.clone(), state.registry.clone(), state.execution_events.clone(), wf.id, chrono_tz::Tz::UTC).await;
     }
 
     #[tokio::test]
     async fn fire_schedule_on_missing_workflow_is_a_noop() {
         let state = test_state().await;
-        fire_schedule(state.storage.clone(), state.registry.clone(), state.execution_events.clone(), Uuid::new_v4()).await;
+        fire_schedule(state.storage.clone(), state.registry.clone(), state.execution_events.clone(), Uuid::new_v4(), chrono_tz::Tz::UTC).await;
     }
 
     #[tokio::test]
@@ -490,13 +487,13 @@ mod tests {
         let mut wf = schedule_workflow("* * * * * *");
         wf.nodes[1].parameters = serde_json::json!({"fields": {"fired": true}, "auth": {"credential_id": Uuid::new_v4().to_string()}});
         state.storage.create_workflow(&wf).await.unwrap();
-        fire_schedule(state.storage.clone(), state.registry.clone(), state.execution_events.clone(), wf.id).await;
+        fire_schedule(state.storage.clone(), state.registry.clone(), state.execution_events.clone(), wf.id, chrono_tz::Tz::UTC).await;
         assert!(state.storage.list_executions_for_workflow(wf.id, 10).await.unwrap().is_empty(), "a run with an unresolvable credential must not start");
 
         let mut wf2 = schedule_workflow("* * * * * *");
         wf2.nodes[1].parameters = serde_json::json!({"fields": {"fired": true}, "auth": {"credential_id": cred_id.to_string()}});
         state.storage.create_workflow(&wf2).await.unwrap();
-        fire_schedule(state.storage.clone(), state.registry.clone(), state.execution_events.clone(), wf2.id).await;
+        fire_schedule(state.storage.clone(), state.registry.clone(), state.execution_events.clone(), wf2.id, chrono_tz::Tz::UTC).await;
         let runs = state.storage.list_executions_for_workflow(wf2.id, 10).await.unwrap();
         assert_eq!(runs.len(), 1);
     }

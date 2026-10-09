@@ -10,13 +10,16 @@ export interface HttpForm {
   url: string
   query: Pair[]
   headers: Pair[]
-  /** none, or a JSON body (values may be {{ expressions }}). */
-  bodyType: 'none' | 'json'
+  /** none, JSON (values may be {{ expressions }}), form fields, or plain text. */
+  bodyType: 'none' | 'json' | 'form' | 'text'
   body: string
+  formFields: Pair[]
+  timeoutMs: string
+  responseFormat: 'auto' | 'json' | 'text'
 }
 
 export const METHODS = ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'HEAD', 'OPTIONS']
-export const HTTP_KEYS = ['method', 'url', 'query', 'headers', 'body']
+export const HTTP_KEYS = ['method', 'url', 'query', 'headers', 'body', 'body_type', 'timeout_ms', 'response_format']
 
 const str = (v: unknown) => (v === undefined || v === null ? '' : typeof v === 'string' ? v : JSON.stringify(v))
 const pairs = (v: unknown): Pair[] =>
@@ -25,13 +28,18 @@ const pairs = (v: unknown): Pair[] =>
 export function loadHttp(p: Record<string, unknown>): HttpForm {
   const method = typeof p.method === 'string' ? p.method.toUpperCase() : 'GET'
   const hasBody = p.body !== undefined && p.body !== null
+  const type = p.body_type === 'form' || p.body_type === 'text' ? p.body_type : 'json'
+  const format = p.response_format === 'json' || p.response_format === 'text' ? p.response_format : 'auto'
   return {
     method,
     url: str(p.url),
     query: pairs(p.query),
     headers: pairs(p.headers),
-    bodyType: hasBody ? 'json' : 'none',
-    body: hasBody ? JSON.stringify(p.body, null, 2) : '',
+    bodyType: hasBody ? type : 'none',
+    body: hasBody && type === 'json' ? JSON.stringify(p.body, null, 2) : hasBody && type === 'text' ? str(p.body) : '',
+    formFields: hasBody && type === 'form' ? pairs(p.body) : [],
+    timeoutMs: typeof p.timeout_ms === 'number' ? String(p.timeout_ms) : '',
+    responseFormat: format,
   }
 }
 
@@ -66,5 +74,21 @@ export function buildHttp(f: HttpForm): { fields: Record<string, unknown> } | { 
       return { error: 'The body must be valid JSON (put expressions inside strings: "{{ $json.id }}").' }
     }
   }
+  if (f.bodyType === 'form') {
+    const form = toObject(f.formFields, 'form field')
+    if ('error' in form) return form
+    fields.body_type = 'form'
+    fields.body = form.value
+  }
+  if (f.bodyType === 'text') {
+    fields.body_type = 'text'
+    fields.body = f.body
+  }
+  if (f.timeoutMs.trim()) {
+    const ms = Number(f.timeoutMs)
+    if (!Number.isInteger(ms) || ms < 1 || ms > 3600000) return { error: 'The timeout must be between 1 and 3600000 ms.' }
+    fields.timeout_ms = ms
+  }
+  if (f.responseFormat !== 'auto') fields.response_format = f.responseFormat
   return { fields }
 }

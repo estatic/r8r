@@ -44,8 +44,8 @@ pub fn build_router(state: AppState) -> Router {
                 .delete(credentials::delete_credential),
         )
         .route(
-            "/webhook-r8r/:workflow_id/:path",
-            axum::routing::get(webhook::handle_webhook).post(webhook::handle_webhook),
+            "/webhook-r8r/:workflow_id/*path",
+            axum::routing::any(webhook::handle_webhook),
         )
         .route("/health", get(|| async { "ok" }))
         .fallback(crate::static_files::serve_frontend)

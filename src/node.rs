@@ -6,6 +6,9 @@ use std::collections::HashMap;
 pub struct NodeExecutionContext {
     pub parameters: serde_json::Value,
     pub input_items: Vec<Item>,
+    /// The same items by the input they arrived on (index = `to_input`),
+    /// for nodes with several inputs (Merge). Empty when not split.
+    pub input_groups: Vec<Vec<Item>>,
     pub credentials: std::collections::HashMap<uuid::Uuid, serde_json::Value>,
     /// Type of each resolved credential (e.g. `openaiApi`).
     pub credential_types: std::collections::HashMap<uuid::Uuid, String>,
@@ -115,6 +118,10 @@ pub trait Node: Send + Sync {
     /// HTTP Request, Telegram Send, Set, If, Switch, Filter).
     fn runs_per_item(&self) -> bool {
         false
+    }
+    /// How many inputs the node has (drawn as that many handles on its left).
+    fn input_count(&self) -> usize {
+        1
     }
 
     /// Human-readable name shown in the canvas and add-node menu, e.g.

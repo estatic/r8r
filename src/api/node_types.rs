@@ -13,6 +13,7 @@ pub struct NodeTypeMeta {
     pub description: String,
     pub credential_types: Vec<String>,
     pub output_ports: Vec<String>,
+    pub input_count: usize,
 }
 
 fn meta_for(name: &str, node: &dyn crate::node::Node) -> NodeTypeMeta {
@@ -24,6 +25,7 @@ fn meta_for(name: &str, node: &dyn crate::node::Node) -> NodeTypeMeta {
         description: node.description().to_string(),
         credential_types: node.credential_types().iter().map(|s| s.to_string()).collect(),
         output_ports: node.output_ports(&serde_json::json!({})),
+        input_count: node.input_count(),
     }
 }
 

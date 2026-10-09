@@ -10,9 +10,9 @@ const form = defineModel<HttpForm>({ required: true })
 defineProps<{ sources: UpstreamSource[]; nodeLabels: Record<string, string> }>()
 
 const set = (patch: Partial<HttpForm>) => (form.value = { ...form.value, ...patch })
-const takesBody = computed(() => !['GET', 'HEAD', 'OPTIONS'].includes(form.value.method) || form.value.bodyType === 'json')
+const takesBody = computed(() => !['GET', 'HEAD', 'OPTIONS'].includes(form.value.method) || form.value.bodyType !== 'none')
 
-type ListKey = 'query' | 'headers'
+type ListKey = 'query' | 'headers' | 'formFields'
 function editRow(key: ListKey, i: number, patch: Partial<Pair>) {
   set({ [key]: form.value[key].map((r, j) => (j === i ? { ...r, ...patch } : r)) })
 }
@@ -97,8 +97,30 @@ const LISTS: { key: ListKey; title: string; add: string; namePlaceholder: string
         <select :value="form.bodyType" aria-label="Body" class="w-full border rounded px-2 py-1 text-sm" @change="set({ bodyType: ($event.target as HTMLSelectElement).value as HttpForm['bodyType'] })">
           <option value="none">No body</option>
           <option value="json">JSON</option>
+          <option value="form">Form (urlencoded)</option>
+          <option value="text">Plain text</option>
         </select>
       </label>
+      <template v-if="form.bodyType === 'form'">
+        <template v-for="(row, i) in form.formFields" :key="i">
+          <div class="flex gap-1" data-testid="http-form-field">
+            <input :value="row.name" aria-label="Form field name" placeholder="name" class="w-1/3 min-w-0 border rounded px-1.5 py-0.5 text-xs" @input="editRow('formFields', i, { name: ($event.target as HTMLInputElement).value })" />
+            <input :value="row.value" aria-label="Form field value" placeholder="value or {{ $json.x }}" class="flex-1 min-w-0 border rounded px-1.5 py-0.5 text-xs font-mono" @input="editRow('formFields', i, { value: ($event.target as HTMLInputElement).value })" />
+            <button type="button" class="text-xs border rounded px-1.5 bg-white hover:bg-blue-50" title="Pick from the input" @click="togglePick({ key: 'formFields', row: i })">▾</button>
+            <button type="button" class="px-1 text-gray-400 hover:text-red-600" title="Remove" @click="set({ formFields: form.formFields.filter((_, j) => j !== i) })">✕</button>
+          </div>
+          <FieldPicker v-if="isPicking('formFields', i)" :sources="sources" :node-labels="nodeLabels" @pick="pick" />
+        </template>
+        <button type="button" class="text-xs text-blue-600" data-testid="add-form-field" @click="set({ formFields: [...form.formFields, { name: '', value: '' }] })">+ Form field</button>
+      </template>
+      <PromptBox
+        v-if="form.bodyType === 'text'"
+        :model-value="form.body"
+        label="Text body"
+        :rows="5"
+        :hint="'Sent as text/plain unless you set a Content-Type header.'"
+        @update:model-value="(body: string) => set({ body })"
+      />
       <PromptBox
         v-if="form.bodyType === 'json'"
         :model-value="form.body"
@@ -109,6 +131,23 @@ const LISTS: { key: ListKey; title: string; add: string; namePlaceholder: string
         @update:model-value="(body: string) => set({ body })"
       />
     </div>
+    <details class="border-t pt-2">
+      <summary class="text-xs text-gray-600 cursor-pointer">Options</summary>
+      <div class="mt-1.5 grid grid-cols-2 gap-2">
+        <label class="text-xs text-gray-600">
+          Timeout (ms)
+          <input :value="form.timeoutMs" aria-label="Request timeout" type="number" min="1" placeholder="30000" class="w-full border rounded px-2 py-1 text-sm" @input="set({ timeoutMs: ($event.target as HTMLInputElement).value })" />
+        </label>
+        <label class="text-xs text-gray-600">
+          Response format
+          <select :value="form.responseFormat" aria-label="Response format" class="w-full border rounded px-2 py-1 text-sm" @change="set({ responseFormat: ($event.target as HTMLSelectElement).value as HttpForm['responseFormat'] })">
+            <option value="auto">Autodetect</option>
+            <option value="json">JSON</option>
+            <option value="text">Text (under data)</option>
+          </select>
+        </label>
+      </div>
+    </details>
     <p class="text-xs text-gray-500">A JSON list of objects becomes one item each; text or HTML comes back under <code>data</code>.</p>
   </fieldset>
 </template>

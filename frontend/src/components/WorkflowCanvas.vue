@@ -198,6 +198,7 @@ const flowNodes = computed<FlowNode[]>(() =>
       tools: toolNames(n),
       disabled: n.disabled,
       outputPorts: portsByNodeId[n.id] ?? ['main'],
+      inputCount: metaFor(n.node_type)?.input_count ?? 1,
       needsSetup: agentSetupProblems([n]).length > 0,
     },
   })),
@@ -279,13 +280,28 @@ function outputTop(shape: string, index: number, total: number): string {
           :data-run="data.run ?? undefined"
           :title="data.nodeType"
         >
-          <Handle
-            v-if="data.shape !== 'start'"
-            id="0"
-            type="target"
-            :position="Position.Left"
-            class="w-2.5 h-2.5 rounded-full bg-gray-500 border border-white"
-          />
+          <!-- One handle per input; a node with several (Merge) labels them. -->
+          <template v-if="data.shape !== 'start'">
+            <Handle
+              v-for="i in data.inputCount"
+              :key="`in-${i}`"
+              :id="String(i - 1)"
+              type="target"
+              :position="Position.Left"
+              :style="data.inputCount > 1 ? { top: handlePosition(i - 1, data.inputCount) } : undefined"
+              class="w-2.5 h-2.5 rounded-full bg-gray-500 border border-white"
+            />
+            <template v-if="data.inputCount > 1">
+              <div
+                v-for="i in data.inputCount"
+                :key="`in-label-${i}`"
+                class="absolute text-[10px] text-gray-600 right-full mr-2 whitespace-nowrap"
+                :style="{ top: handlePosition(i - 1, data.inputCount), transform: 'translateY(-50%)' }"
+              >
+                Input {{ i }}
+              </div>
+            </template>
+          </template>
           <!-- A start is a triangle with its flat side right (where it sends), an end one with its flat side left. -->
           <div v-if="data.shape !== 'box'" class="relative w-16 h-14" :style="glow(data.run)">
             <svg viewBox="0 0 64 56" class="absolute inset-0 w-full h-full">

@@ -76,6 +76,35 @@ fn wanted(update: &serde_json::Value, allowed: &[String]) -> bool {
     allowed.is_empty() || update_type(update).is_some_and(|t| allowed.iter().any(|a| a == t))
 }
 
+/// n8n's "Restrict to Chat IDs" / "Restrict to User IDs": when set, only
+/// updates from those chats (and from those users) run the workflow.
+#[derive(Debug, Default, Clone)]
+pub struct Restrictions {
+    chat_ids: Vec<String>,
+    user_ids: Vec<String>,
+}
+
+impl Restrictions {
+    pub fn of(trigger_node: &NodeInstance) -> Self {
+        let list = |key: &str| -> Vec<String> {
+            match trigger_node.parameters.get(key) {
+                Some(serde_json::Value::String(s)) => s.split(',').map(str::trim).filter(|s| !s.is_empty()).map(str::to_string).collect(),
+                Some(serde_json::Value::Array(a)) => a.iter().filter_map(|v| v.as_str().map(str::to_string).or_else(|| v.as_i64().map(|n| n.to_string()))).collect(),
+                Some(serde_json::Value::Number(n)) => vec![n.to_string()],
+                _ => vec![],
+            }
+        };
+        Self { chat_ids: list("restrict_chat_ids"), user_ids: list("restrict_user_ids") }
+    }
+
+    pub fn admits(&self, update: &serde_json::Value) -> bool {
+        let chat_ok = self.chat_ids.is_empty() || chat_key(update).is_some_and(|c| self.chat_ids.contains(&c.to_string()));
+        let user = update_type(update).and_then(|t| update.get(t)).and_then(|o| o.pointer("/from/id")).and_then(|v| v.as_i64());
+        let user_ok = self.user_ids.is_empty() || user.is_some_and(|u| self.user_ids.contains(&u.to_string()));
+        chat_ok && user_ok
+    }
+}
+
 /// Chat id an update belongs to, from whichever update type carries one.
 /// `None` for updates with no chat (polls, inline queries, ...), which
 /// share one queue.
@@ -333,6 +362,20 @@ mod update_type_tests {
     }
 
     #[test]
+    fn restrictions_admit_only_the_listed_chats_and_users() {
+        let msg = |chat: i64, user: i64| serde_json::json!({"update_id": 1, "message": {"chat": {"id": chat}, "from": {"id": user}, "text": "hi"}});
+        let open = Restrictions::of(&trigger(serde_json::json!({})));
+        assert!(open.admits(&msg(1, 2)));
+        let chats = Restrictions::of(&trigger(serde_json::json!({"restrict_chat_ids": "-100, 42"})));
+        assert!(chats.admits(&msg(42, 7)) && chats.admits(&msg(-100, 7)) && !chats.admits(&msg(43, 7)));
+        let users = Restrictions::of(&trigger(serde_json::json!({"restrict_user_ids": [7]})));
+        assert!(users.admits(&msg(1, 7)) && !users.admits(&msg(1, 8)));
+        // A callback query's user is its `from`; a poll has no chat or user.
+        assert!(users.admits(&serde_json::json!({"update_id": 2, "callback_query": {"from": {"id": 7}, "message": {"chat": {"id": 1}}}})));
+        assert!(!chats.admits(&serde_json::json!({"update_id": 3, "poll": {"id": "p"}})));
+    }
+
+    #[test]
     fn each_update_is_matched_by_its_type() {
         let kinds = [
             ("message", serde_json::json!({"update_id": 1, "message": {"text": "hi"}})),
@@ -572,7 +615,7 @@ pub async fn wait_for_test_update(
     let api_base_url = trigger_api_base_url(storage, trigger_node).await.map_err(|e| TestUpdateError::Failed(e.to_string()))?;
     let client = build_client().map_err(TestUpdateError::Failed)?;
     let allowed = trigger_updates(trigger_node);
-    let update = next_update(&client, &api_base_url, &bot_token, &allowed, wait).await?;
+    let update = next_update(&client, &api_base_url, &bot_token, &allowed, &Restrictions::of(trigger_node), wait).await?;
     Ok(Item { json: update, binary: serde_json::json!({}) })
 }
 
@@ -581,6 +624,7 @@ async fn next_update(
     base_url: &str,
     bot_token: &str,
     allowed: &[String],
+    restrictions: &Restrictions,
     wait: std::time::Duration,
 ) -> Result<serde_json::Value, TestUpdateError> {
     let update_id = |u: &serde_json::Value| u.get("update_id").and_then(|v| v.as_i64());
@@ -601,7 +645,7 @@ async fn next_update(
             if let Some(id) = update_id(&update) {
                 offset = Some(id + 1);
             }
-            if !wanted(&update, allowed) {
+            if !wanted(&update, allowed) || !restrictions.admits(&update) {
                 continue;
             }
             // Confirm it; a failure here only risks a later redelivery.
@@ -637,7 +681,7 @@ mod test_update_tests {
             .expect(1).mount(&server).await;
 
         let client = build_client().unwrap();
-        let update = next_update(&client, &server.uri(), "1:A", &[], std::time::Duration::from_secs(5)).await.unwrap();
+        let update = next_update(&client, &server.uri(), "1:A", &[], &Restrictions::default(), std::time::Duration::from_secs(5)).await.unwrap();
         assert_eq!(update["message"]["text"], "hi");
     }
 
@@ -660,7 +704,7 @@ mod test_update_tests {
             .mount(&server).await;
 
         let client = build_client().unwrap();
-        let update = next_update(&client, &server.uri(), "1:A", &["callback_query".to_string()], std::time::Duration::from_secs(5)).await.unwrap();
+        let update = next_update(&client, &server.uri(), "1:A", &["callback_query".to_string()], &Restrictions::default(), std::time::Duration::from_secs(5)).await.unwrap();
         assert_eq!(update["callback_query"]["data"], "yes");
     }
 
@@ -672,7 +716,7 @@ mod test_update_tests {
             .mount(&server).await;
 
         let client = build_client().unwrap();
-        let err = next_update(&client, &server.uri(), "1:A", &[], std::time::Duration::from_secs(1)).await.unwrap_err();
+        let err = next_update(&client, &server.uri(), "1:A", &[], &Restrictions::default(), std::time::Duration::from_secs(1)).await.unwrap_err();
         assert!(matches!(err, TestUpdateError::TimedOut(1)), "{err:?}");
     }
 
@@ -684,7 +728,7 @@ mod test_update_tests {
             .mount(&server).await;
 
         let client = build_client().unwrap();
-        let err = next_update(&client, &server.uri(), "1:A", &[], std::time::Duration::from_secs(1)).await.unwrap_err();
+        let err = next_update(&client, &server.uri(), "1:A", &[], &Restrictions::default(), std::time::Duration::from_secs(1)).await.unwrap_err();
         assert!(err.to_string().contains("Conflict: terminated by other getUpdates request"), "{err}");
     }
 }
@@ -821,13 +865,21 @@ pub async fn poll_telegram_updates(
                 continue;
             }
         };
+        // Read with the workflow each batch, so an edit applies to the next one.
+        let restrictions = current_workflow
+            .nodes
+            .iter()
+            .find(|n| n.node_type == "telegram.trigger")
+            .map(Restrictions::of)
+            .unwrap_or_default();
 
         for update in updates {
             if let Some(update_id) = update.get("update_id").and_then(|v| v.as_i64()) {
                 offset = Some(update_id + 1);
             }
-            // Sent before the filter took effect: confirmed above, never run.
-            if !wanted(&update, &allowed) {
+            // Sent before the filter took effect, or from a chat or user the
+            // trigger is restricted away from: confirmed above, never run.
+            if !wanted(&update, &allowed) || !restrictions.admits(&update) {
                 continue;
             }
 

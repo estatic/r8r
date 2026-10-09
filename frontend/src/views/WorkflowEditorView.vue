@@ -366,6 +366,7 @@ async function showHistory() {
       />
       <NodeConfigPanel
         ref="panel"
+        :workflow-id="workflow?.id"
         :node="selectedNode"
         :focus="panelFocus"
         :input-sources="inputSources"

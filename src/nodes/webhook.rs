@@ -13,7 +13,11 @@ impl Node for WebhookNode {
         "Webhook"
     }
     fn description(&self) -> &'static str {
-        "Starts a run when an HTTP request hits this workflow's webhook URL. Set `respond` to \"immediately\" to reply 202 at once instead of waiting for the result."
+        "Starts a run when its URL is called; answers at once or with the last node's data."
+    }
+    /// Optional: callers must then send this Basic Auth or header credential.
+    fn credential_types(&self) -> &'static [&'static str] {
+        &["basicAuth", "apiKeyHeader"]
     }
     fn category(&self) -> crate::node::NodeCategory {
         crate::node::NodeCategory::Trigger

@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { buildFields, loadRows } from './setFields'
+import { buildFields, buildSetOptions, loadRows, loadSetOptions } from './setFields'
 
 describe('loadRows', () => {
   it('reads each stored value as a fixed value of its type, or an expression', () => {
@@ -32,5 +32,21 @@ describe('buildFields', () => {
   it('refuses a number or JSON that does not parse', () => {
     expect(buildFields([{ name: 'n', mode: 'fixed', type: 'number', text: 'twelve' }])).toEqual({ error: '"n" must be a number.' })
     expect(buildFields([{ name: 'j', mode: 'fixed', type: 'json', text: '{oops' }])).toEqual({ error: '"j" must be valid JSON.' })
+  })
+})
+
+describe('Set options', () => {
+  it('stores nothing for the defaults', () => {
+    expect(buildSetOptions(loadSetOptions({}))).toEqual({ fields: {} })
+  })
+
+  it('round-trips JSON mode, kept fields and dot notation off', () => {
+    const fields = { mode: 'json', json_output: '{"id": {{ $json.id }}}', include: 'selected', include_fields: ['chat_id', 'text'], dot_notation: false }
+    expect(buildSetOptions(loadSetOptions(fields))).toEqual({ fields })
+  })
+
+  it('checks plain JSON and the field list', () => {
+    expect(buildSetOptions({ ...loadSetOptions({}), mode: 'json', jsonOutput: '[1]' })).toHaveProperty('error')
+    expect(buildSetOptions({ ...loadSetOptions({}), include: 'except', includeFields: ' ' })).toEqual({ error: 'List the input fields, separated by commas.' })
   })
 })

@@ -21,6 +21,12 @@ pub fn evaluate(node: &str, parameters: &Value) -> Result<bool, NodeError> {
             Some(other) => Err(fail(format!("\"condition\" must be a boolean, got: {other}"))),
         };
     };
+    holds(node, conditions)
+}
+
+/// Whether one `{combinator, rules}` set holds (If, Filter, each Switch rule).
+pub fn holds(node: &str, conditions: &Value) -> Result<bool, NodeError> {
+    let fail = |msg: String| NodeError::ExecutionFailed(format!("{node}: {msg}"));
     let any = match conditions.get("combinator").and_then(Value::as_str).unwrap_or("and") {
         "and" => false,
         "or" => true,

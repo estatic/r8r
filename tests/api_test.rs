@@ -686,6 +686,67 @@ async fn activate_workflow_with_invalid_cron_param_returns_400() {
 }
 
 #[tokio::test]
+async fn webhook_answers_with_the_last_nodes_data_or_at_once_and_reads_path_params() {
+    let app = test_app().await;
+    let token = register_and_get_token(&app, "webhook-modes@example.com").await;
+    let create = |respond: serde_json::Value| {
+        let app = app.clone();
+        let token = token.clone();
+        async move {
+            let mut hook = serde_json::json!({"path": "users/:id", "method": "PUT", "response_code": 201});
+            hook.as_object_mut().unwrap().extend(respond.as_object().unwrap().clone());
+            let body = serde_json::json!({
+                "name": "webhook-modes",
+                "nodes": [
+                    {"id": "hook", "node_type": "core.webhook", "position": [0.0, 0.0], "parameters": hook, "disabled": false},
+                    {"id": "set1", "node_type": "core.set", "position": [1.0, 0.0], "parameters": {"fields": {"user": "{{ $json.params.id }}"}}, "disabled": false}
+                ],
+                "connections": [{"from_node": "hook", "from_output": 0, "to_node": "set1", "to_input": 0}]
+            });
+            let response = app.clone()
+                .oneshot(Request::builder().method("POST").uri("/rest/r8r/workflows")
+                    .header("content-type", "application/json").header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(body.to_string())).unwrap())
+                .await.unwrap();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            let id = serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["id"].as_str().unwrap().to_string();
+            app.clone()
+                .oneshot(Request::builder().method("PATCH").uri(format!("/rest/r8r/workflows/{id}/active"))
+                    .header("content-type", "application/json").header("authorization", format!("Bearer {token}"))
+                    .body(Body::from(serde_json::json!({"active": true}).to_string())).unwrap())
+                .await.unwrap();
+            id
+        }
+    };
+    let call = |id: String| {
+        let app = app.clone();
+        async move {
+            let response = app
+                .oneshot(Request::builder().method("PUT").uri(format!("/webhook-r8r/{id}/users/42")).body(Body::empty()).unwrap())
+                .await.unwrap();
+            let status = response.status();
+            let bytes = response.into_body().collect().await.unwrap().to_bytes();
+            (status, serde_json::from_slice::<serde_json::Value>(&bytes).unwrap_or(serde_json::Value::Null))
+        }
+    };
+
+    let last = create(serde_json::json!({"respond": "lastNode"})).await;
+    let (status, body) = call(last).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["user"], "42");
+    assert_eq!(body["params"]["id"], "42");
+
+    let all = create(serde_json::json!({"respond": "lastNode", "response_data": "allEntries"})).await;
+    let (_, body) = call(all).await;
+    assert_eq!(body[0]["user"], "42");
+
+    let now = create(serde_json::json!({"respond": "immediately"})).await;
+    let (status, body) = call(now).await;
+    assert_eq!(status, StatusCode::CREATED);
+    assert_eq!(body["message"], "Workflow was started");
+}
+
+#[tokio::test]
 async fn webhook_trigger_executes_workflow_end_to_end_then_404s_after_deactivation() {
     let app = test_app().await;
     let token = register_and_get_token(&app, "webhook-e2e@example.com").await;

@@ -26,13 +26,22 @@ impl Scheduler {
         F: Fn() -> Fut + Send + Sync + 'static,
         Fut: std::future::Future<Output = ()> + Send + 'static,
     {
+        self.register_tz(cron_expr, chrono_tz::Tz::UTC, job).await
+    }
+
+    /// As `register`, with the cron's times read in `tz` (e.g. 09:00 Berlin).
+    pub async fn register_tz<F, Fut>(&self, cron_expr: &str, tz: chrono_tz::Tz, job: F) -> anyhow::Result<uuid::Uuid>
+    where
+        F: Fn() -> Fut + Send + Sync + 'static,
+        Fut: std::future::Future<Output = ()> + Send + 'static,
+    {
         // tokio_cron_scheduler::Job::new_async expects a `FnMut(Uuid,
         // JobScheduler) -> Pin<Box<dyn Future<Output = ()> + Send>>`. Our own
         // public signature only requires `Fn() -> Fut`, so wrap it: ignore
         // the job id / scheduler handle the crate passes in (r8r's caller
         // owns everything the closure needs already, per the plan's Global
         // Constraints), and box the returned future.
-        let cron_job = Job::new_async(cron_expr, move |_job_id, _scheduler| {
+        let cron_job = Job::new_async_tz(cron_expr, tz, move |_job_id, _scheduler| {
             let fut = job();
             Box::pin(fut) as std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send>>
         })?;
