@@ -5,10 +5,17 @@ import CredentialPicker from './CredentialPicker.vue'
 import AgentSettings from './AgentSettings.vue'
 import TelegramTriggerSettings from './TelegramTriggerSettings.vue'
 import SetFieldsEditor from './SetFieldsEditor.vue'
+import ConditionsEditor from './ConditionsEditor.vue'
+import FirecrawlSettings from './FirecrawlSettings.vue'
+import HttpRequestSettings from './HttpRequestSettings.vue'
+import { HTTP_KEYS, buildHttp, loadHttp, type HttpForm } from '../canvas/httpRequest'
+import { authForCredentialType } from '../tools/schema'
+import { FIRECRAWL_KEYS, buildFirecrawl, loadFirecrawl, type FirecrawlForm } from '../canvas/firecrawl'
+import { buildConditions, loadConditions, type ConditionsForm } from '../canvas/conditions'
 import CodeSettings from './CodeSettings.vue'
 import TelegramSendSettings from './TelegramSendSettings.vue'
 import { buildMessage, loadMessage, type MessageForm } from '../canvas/telegramMessage'
-import { CODE_EXAMPLES, type CodeLanguage } from '../canvas/codeExamples'
+import { codeExample, type CodeLanguage, type CodeMode } from '../canvas/codeExamples'
 import { buildFields, loadRows, type SetFieldRow } from '../canvas/setFields'
 import type { UpstreamSource } from '../canvas/inputData'
 import { useCredentialsStore } from '../stores/credentials'
@@ -62,12 +69,18 @@ const emptyAgentFields = (): AgentFields => ({
 const agentFields = ref<AgentFields>(emptyAgentFields())
 
 const isCode = computed(() => props.node?.node_type === 'core.code')
-const codeFields = ref<{ language: CodeLanguage; script: string; writtenIn: CodeLanguage }>({ language: 'javaScript', script: '', writtenIn: 'javaScript' })
+const codeFields = ref<{ mode: CodeMode; language: CodeLanguage; script: string; writtenIn: CodeLanguage }>({
+  mode: 'runOnceForAllItems',
+  language: 'javaScript',
+  script: '',
+  writtenIn: 'javaScript',
+})
 function loadCode(parameters: Record<string, unknown>) {
-  // Nodes saved before the language choice are JavaScript.
+  // Nodes saved before the language and mode choices are JavaScript, run once for all items.
   const language: CodeLanguage = parameters.language === 'python' ? 'python' : 'javaScript'
-  const script = typeof parameters.script === 'string' ? parameters.script : CODE_EXAMPLES[language]
-  return { language, script, writtenIn: language }
+  const mode: CodeMode = parameters.mode === 'runOnceForEachItem' ? 'runOnceForEachItem' : 'runOnceForAllItems'
+  const script = typeof parameters.script === 'string' ? parameters.script : codeExample(language, mode)
+  return { mode, language, script, writtenIn: language }
 }
 
 // Only nodes that take a credential show the picker (a node that still holds
@@ -89,8 +102,15 @@ const batchSize = ref<number | string>(1)
 
 const isSet = computed(() => props.node?.node_type === 'core.set')
 const setRows = ref<SetFieldRow[]>([])
+
+const hasConditions = computed(() => props.node?.node_type === 'core.if' || props.node?.node_type === 'core.filter')
+const conditions = ref<ConditionsForm>(loadConditions({}))
+const isHttp = computed(() => props.node?.node_type === 'core.httpRequest')
+const http = ref<HttpForm>(loadHttp({}))
+const isFirecrawl = computed(() => props.node?.node_type === 'firecrawl.search')
+const firecrawl = ref<FirecrawlForm>(loadFirecrawl({}))
 // Nodes with their own form keep the raw JSON under "Advanced".
-const hasForm = computed(() => isAgent.value || isSet.value || isCode.value || isLoop.value || isTelegramSend.value)
+const hasForm = computed(() => isAgent.value || isSet.value || isCode.value || isLoop.value || isTelegramSend.value || hasConditions.value || isFirecrawl.value || isHttp.value)
 
 const isTelegramTrigger = computed(() => props.node?.node_type === 'telegram.trigger')
 // Nothing chosen yet means every update, as the trigger treats it.
@@ -141,12 +161,16 @@ const formSnapshot = computed(() =>
     timeoutMs.value,
     credentialId.value,
     agentFields.value,
+    codeFields.value.mode,
     codeFields.value.language,
     codeFields.value.script,
     batchSize.value,
     isTelegramSend.value ? telegramMessage.value : null,
     telegramUpdates.value,
     setRows.value,
+    hasConditions.value ? conditions.value : null,
+    isFirecrawl.value ? firecrawl.value : null,
+    isHttp.value ? http.value : null,
   ]),
 )
 const loaded = ref('')
@@ -169,6 +193,9 @@ watch(
       agentFields.value = node.node_type === 'ai.agent' ? loadAgentFields(node.parameters ?? {}) : emptyAgentFields()
       telegramUpdates.value = loadTelegramUpdates(node.parameters ?? {})
       setRows.value = node.node_type === 'core.set' ? loadRows(node.parameters?.fields) : []
+      http.value = loadHttp(node.node_type === 'core.httpRequest' ? (node.parameters ?? {}) : {})
+      firecrawl.value = loadFirecrawl(node.node_type === 'firecrawl.search' ? (node.parameters ?? {}) : {})
+      conditions.value = loadConditions(node.node_type === 'core.if' || node.node_type === 'core.filter' ? (node.parameters ?? {}) : {})
       if (node.node_type === 'core.code') codeFields.value = loadCode(node.parameters ?? {})
       batchSize.value = typeof node.parameters?.batch_size === 'number' ? node.parameters.batch_size : 1
       telegramMessage.value = loadMessage(node.node_type === 'telegram.sendMessage' ? (node.parameters ?? {}) : {})
@@ -210,11 +237,17 @@ function build(): NodeInstance | string {
   } catch {
     return 'Parameters must be valid JSON.'
   }
-  if (credentialId.value) {
+  if (credentialId.value && isHttp.value) {
+    // HTTP Request sends a credential as its type says (bearer, API key header, basic).
+    const type = credentialsStore.credentials.find((c) => c.id === credentialId.value)?.credential_type
+    parsed.auth = { ...((parsed.auth as object) ?? {}), ...authForCredentialType('core.httpRequest', credentialId.value, type) }
+  } else if (credentialId.value) {
     parsed.auth = { ...((parsed.auth as object) ?? {}), credential_id: credentialId.value }
   } else if (parsed.auth && typeof parsed.auth === 'object') {
-    // "No credential": drop the stored one, or the JSON would bring it back.
+    // "No credential": drop the stored one, or the JSON would bring it back
+    // (and HTTP Request's auth type, which would then lack its credential).
     const { credential_id: _dropped, ...rest } = parsed.auth as Record<string, unknown>
+    if (isHttp.value) delete rest.type
     if (Object.keys(rest).length > 0) parsed.auth = rest
     else delete parsed.auth
   }
@@ -232,6 +265,28 @@ function build(): NodeInstance | string {
   if (isCode.value) {
     parsed.language = codeFields.value.language
     parsed.script = codeFields.value.script
+    // "Run once for all items" is the default, so it isn't stored.
+    if (codeFields.value.mode === 'runOnceForEachItem') parsed.mode = 'runOnceForEachItem'
+    else delete parsed.mode
+  }
+  if (isHttp.value) {
+    const built = buildHttp(http.value)
+    if ('error' in built) return built.error
+    for (const key of HTTP_KEYS) delete parsed[key]
+    Object.assign(parsed, built.fields)
+  }
+  if (isFirecrawl.value) {
+    const built = buildFirecrawl(firecrawl.value)
+    if ('error' in built) return built.error
+    for (const key of FIRECRAWL_KEYS) delete parsed[key]
+    Object.assign(parsed, built.fields)
+  }
+  if (hasConditions.value) {
+    const built = buildConditions(conditions.value)
+    if ('error' in built) return built.error
+    // The rules replace the older single `condition`.
+    delete parsed.condition
+    parsed.conditions = built.conditions
   }
   if (isSet.value) {
     const built = buildFields(setRows.value)
@@ -389,6 +444,20 @@ onBeforeUnmount(() => {
       </fieldset>
       <TelegramSendSettings v-if="isTelegramSend" v-model="telegramMessage" />
       <CodeSettings v-if="isCode" v-model="codeFields" :sources="inputSources" :node-labels="nodeLabels" />
+      <HttpRequestSettings v-if="isHttp" v-model="http" :sources="inputSources" :node-labels="nodeLabels" />
+      <FirecrawlSettings v-if="isFirecrawl" v-model="firecrawl" :sources="inputSources" :node-labels="nodeLabels" />
+      <ConditionsEditor
+        v-if="hasConditions"
+        v-model="conditions"
+        :sources="inputSources"
+        :node-labels="nodeLabels"
+        :title="node.node_type === 'core.if' ? 'Conditions' : 'Keep items that match'"
+        :hint="
+          node.node_type === 'core.if'
+            ? 'Each item goes to the true output when the conditions hold, else to false.'
+            : 'Items that don\'t match are dropped.'
+        "
+      />
       <SetFieldsEditor v-if="isSet" v-model="setRows" :sources="inputSources" :node-labels="nodeLabels" />
       <div v-if="takesCredential" data-testid="credential-section">
         <label class="block text-sm text-gray-600 mb-1">Credential</label>

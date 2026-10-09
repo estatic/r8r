@@ -49,33 +49,68 @@ impl Node for CodeNode {
             .ok_or_else(|| NodeError::ExecutionFailed("core.code requires a \"script\" parameter".into()))?
             .to_string();
 
+        let each_item = match ctx.parameters.get("mode").and_then(|v| v.as_str()).unwrap_or("runOnceForAllItems") {
+            "runOnceForAllItems" => false,
+            "runOnceForEachItem" => true,
+            other => {
+                return Err(NodeError::ExecutionFailed(format!(
+                    "core.code: unknown mode \"{other}\" (expected \"runOnceForAllItems\" or \"runOnceForEachItem\")"
+                )))
+            }
+        };
+        if !each_item {
+            let result = self.run_script(ctx, &script).await?;
+            let result_array = result
+                .as_array()
+                .ok_or_else(|| NodeError::ExecutionFailed("core.code script must return an array".into()))?;
+            return Ok(vec![result_array.iter().map(to_item).collect()]);
+        }
+
+        // Once for each item: the code sees that item alone (`$json`,
+        // `$input.item`, `items[0]`) and returns exactly one item for it.
+        let mut out_items = Vec::with_capacity(ctx.input_items.len());
+        for (index, item) in ctx.input_items.iter().enumerate() {
+            let mut one = ctx.clone();
+            one.input_items = vec![item.clone()];
+            let result = self
+                .run_script(&one, &script)
+                .await
+                .map_err(|NodeError::ExecutionFailed(e)| NodeError::ExecutionFailed(format!("item {index}: {e}")))?;
+            if !result.is_object() {
+                let got = match &result {
+                    serde_json::Value::Array(_) => "an array",
+                    serde_json::Value::Null => "nothing",
+                    _ => "a value that is not an object",
+                };
+                return Err(NodeError::ExecutionFailed(format!(
+                    "item {index}: in \"Run Once for Each Item\" mode the code must return one object (the item), but it returned {got}"
+                )));
+            }
+            out_items.push(to_item(&result));
+        }
+        Ok(vec![out_items])
+    }
+}
+
+/// A returned entry as an item: `{json: {...}}`, or the object itself.
+fn to_item(entry: &serde_json::Value) -> Item {
+    let json = entry.get("json").cloned().unwrap_or_else(|| entry.clone());
+    Item { json, binary: serde_json::json!({}) }
+}
+
+impl CodeNode {
+    async fn run_script(&self, ctx: &NodeExecutionContext, script: &str) -> Result<serde_json::Value, NodeError> {
         // `eval_js` wraps each entry of `EvalContext.items` in `{"json": ...}`
         // itself when building the `$items()` array (see `src/expr.rs`), so
         // these must be the raw item values, not pre-wrapped here — otherwise
         // scripts would see a double-wrapped `{json: {json: ...}}` shape.
-        let result = match ctx.parameters.get("language").and_then(|v| v.as_str()).unwrap_or("javaScript") {
-            "javaScript" => self.run_javascript(ctx, script).await?,
-            "python" => run_python(ctx, &script).await?,
-            other => {
-                return Err(NodeError::ExecutionFailed(format!(
-                    "core.code: unknown language \"{other}\" (expected \"javaScript\" or \"python\")"
-                )))
-            }
-        };
-
-        let result_array = result
-            .as_array()
-            .ok_or_else(|| NodeError::ExecutionFailed("core.code script must return an array".into()))?;
-
-        let out_items = result_array
-            .iter()
-            .map(|entry| {
-                let json = entry.get("json").cloned().unwrap_or_else(|| entry.clone());
-                Item { json, binary: serde_json::json!({}) }
-            })
-            .collect();
-
-        Ok(vec![out_items])
+        match ctx.parameters.get("language").and_then(|v| v.as_str()).unwrap_or("javaScript") {
+            "javaScript" => self.run_javascript(ctx, script.to_string()).await,
+            "python" => run_python(ctx, script).await,
+            other => Err(NodeError::ExecutionFailed(format!(
+                "core.code: unknown language \"{other}\" (expected \"javaScript\" or \"python\")"
+            ))),
+        }
     }
 }
 
@@ -243,6 +278,69 @@ mod tests {
         let out = CodeNode.execute(&ctx).await.unwrap();
         let json: Vec<_> = out[0].iter().map(|i| i.json.clone()).collect();
         assert_eq!(json, vec![serde_json::json!({"n": 2, "double": 4}), serde_json::json!({"n": 5, "double": 10})]);
+    }
+
+    #[tokio::test]
+    async fn each_item_mode_runs_the_code_per_item_and_returns_one_item_each() {
+        let inputs = vec![serde_json::json!({"n": 1}), serde_json::json!({"n": 2}), serde_json::json!({"n": 3})];
+        let ctx = ctx_with(
+            serde_json::json!({"mode": "runOnceForEachItem", "script": "return { n: $json.n, double: $input.item.json.n * 2, seen: items.length };"}),
+            inputs,
+        );
+        let out = CodeNode.execute(&ctx).await.unwrap();
+        let json: Vec<_> = out[0].iter().map(|i| i.json.clone()).collect();
+        assert_eq!(
+            json,
+            vec![
+                serde_json::json!({"n": 1, "double": 2, "seen": 1}),
+                serde_json::json!({"n": 2, "double": 4, "seen": 1}),
+                serde_json::json!({"n": 3, "double": 6, "seen": 1}),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn each_item_mode_accepts_an_item_wrapped_in_json() {
+        let ctx = ctx_with(serde_json::json!({"mode": "runOnceForEachItem", "script": "return { json: { x: $json.n } };"}), vec![serde_json::json!({"n": 7})]);
+        assert_eq!(CodeNode.execute(&ctx).await.unwrap()[0][0].json, serde_json::json!({"x": 7}));
+    }
+
+    #[tokio::test]
+    async fn each_item_mode_refuses_anything_but_one_object() {
+        for (script, got) in [("return [$json, $json];", "an array"), ("return;", "nothing"), ("return 5;", "not an object")] {
+            let ctx = ctx_with(
+                serde_json::json!({"mode": "runOnceForEachItem", "script": script}),
+                vec![serde_json::json!({"n": 1}), serde_json::json!({"n": 2})],
+            );
+            let err = CodeNode.execute(&ctx).await.unwrap_err().to_string();
+            assert!(err.contains("item 0") && err.contains("must return one object") && err.contains(got), "{script}: {err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn each_item_mode_names_the_item_whose_code_failed() {
+        let ctx = ctx_with(
+            serde_json::json!({"mode": "runOnceForEachItem", "script": "if ($json.n === 2) throw new Error('bad'); return $json;"}),
+            vec![serde_json::json!({"n": 1}), serde_json::json!({"n": 2})],
+        );
+        let err = CodeNode.execute(&ctx).await.unwrap_err().to_string();
+        assert!(err.contains("item 1") && err.contains("bad"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn python_each_item_mode_returns_one_dict_per_item() {
+        let ctx = ctx_with(
+            serde_json::json!({"language": "python", "mode": "runOnceForEachItem", "script": "return {'n': _json['n'] + 10}"}),
+            vec![serde_json::json!({"n": 1}), serde_json::json!({"n": 2})],
+        );
+        let out = CodeNode.execute(&ctx).await.unwrap();
+        assert_eq!(out[0].iter().map(|i| i.json.clone()).collect::<Vec<_>>(), vec![serde_json::json!({"n": 11}), serde_json::json!({"n": 12})]);
+    }
+
+    #[tokio::test]
+    async fn an_unknown_mode_is_refused() {
+        let ctx = ctx_with(serde_json::json!({"mode": "sometimes", "script": "return items;"}), vec![]);
+        assert!(CodeNode.execute(&ctx).await.unwrap_err().to_string().contains("unknown mode"));
     }
 
     #[tokio::test]

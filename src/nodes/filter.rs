@@ -8,11 +8,14 @@ impl Node for FilterNode {
     fn type_name(&self) -> &'static str {
         "core.filter"
     }
+    fn runs_per_item(&self) -> bool {
+        true
+    }
     fn display_name(&self) -> &'static str {
         "Filter"
     }
     fn description(&self) -> &'static str {
-        "Keeps only items where a boolean condition is true."
+        "Keeps only the items that meet its conditions."
     }
     fn category(&self) -> crate::node::NodeCategory {
         crate::node::NodeCategory::FlowControl
@@ -22,15 +25,7 @@ impl Node for FilterNode {
     }
 
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
-        let condition = match ctx.parameters.get("condition") {
-            None => false,
-            Some(serde_json::Value::Bool(b)) => *b,
-            Some(other) => {
-                return Err(NodeError::ExecutionFailed(format!(
-                    "core.filter \"condition\" must be a boolean, got: {other}"
-                )));
-            }
-        };
+        let condition = super::conditions::evaluate("core.filter", &ctx.parameters)?;
         if condition {
             Ok(vec![ctx.input_items.clone()])
         } else {

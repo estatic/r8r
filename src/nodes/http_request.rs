@@ -38,6 +38,9 @@ impl Node for HttpRequestNode {
     fn type_name(&self) -> &'static str {
         "core.httpRequest"
     }
+    fn runs_per_item(&self) -> bool {
+        true
+    }
     fn display_name(&self) -> &'static str {
         "HTTP Request"
     }
@@ -82,18 +85,16 @@ async fn execute_with_client(
         .map_err(|_| NodeError::ExecutionFailed(format!("invalid HTTP method: {method}")))?;
     let mut request = client.request(method, url);
 
+    // Values may be numbers or booleans (an expression's result): sent as text.
     if let Some(headers) = ctx.parameters.get("headers").and_then(|v| v.as_object()) {
         for (k, v) in headers {
-            if let Some(v_str) = v.as_str() {
-                request = request.header(k, v_str);
+            if let Some(v) = scalar_text(v) {
+                request = request.header(k, v);
             }
         }
     }
     if let Some(query) = ctx.parameters.get("query").and_then(|v| v.as_object()) {
-        let pairs: Vec<(String, String)> = query
-            .iter()
-            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-            .collect();
+        let pairs: Vec<(String, String)> = query.iter().filter_map(|(k, v)| scalar_text(v).map(|s| (k.clone(), s))).collect();
         request = request.query(&pairs);
     }
     if let Some(body) = ctx.parameters.get("body") {
@@ -102,7 +103,7 @@ async fn execute_with_client(
         }
     }
 
-    request = apply_auth(request, &ctx.parameters, &ctx.credentials)?;
+    request = apply_auth(request, &ctx.parameters, &ctx.credentials, &ctx.credential_types)?;
 
     let response = request
         .send()
@@ -110,25 +111,60 @@ async fn execute_with_client(
         .map_err(|e| NodeError::ExecutionFailed(format!("request failed: {e}")))?;
 
     let status = response.status();
-    let response_json: serde_json::Value = response.json().await.unwrap_or(serde_json::Value::Null);
+    let text = response.text().await.map_err(|e| NodeError::ExecutionFailed(format!("reading the response failed: {e}")))?;
+    // JSON as itself; anything else (HTML, plain text) under `data`.
+    let body: serde_json::Value = serde_json::from_str(&text).unwrap_or_else(|_| serde_json::json!({ "data": text }));
 
     if !status.is_success() {
-        return Err(NodeError::ExecutionFailed(format!("HTTP {status}: {response_json}")));
+        return Err(NodeError::ExecutionFailed(format!("HTTP {status}: {body}")));
     }
 
-    Ok(vec![vec![Item { json: response_json, binary: serde_json::json!({}) }]])
+    Ok(vec![response_items(body)])
+}
+
+/// A JSON array of objects is one item per object (as n8n does); any other
+/// response is one item, a bare value or array of values under `data`.
+fn response_items(body: serde_json::Value) -> Vec<Item> {
+    let item = |json| Item { json, binary: serde_json::json!({}) };
+    match body {
+        serde_json::Value::Array(values) if !values.is_empty() && values.iter().all(|v| v.is_object()) => values.into_iter().map(item).collect(),
+        serde_json::Value::Object(_) => vec![item(body)],
+        other => vec![item(serde_json::json!({ "data": other }))],
+    }
+}
+
+fn scalar_text(v: &serde_json::Value) -> Option<String> {
+    match v {
+        serde_json::Value::String(s) => Some(s.clone()),
+        serde_json::Value::Number(n) => Some(n.to_string()),
+        serde_json::Value::Bool(b) => Some(b.to_string()),
+        _ => None,
+    }
 }
 
 fn apply_auth(
     mut request: reqwest::RequestBuilder,
     parameters: &serde_json::Value,
     credentials: &std::collections::HashMap<Uuid, serde_json::Value>,
+    credential_types: &std::collections::HashMap<Uuid, String>,
 ) -> Result<reqwest::RequestBuilder, NodeError> {
     let auth = match parameters.get("auth") {
         Some(a) => a,
         None => return Ok(request),
     };
-    let auth_type = auth.get("type").and_then(|v| v.as_str()).unwrap_or("none");
+    // No type given: the chosen credential's type says how it is sent.
+    let inferred = auth
+        .get("credential_id")
+        .and_then(|v| v.as_str())
+        .and_then(|s| Uuid::parse_str(s).ok())
+        .and_then(|id| credential_types.get(&id))
+        .and_then(|t| match t.as_str() {
+            "bearerToken" => Some("bearer"),
+            "apiKeyHeader" => Some("apiKey"),
+            "basicAuth" => Some("basic"),
+            _ => None,
+        });
+    let auth_type = auth.get("type").and_then(|v| v.as_str()).or(inferred).unwrap_or("none");
     if auth_type == "none" {
         return Ok(request);
     }
@@ -182,6 +218,64 @@ mod tests {
     use super::*;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    async fn get(_server: &MockServer, parameters: serde_json::Value, credential_types: std::collections::HashMap<Uuid, String>, credentials: std::collections::HashMap<Uuid, serde_json::Value>) -> Vec<serde_json::Value> {
+        let ctx = NodeExecutionContext { parameters, credentials, credential_types, ..Default::default() };
+        HttpRequestNode.execute(&ctx).await.unwrap()[0].iter().map(|i| i.json.clone()).collect()
+    }
+
+    #[tokio::test]
+    async fn a_credential_without_an_auth_type_is_sent_as_its_type_says() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/me"))
+            .and(header("authorization", "Bearer tok"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"me": 1})))
+            .mount(&server)
+            .await;
+        let id = Uuid::new_v4();
+        let out = get(
+            &server,
+            serde_json::json!({"url": format!("{}/me", server.uri()), "auth": {"credential_id": id.to_string()}}),
+            std::collections::HashMap::from([(id, "bearerToken".to_string())]),
+            std::collections::HashMap::from([(id, serde_json::json!({"token": "tok"}))]),
+        )
+        .await;
+        assert_eq!(out, vec![serde_json::json!({"me": 1})]);
+    }
+
+    #[tokio::test]
+    async fn numbers_in_query_and_headers_are_sent_as_text() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/q"))
+            .and(wiremock::matchers::query_param("page", "2"))
+            .and(header("x-n", "7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"ok": true})))
+            .mount(&server)
+            .await;
+        let params = serde_json::json!({"url": format!("{}/q", server.uri()), "query": {"page": 2}, "headers": {"x-n": 7}});
+        assert_eq!(get(&server, params, Default::default(), Default::default()).await, vec![serde_json::json!({"ok": true})]);
+    }
+
+    #[tokio::test]
+    async fn an_array_of_objects_becomes_one_item_each_and_text_goes_under_data() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/list"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([{"id": 1}, {"id": 2}])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/page"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("<h1>hi</h1>"))
+            .mount(&server)
+            .await;
+        let list = get(&server, serde_json::json!({"url": format!("{}/list", server.uri())}), Default::default(), Default::default()).await;
+        assert_eq!(list, vec![serde_json::json!({"id": 1}), serde_json::json!({"id": 2})]);
+        let page = get(&server, serde_json::json!({"url": format!("{}/page", server.uri())}), Default::default(), Default::default()).await;
+        assert_eq!(page, vec![serde_json::json!({"data": "<h1>hi</h1>"})]);
+    }
 
     #[tokio::test]
     async fn get_request_returns_json_body_as_item() {

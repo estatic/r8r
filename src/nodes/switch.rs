@@ -9,6 +9,9 @@ impl Node for SwitchNode {
     fn type_name(&self) -> &'static str {
         "core.switch"
     }
+    fn runs_per_item(&self) -> bool {
+        true
+    }
     fn display_name(&self) -> &'static str {
         "Switch"
     }

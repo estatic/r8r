@@ -9,6 +9,9 @@ impl Node for SetNode {
     fn type_name(&self) -> &'static str {
         "core.set"
     }
+    fn runs_per_item(&self) -> bool {
+        true
+    }
     fn display_name(&self) -> &'static str {
         "Set"
     }

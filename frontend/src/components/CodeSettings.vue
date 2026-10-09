@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import PromptBox from './PromptBox.vue'
-import { CODE_EXAMPLES, type CodeLanguage } from '../canvas/codeExamples'
+import { codeExample, isCodeExample, type CodeLanguage, type CodeMode } from '../canvas/codeExamples'
 import { codeReference, type UpstreamSource } from '../canvas/inputData'
 
-/** The Code node's language and code. */
-const model = defineModel<{ language: CodeLanguage; script: string; writtenIn: CodeLanguage }>({ required: true })
+/** The Code node's mode, language and code. */
+const model = defineModel<{ mode: CodeMode; language: CodeLanguage; script: string; writtenIn: CodeLanguage }>({ required: true })
 const props = withDefaults(defineProps<{ sources?: UpstreamSource[]; nodeLabels?: Record<string, string> }>(), {
   sources: () => [],
   nodeLabels: () => ({}),
@@ -27,29 +27,54 @@ function pick(source: UpstreamSource, segments: (string | number)[]) {
   picking.value = false
 }
 
-const isExample = (script: string) => Object.values(CODE_EXAMPLES).some((ex) => ex.trim() === script.trim()) || script.trim() === ''
+const isExample = isCodeExample
 
 function setLanguage(language: CodeLanguage) {
   // Swap an untouched example; never replace code the user wrote.
   if (isExample(model.value.script)) {
-    model.value = { language, script: CODE_EXAMPLES[language], writtenIn: language }
+    model.value = { ...model.value, language, script: codeExample(language, model.value.mode), writtenIn: language }
   } else {
     model.value = { ...model.value, language }
   }
 }
 
+function setMode(mode: CodeMode) {
+  model.value = isExample(model.value.script)
+    ? { ...model.value, mode, script: codeExample(model.value.language, mode) }
+    : { ...model.value, mode }
+}
+
 const NAMES: Record<CodeLanguage, string> = { javaScript: 'JavaScript', python: 'Python' }
 const mismatch = computed(() => model.value.language !== model.value.writtenIn && !isExample(model.value.script))
-const hint = computed(() =>
-  model.value.language === 'python'
+const eachItem = computed(() => model.value.mode === 'runOnceForEachItem')
+const hint = computed(() => {
+  const py = model.value.language === 'python'
+  if (eachItem.value) {
+    return py
+      ? '_json: this item\'s data; _node["id"]["json"]: an earlier node\'s output. Runs once for each input item; return one dict, the item to pass on.'
+      : '$json: this item\'s data; $node["id"].json: an earlier node\'s output. Runs once for each input item; return one object, the item to pass on.'
+  }
+  return py
     ? 'items: the input items (item.json). _json: the first item reaching this node; _node["id"]["json"]: an earlier node\'s output. Return the items to pass on.'
-    : 'items: the input items (item.json). $json: the first item reaching this node; $node["id"].json: an earlier node\'s output. Return the items to pass on.',
-)
+    : 'items: the input items (item.json). $json: the first item reaching this node; $node["id"].json: an earlier node\'s output. Return the items to pass on.'
+})
 </script>
 
 <template>
   <fieldset class="border rounded p-2 space-y-2 min-w-0" data-testid="code-settings">
     <legend class="text-sm text-gray-600 px-1">Code</legend>
+    <label class="block text-xs text-gray-600">
+      Mode
+      <select
+        :value="model.mode"
+        aria-label="Mode"
+        class="w-full border rounded px-2 py-1 text-sm"
+        @change="setMode(($event.target as HTMLSelectElement).value as CodeMode)"
+      >
+        <option value="runOnceForAllItems">Run Once for All Items</option>
+        <option value="runOnceForEachItem">Run Once for Each Item</option>
+      </select>
+    </label>
     <label class="block text-xs text-gray-600">
       Language
       <select

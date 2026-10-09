@@ -133,6 +133,119 @@ describe('NodeConfigPanel', () => {
     })
   })
 
+  describe('HTTP Request', () => {
+    const httpNode = (parameters: Record<string, unknown>): NodeInstance => ({ ...node, node_type: 'core.httpRequest', parameters })
+    const applied = (w: ReturnType<typeof mount>) => (w.emitted('update')![0][0] as NodeInstance).parameters
+
+    it('saves method, URL, query, headers and body from the form', async () => {
+      const wrapper = mount(NodeConfigPanel, { props: { node: httpNode({}) } })
+      await wrapper.find('select[aria-label="Method"]').setValue('POST')
+      await wrapper.find('input[aria-label="URL"]').setValue('https://api.example.com/items')
+      await wrapper.find('[data-testid="add-query"]').trigger('click')
+      await wrapper.find('[data-testid="http-query"] input[aria-label="Name"]').setValue('page')
+      await wrapper.find('[data-testid="http-query"] input[aria-label="Value"]').setValue('{{ $json.page }}')
+      await wrapper.find('[data-testid="add-headers"]').trigger('click')
+      await wrapper.find('[data-testid="http-headers"] input[aria-label="Name"]').setValue('Accept')
+      await wrapper.find('[data-testid="http-headers"] input[aria-label="Value"]').setValue('application/json')
+      await wrapper.find('select[aria-label="Body"]').setValue('json')
+      await wrapper.find('textarea[aria-label="JSON body"]').setValue('{"name": "{{ $json.name }}"}')
+      await clickApply(wrapper)
+      expect(applied(wrapper)).toEqual({
+        method: 'POST',
+        url: 'https://api.example.com/items',
+        query: { page: '{{ $json.page }}' },
+        headers: { Accept: 'application/json' },
+        body: { name: '{{ $json.name }}' },
+      })
+    })
+
+    it('sends a chosen credential the way its type says', async () => {
+      seedCredential('k1', 'apiKeyHeader')
+      const wrapper = mount(NodeConfigPanel, { props: { node: httpNode({ url: 'https://x.example', auth: { credential_id: 'k1' } }) } })
+      await clickApply(wrapper)
+      expect(applied(wrapper).auth).toEqual({ type: 'apiKey', credential_id: 'k1' })
+    })
+  })
+
+  describe('Web Search (Firecrawl)', () => {
+    const fcNode = (parameters: Record<string, unknown>): NodeInstance => ({ ...node, node_type: 'firecrawl.search', parameters })
+    const applied = (w: ReturnType<typeof mount>) => (w.emitted('update')![0][0] as NodeInstance).parameters
+
+    it('saves a search from the form, keeping the credential', async () => {
+      const wrapper = mount(NodeConfigPanel, { props: { node: fcNode({ auth: { credential_id: 'c1' } }) } })
+      await wrapper.find('input[aria-label="Query"]').setValue('{{ $json.message.text }}')
+      await wrapper.find('input[aria-label="Results"]').setValue('3')
+      await wrapper.find('input[aria-label="Source News"]').setValue(true)
+      await wrapper.find('select[aria-label="Time range"]').setValue('qdr:d')
+      await clickApply(wrapper)
+      expect(applied(wrapper)).toEqual({
+        auth: { credential_id: 'c1' },
+        operation: 'search',
+        query: '{{ $json.message.text }}',
+        limit: 3,
+        sources: ['web', 'news'],
+        time_range: 'qdr:d',
+      })
+    })
+
+    it('switches to reading a page, dropping the search fields', async () => {
+      const wrapper = mount(NodeConfigPanel, { props: { node: fcNode({ operation: 'search', query: 'q', limit: 5, sources: ['web'] }) } })
+      await wrapper.find('select[aria-label="Operation"]').setValue('scrape')
+      await wrapper.find('input[aria-label="URL"]').setValue('{{ $json.url }}')
+      await clickApply(wrapper)
+      expect(applied(wrapper)).toEqual({ operation: 'scrape', url: '{{ $json.url }}', formats: ['markdown'] })
+    })
+  })
+
+  describe('If / Filter conditions', () => {
+    const ifNode = (parameters: Record<string, unknown>, node_type = 'core.if'): NodeInstance => ({ ...node, node_type, parameters })
+    const sources = [{ nodeId: 'code', direct: true, fields: [{ path: '.count', preview: '7', segments: ['count'], expression: '{{ $json.count }}' }] }]
+    const applied = (w: ReturnType<typeof mount>) => (w.emitted('update')![0][0] as NodeInstance).parameters
+
+    it('builds a rule from a picked field, an operator and a value', async () => {
+      const wrapper = mount(NodeConfigPanel, { props: { node: ifNode({}), inputSources: sources, nodeLabels: { code: 'Code' } } })
+      expect(wrapper.find('[data-testid="conditions"]').text()).toContain('true output')
+      await wrapper.find('[data-testid="pick-left"]').trigger('click')
+      await wrapper.find('[data-testid="field-picker"]').findAll('button').find((b) => b.text().startsWith('count'))!.trigger('click')
+      await wrapper.find('select[aria-label="Operator"]').setValue('gt')
+      await wrapper.find('input[aria-label="Value to compare to"]').setValue('5')
+      await clickApply(wrapper)
+      expect(applied(wrapper)).toEqual({ conditions: { combinator: 'and', rules: [{ left: '{{ $json.count }}', operator: 'gt', right: '5' }] } })
+    })
+
+    it('combines several rules with OR, and hides the value for "is empty"', async () => {
+      const wrapper = mount(NodeConfigPanel, { props: { node: ifNode({ conditions: { combinator: 'and', rules: [{ left: '{{ $json.a }}', operator: 'equals', right: 'x' }] } }) } })
+      await wrapper.find('[data-testid="add-condition"]').trigger('click')
+      const rows = wrapper.findAll('[data-testid="condition-row"]')
+      await rows[1].find('input[aria-label="Value to check"]').setValue('{{ $json.b }}')
+      await rows[1].find('select[aria-label="Operator"]').setValue('isEmpty')
+      expect(wrapper.findAll('[data-testid="condition-row"]')[1].find('input[aria-label="Value to compare to"]').exists()).toBe(false)
+      await wrapper.find('select[aria-label="Combine conditions"]').setValue('or')
+      await clickApply(wrapper)
+      expect(applied(wrapper).conditions).toEqual({
+        combinator: 'or',
+        rules: [
+          { left: '{{ $json.a }}', operator: 'equals', right: 'x' },
+          { left: '{{ $json.b }}', operator: 'isEmpty' },
+        ],
+      })
+    })
+
+    it('replaces an older single condition with rules', async () => {
+      const wrapper = mount(NodeConfigPanel, { props: { node: ifNode({ condition: '{{ $json.ok }}' }, 'core.filter') } })
+      expect((wrapper.find('input[aria-label="Value to check"]').element as HTMLInputElement).value).toBe('{{ $json.ok }}')
+      await clickApply(wrapper)
+      expect(applied(wrapper)).toEqual({ conditions: { combinator: 'and', rules: [{ left: '{{ $json.ok }}', operator: 'isTrue' }] } })
+    })
+
+    it('refuses a rule with nothing to check', async () => {
+      const wrapper = mount(NodeConfigPanel, { props: { node: ifNode({}) } })
+      await clickApply(wrapper)
+      expect(wrapper.text()).toContain('Condition 1: choose the value to check.')
+      expect(wrapper.emitted('update')).toBeFalsy()
+    })
+  })
+
   describe('edits are never lost', () => {
     afterEach(() => {
       vi.useRealTimers()
@@ -416,6 +529,33 @@ describe('NodeConfigPanel', () => {
       await lang(wrapper).setValue('python')
       expect((code(wrapper).element as HTMLTextAreaElement).value).toBe('return items')
       expect(wrapper.text()).toContain('written in JavaScript')
+    })
+
+    const mode = (w: ReturnType<typeof mount>) => w.find('select[aria-label="Mode"]')
+
+    it('runs once for all items unless told otherwise, and does not store the default', async () => {
+      const wrapper = mount(NodeConfigPanel, { props: { node: codeNode({ script: 'return items' }) } })
+      expect((mode(wrapper).element as HTMLSelectElement).value).toBe('runOnceForAllItems')
+      await clickApply(wrapper)
+      expect(applied(wrapper)).not.toHaveProperty('mode')
+    })
+
+    it('switches to once for each item, with that mode\'s example', async () => {
+      const wrapper = mount(NodeConfigPanel, { props: { node: codeNode({}) } })
+      await mode(wrapper).setValue('runOnceForEachItem')
+      expect((code(wrapper).element as HTMLTextAreaElement).value).toContain('return { ...$json, processed: true }')
+      expect(wrapper.text()).toContain('Runs once for each input item')
+      await clickApply(wrapper)
+      expect(applied(wrapper)).toMatchObject({ mode: 'runOnceForEachItem', language: 'javaScript' })
+    })
+
+    it('keeps code the user wrote when the mode changes', async () => {
+      const wrapper = mount(NodeConfigPanel, { props: { node: codeNode({ mode: 'runOnceForEachItem', script: 'return $json' }) } })
+      expect((mode(wrapper).element as HTMLSelectElement).value).toBe('runOnceForEachItem')
+      await mode(wrapper).setValue('runOnceForAllItems')
+      expect((code(wrapper).element as HTMLTextAreaElement).value).toBe('return $json')
+      await clickApply(wrapper)
+      expect(applied(wrapper)).not.toHaveProperty('mode')
     })
 
     it('loads and saves Python code', async () => {

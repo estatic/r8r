@@ -11,6 +11,7 @@ export const TOOL_NODE_TYPES: { value: string; label: string }[] = [
   { value: 'core.httpRequest', label: 'HTTP Request' },
   { value: 'telegram.sendMessage', label: 'Telegram: Send Message' },
   { value: 'core.code', label: 'Code' },
+  { value: 'firecrawl.search', label: 'Web Search (Firecrawl)' },
 ]
 
 /** Starter parameters per node type, showing where {{ $args.x }} goes. */
@@ -20,6 +21,7 @@ export const PARAMETER_TEMPLATES: Record<string, Record<string, unknown>> = {
   'core.httpRequest': { method: 'GET', url: 'https://api.example.com/search?q={{ encodeURIComponent($args.query) }}' },
   'telegram.sendMessage': { chat_id: '', text: '{{ $args.message }}' },
   'core.code': { script: 'return [{ json: { result: $args } }]' },
+  'firecrawl.search': { operation: 'search', query: '{{ $args.query }}', limit: 5 },
 }
 
 const HTTP_AUTH_TYPE: Record<string, string> = { bearerToken: 'bearer', apiKeyHeader: 'apiKey', basicAuth: 'basic' }

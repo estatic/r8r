@@ -8,11 +8,14 @@ impl Node for IfNode {
     fn type_name(&self) -> &'static str {
         "core.if"
     }
+    fn runs_per_item(&self) -> bool {
+        true
+    }
     fn display_name(&self) -> &'static str {
         "If"
     }
     fn description(&self) -> &'static str {
-        "Routes items to a \"true\" or \"false\" output based on a boolean condition."
+        "Routes each item to the \"true\" or \"false\" output by its conditions."
     }
     fn category(&self) -> crate::node::NodeCategory {
         crate::node::NodeCategory::FlowControl
@@ -25,15 +28,7 @@ impl Node for IfNode {
     }
 
     async fn execute(&self, ctx: &NodeExecutionContext) -> Result<NodeOutput, NodeError> {
-        let condition = match ctx.parameters.get("condition") {
-            None => false,
-            Some(serde_json::Value::Bool(b)) => *b,
-            Some(other) => {
-                return Err(NodeError::ExecutionFailed(format!(
-                    "core.if \"condition\" must be a boolean, got: {other}"
-                )));
-            }
-        };
+        let condition = super::conditions::evaluate("core.if", &ctx.parameters)?;
 
         if condition {
             Ok(vec![ctx.input_items.clone(), vec![]])

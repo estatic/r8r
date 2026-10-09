@@ -141,6 +141,7 @@ function onInsertNode(nodeType: string) {
 // the workflow, so nothing typed is lost. False: an edit is invalid (the
 // panel shows why), so the caller stops.
 const panel = ref<{ flush: () => boolean } | null>(null)
+const canvas = ref<{ freeSpot: () => [number, number] } | null>(null)
 function flushPanel(): boolean {
   const ok = panel.value?.flush() ?? true
   if (!ok) actionError.value = 'Fix the node settings shown in the panel first.'
@@ -177,13 +178,11 @@ function onConnect(connection: Connection) {
 
 function onAddNode(nodeType: string) {
   if (!workflow.value) return
-  const count = workflow.value.nodes.length
   workflow.value.nodes.push({
     id: newNodeId(),
     node_type: nodeType,
-    // Lay new nodes out in a row, as links run left to right, with enough
-    // clearance that a node never covers the handles of the one before it.
-    position: [100 + count * 240, 100],
+    // In the middle of what is on screen, clear of the nodes already there.
+    position: canvas.value?.freeSpot() ?? [100 + workflow.value.nodes.length * 240, 100],
     parameters: {},
     disabled: false,
   })
@@ -354,6 +353,7 @@ async function showHistory() {
       <p v-if="loadError" class="p-6 text-sm text-red-600">{{ loadError }}</p>
       <WorkflowCanvas
         v-if="workflow"
+        ref="canvas"
         :nodes="workflow.nodes"
         :connections="workflow.connections"
         :execution="execution"

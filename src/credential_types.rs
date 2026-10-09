@@ -61,6 +61,16 @@ pub fn known_credential_types() -> &'static [CredentialTypeSchema] {
             ],
         },
         CredentialTypeSchema {
+            credential_type: "firecrawlApi",
+            display_name: "Firecrawl API",
+            generic: false,
+            fields: &[
+                CredentialField { name: "api_key", label: "API Key", field_type: FieldType::Password, required: true },
+                // A self-hosted Firecrawl; the key is sent only here.
+                CredentialField { name: "base_url", label: "Base URL (optional)", field_type: FieldType::Text, required: false },
+            ],
+        },
+        CredentialTypeSchema {
             credential_type: "bearerToken",
             display_name: "Bearer Token",
             generic: true,

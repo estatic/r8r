@@ -367,6 +367,9 @@ impl Node for AgentNode {
     fn type_name(&self) -> &'static str {
         "ai.agent"
     }
+    fn runs_per_item(&self) -> bool {
+        true
+    }
     fn display_name(&self) -> &'static str {
         "AI Agent"
     }

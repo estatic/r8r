@@ -89,7 +89,26 @@ function problemOf(n: NodeInstance): string | null {
   return null
 }
 
-const { onConnect, onNodeDragStop, onNodeClick, onEdgeMouseEnter, onEdgeMouseLeave, updateNodeInternals } = useVueFlow()
+const { onConnect, onNodeDragStop, onNodeClick, onEdgeMouseEnter, onEdgeMouseLeave, updateNodeInternals, viewport, dimensions } = useVueFlow()
+
+/**
+ * Where a new node goes: the middle of what is on screen, stepped down and
+ * right past any node already there, so it is always in view.
+ */
+function freeSpot(): [number, number] {
+  const { x, y, zoom } = viewport.value
+  const { width, height } = dimensions.value
+  // Before the canvas has a size (tests, first paint), fall back to the origin area.
+  let px = width > 0 ? Math.round((width / 2 - x) / zoom - NODE_SIZE.w / 2) : 100
+  let py = height > 0 ? Math.round((height / 2 - y) / zoom - NODE_SIZE.h / 2) : 100
+  const taken = (ax: number, ay: number) => props.nodes.some((n) => Math.abs(n.position[0] - ax) < NODE_SIZE.w && Math.abs(n.position[1] - ay) < NODE_SIZE.h + 20)
+  for (let i = 0; i < 30 && taken(px, py); i++) {
+    px += 40
+    py += 40
+  }
+  return [px, py]
+}
+defineExpose({ freeSpot })
 
 // The hovered link shows its "+" / delete buttons; leaving the line for the
 // buttons (or back) must not hide them, hence the short grace period.
@@ -102,6 +121,9 @@ function hoverEdge(id: string, on: boolean) {
 }
 onEdgeMouseEnter(({ edge }) => hoverEdge(edge.id, true))
 onEdgeMouseLeave(({ edge }) => hoverEdge(edge.id, false))
+
+/** About a node's footprint on the canvas, for placing new ones. */
+const NODE_SIZE = { w: 180, h: 60 }
 
 const nodeTypesStore = useNodeTypesStore()
 if (!nodeTypesStore.loaded) {

@@ -47,6 +47,9 @@ impl Node for TelegramSendMessageNode {
     fn type_name(&self) -> &'static str {
         "telegram.sendMessage"
     }
+    fn runs_per_item(&self) -> bool {
+        true
+    }
     fn display_name(&self) -> &'static str {
         "Send Telegram Message"
     }

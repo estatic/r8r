@@ -109,6 +109,13 @@ pub trait Node: Send + Sync {
     fn keeps_input_fields(&self) -> bool {
         false
     }
+    /// Whether the node runs once per input item, with its parameters
+    /// resolved against that item's `$json` (n8n's default), rather than
+    /// once for all items. True for nodes whose work is per item (AI Agent,
+    /// HTTP Request, Telegram Send, Set, If, Switch, Filter).
+    fn runs_per_item(&self) -> bool {
+        false
+    }
 
     /// Human-readable name shown in the canvas and add-node menu, e.g.
     /// "Telegram Trigger" for `telegram.trigger`. No default -- every node

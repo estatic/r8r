@@ -332,100 +332,128 @@ impl<'a> Run<'a> {
             return self.run_loop(node_instance, input_items).await;
         }
 
-        // Resolve this node's parameters via the expression engine before
-        // execute(), with $node built from every already-executed node's
-        // PRIMARY (port 0) output's first item only — unless the node opts
-        // out via `resolves_parameters() == false` (e.g. core.code, whose
-        // "parameter" is a script to run verbatim, not a value to
-        // interpolate).
-        let parameters = if node.resolves_parameters() {
-            let items_json: Vec<serde_json::Value> = input_items.iter().map(|i| i.json.clone()).collect();
-            let node_json: HashMap<String, serde_json::Value> = self.produced
-                .iter()
-                .filter_map(|(id, ports)| {
-                    let first_item_json = ports.first().and_then(|p| p.first()).map(|item| item.json.clone());
-                    first_item_json.map(|j| (id.clone(), j))
-                })
-                .collect();
-            let eval_ctx = crate::expr::EvalContext {
-                json: input_items.first().map(|i| i.json.clone()).unwrap_or_else(|| serde_json::json!({})),
-                items: &items_json,
-                node_json: &node_json,
-                workflow_name: &self.workflow.name,
-                args: None,
-            };
-            match crate::expr::resolve_parameters(&node_instance.parameters, &eval_ctx) {
-                Ok(parameters) => parameters,
-                Err(e) => {
-                    // Report it on the node, so the editor marks which one failed.
-                    let message = format!("parameter resolution failed: {e}");
-                    self.observer.on_node_started(&node_instance.id).await;
-                    self.observer.on_node_counts(&node_instance.id, &BTreeMap::new()).await;
-                    self.observer.on_node_errored(&node_instance.id, &message).await;
-                    return Err(anyhow::anyhow!("node {} {message}", node_instance.id));
-                }
-            }
+        // A per-item node runs once for each input item, with that item as
+        // `$json` and its only input (n8n's default); any other node runs
+        // once for all of them.
+        let batches: Vec<Vec<Item>> = if node.runs_per_item() && input_items.len() > 1 {
+            input_items.iter().map(|item| vec![item.clone()]).collect()
         } else {
-            node_instance.parameters.clone()
+            vec![input_items]
         };
+        let items_json: Vec<serde_json::Value> = batches.iter().flatten().map(|i| i.json.clone()).collect();
+        let node_json: HashMap<String, serde_json::Value> = self.produced
+            .iter()
+            .filter_map(|(id, ports)| {
+                let first_item_json = ports.first().and_then(|p| p.first()).map(|item| item.json.clone());
+                first_item_json.map(|j| (id.clone(), j))
+            })
+            .collect();
+        let upstream: HashMap<String, Vec<serde_json::Value>> = self.produced
+            .iter()
+            .filter_map(|(id, ports)| ports.first().map(|items| (id.clone(), items.iter().map(|i| i.json.clone()).collect())))
+            .collect();
+        let has_error_route = self.workflow
+            .connections
+            .iter()
+            .any(|c| c.from_node == node_instance.id && c.error);
 
-        let ctx = NodeExecutionContext {
-            parameters,
-            input_items,
-            credentials: self.resources.credentials.clone(),
-            credential_types: self.resources.credential_types.clone(),
-            tools: self.resources.tools.clone(),
-            tool_args: None,
-            tool_executor: Some(self.tool_executor.clone()),
-            memory: self.resources.memory.0.clone(),
-            upstream: self.produced
-                .iter()
-                .filter_map(|(id, ports)| ports.first().map(|items| (id.clone(), items.iter().map(|i| i.json.clone()).collect())))
-                .collect(),
-            workflow_id: Some(self.workflow.id),
-            node_id: node_instance.id.clone(),
-        };
         self.observer.on_node_started(&node_instance.id).await;
-        match run_node_with_policy(node, &ctx, &node_instance.settings).await {
-            Ok(output) => {
-                let output = if node.keeps_input_fields() { with_input_fields(output, &ctx.input_items) } else { output };
-                let primary = output.first().cloned().unwrap_or_default();
-                let lens: Vec<usize> = output.iter().map(Vec::len).collect();
-                self.observer.on_node_counts(&node_instance.id, &port_counts(&lens)).await;
-                self.observer.on_node_finished(&node_instance.id, &primary).await;
-                self.produced.insert(node_instance.id.clone(), output);
-            }
-            Err(e) => {
-                // Precedence (spec §4): an error connection wins, then
-                // continue_on_fail (error item on port 0 only), else the
-                // whole run fails.
-                let has_error_route = self.workflow
-                    .connections
-                    .iter()
-                    .any(|c| c.from_node == node_instance.id && c.error);
-                let counts = if has_error_route {
-                    BTreeMap::from([("error".to_string(), 1)])
-                } else if node_instance.settings.continue_on_fail {
-                    port_counts(&[1])
-                } else {
-                    BTreeMap::new()
+        let mut output: crate::node::NodeOutput = Vec::new();
+        let mut error_items: Vec<Item> = Vec::new();
+        let mut first_error: Option<String> = None;
+        for batch in batches {
+            // Resolve this node's parameters via the expression engine before
+            // execute(), with $node built from every already-executed node's
+            // PRIMARY (port 0) output's first item only — unless the node opts
+            // out via `resolves_parameters() == false` (e.g. core.code, whose
+            // "parameter" is a script to run verbatim, not a value to
+            // interpolate).
+            let parameters = if node.resolves_parameters() {
+                let eval_ctx = crate::expr::EvalContext {
+                    json: batch.first().map(|i| i.json.clone()).unwrap_or_else(|| serde_json::json!({})),
+                    items: &items_json,
+                    node_json: &node_json,
+                    workflow_name: &self.workflow.name,
+                    args: None,
                 };
-                self.observer.on_node_counts(&node_instance.id, &counts).await;
-                self.observer.on_node_errored(&node_instance.id, &e.to_string()).await;
-                let error_item = Item {
-                    json: serde_json::json!({ "error": e.to_string() }),
-                    binary: serde_json::json!({}),
-                };
-                if has_error_route {
-                    self.error_produced.insert(node_instance.id.clone(), vec![error_item]);
-                    self.produced.insert(node_instance.id.clone(), vec![]);
-                } else if node_instance.settings.continue_on_fail {
-                    self.produced.insert(node_instance.id.clone(), vec![vec![error_item]]);
-                } else {
-                    return Err(anyhow::anyhow!("node {} failed: {e}", node_instance.id));
+                match crate::expr::resolve_parameters(&node_instance.parameters, &eval_ctx) {
+                    Ok(parameters) => parameters,
+                    Err(e) => {
+                        // Report it on the node, so the editor marks which one failed.
+                        let message = format!("parameter resolution failed: {e}");
+                        self.observer.on_node_counts(&node_instance.id, &BTreeMap::new()).await;
+                        self.observer.on_node_errored(&node_instance.id, &message).await;
+                        return Err(anyhow::anyhow!("node {} {message}", node_instance.id));
+                    }
+                }
+            } else {
+                node_instance.parameters.clone()
+            };
+
+            let ctx = NodeExecutionContext {
+                parameters,
+                input_items: batch,
+                credentials: self.resources.credentials.clone(),
+                credential_types: self.resources.credential_types.clone(),
+                tools: self.resources.tools.clone(),
+                tool_args: None,
+                tool_executor: Some(self.tool_executor.clone()),
+                memory: self.resources.memory.0.clone(),
+                upstream: upstream.clone(),
+                workflow_id: Some(self.workflow.id),
+                node_id: node_instance.id.clone(),
+            };
+            match run_node_with_policy(node, &ctx, &node_instance.settings).await {
+                Ok(produced) => {
+                    let produced = if node.keeps_input_fields() { with_input_fields(produced, &ctx.input_items) } else { produced };
+                    if output.len() < produced.len() {
+                        output.resize_with(produced.len(), Vec::new);
+                    }
+                    for (port, items) in produced.into_iter().enumerate() {
+                        output[port].extend(items);
+                    }
+                }
+                Err(e) => {
+                    // Precedence (spec §4): an error connection wins, then
+                    // continue_on_fail (error item on port 0 only), else the
+                    // whole run fails.
+                    if !has_error_route && !node_instance.settings.continue_on_fail {
+                        self.observer.on_node_counts(&node_instance.id, &BTreeMap::new()).await;
+                        self.observer.on_node_errored(&node_instance.id, &e.to_string()).await;
+                        return Err(anyhow::anyhow!("node {} failed: {e}", node_instance.id));
+                    }
+                    first_error.get_or_insert_with(|| e.to_string());
+                    let error_item = Item {
+                        json: serde_json::json!({ "error": e.to_string() }),
+                        binary: serde_json::json!({}),
+                    };
+                    if has_error_route {
+                        error_items.push(error_item);
+                    } else {
+                        if output.is_empty() {
+                            output.push(Vec::new());
+                        }
+                        output[0].push(error_item);
+                    }
                 }
             }
         }
+
+        let lens: Vec<usize> = output.iter().map(Vec::len).collect();
+        let mut counts = port_counts(&lens);
+        if !error_items.is_empty() {
+            counts.insert("error".to_string(), error_items.len());
+            self.error_produced.insert(node_instance.id.clone(), error_items);
+        }
+        self.observer.on_node_counts(&node_instance.id, &counts).await;
+        match first_error {
+            Some(message) => self.observer.on_node_errored(&node_instance.id, &message).await,
+            None => {
+                let primary = output.first().cloned().unwrap_or_default();
+                self.observer.on_node_finished(&node_instance.id, &primary).await;
+            }
+        }
+        self.produced.insert(node_instance.id.clone(), output);
         Ok(())
     }
 }
@@ -821,6 +849,88 @@ mod tests {
         let seed = vec![Item { json: serde_json::json!({"message": {"chat": {"id": 42}}}), binary: serde_json::json!({}) }];
         let outputs = execute_workflow_seeded(&reply_workflow("test.reply"), &std::sync::Arc::new(r), Some(seed), &Default::default(), &NoopObserver).await.unwrap();
         assert_eq!(outputs["set1"][0].json, serde_json::json!({"reply": "hi", "chat": "replaced"}));
+    }
+
+    /// Echoes its resolved `text` parameter and how many items it was given;
+    /// fails when `text` is "fail".
+    struct PerItemEcho;
+
+    #[async_trait::async_trait]
+    impl crate::node::Node for PerItemEcho {
+        fn type_name(&self) -> &'static str {
+            "test.perItem"
+        }
+        fn runs_per_item(&self) -> bool {
+            true
+        }
+        fn display_name(&self) -> &'static str {
+            "Per item"
+        }
+        fn description(&self) -> &'static str {
+            "Test-only node."
+        }
+        fn category(&self) -> crate::node::NodeCategory {
+            crate::node::NodeCategory::Action
+        }
+        async fn execute(&self, ctx: &NodeExecutionContext) -> Result<crate::node::NodeOutput, crate::node::NodeError> {
+            let text = ctx.parameters["text"].clone();
+            if text == "fail" {
+                return Err(crate::node::NodeError::ExecutionFailed("asked to fail".into()));
+            }
+            Ok(vec![vec![Item { json: serde_json::json!({"said": text, "inputs": ctx.input_items.len()}), binary: serde_json::json!({}) }]])
+        }
+    }
+
+    fn per_item_run(texts: &[&str], continue_on_fail: bool) -> (Workflow, Vec<Item>) {
+        let mut wf = reply_workflow("test.perItem");
+        wf.nodes[1].parameters = serde_json::json!({"text": "{{ $json.t }}"});
+        wf.nodes[1].settings.continue_on_fail = continue_on_fail;
+        let seed = texts.iter().map(|t| Item { json: serde_json::json!({"t": t}), binary: serde_json::json!({}) }).collect();
+        (wf, seed)
+    }
+
+    fn per_item_registry() -> std::sync::Arc<NodeRegistry> {
+        let mut r = NodeRegistry::new();
+        crate::nodes::register_all(&mut r);
+        r.register(Box::new(PerItemEcho));
+        std::sync::Arc::new(r)
+    }
+
+    #[tokio::test]
+    async fn a_per_item_node_runs_once_for_each_item_with_that_item_as_json() {
+        let (wf, seed) = per_item_run(&["a", "b", "c"], false);
+        let outputs = execute_workflow_seeded(&wf, &per_item_registry(), Some(seed), &Default::default(), &NoopObserver).await.unwrap();
+        let said: Vec<_> = outputs["set1"].iter().map(|i| (i.json["said"].clone(), i.json["inputs"].clone())).collect();
+        assert_eq!(said, vec![("a".into(), 1.into()), ("b".into(), 1.into()), ("c".into(), 1.into())]);
+    }
+
+    #[tokio::test]
+    async fn if_routes_each_item_by_its_own_conditions() {
+        let mut wf = reply_workflow("core.if");
+        wf.nodes[1].parameters =
+            serde_json::json!({"conditions": {"combinator": "and", "rules": [{"left": "{{ $json.n }}", "operator": "gt", "right": "5"}]}});
+        let seed = [1, 6, 9].iter().map(|n| Item { json: serde_json::json!({"n": n}), binary: serde_json::json!({}) }).collect();
+        let outputs = execute_workflow_seeded(&wf, &per_item_registry(), Some(seed), &Default::default(), &NoopObserver).await.unwrap();
+        // The "true" output (the one reported) has just the items over 5.
+        let kept: Vec<_> = outputs["set1"].iter().map(|i| i.json["n"].clone()).collect();
+        assert_eq!(kept, vec![serde_json::json!(6), serde_json::json!(9)]);
+    }
+
+    #[tokio::test]
+    async fn with_continue_on_fail_a_failing_item_becomes_an_error_item_and_the_others_still_run() {
+        let (wf, seed) = per_item_run(&["a", "fail", "c"], true);
+        let outputs = execute_workflow_seeded(&wf, &per_item_registry(), Some(seed), &Default::default(), &NoopObserver).await.unwrap();
+        let out: Vec<_> = outputs["set1"].iter().map(|i| i.json.clone()).collect();
+        assert_eq!(out[0]["said"], "a");
+        assert!(out[1]["error"].as_str().unwrap().contains("asked to fail"));
+        assert_eq!(out[2]["said"], "c");
+    }
+
+    #[tokio::test]
+    async fn without_continue_on_fail_a_failing_item_fails_the_run() {
+        let (wf, seed) = per_item_run(&["a", "fail", "c"], false);
+        let err = execute_workflow_seeded(&wf, &per_item_registry(), Some(seed), &Default::default(), &NoopObserver).await.unwrap_err();
+        assert!(err.to_string().contains("asked to fail"), "{err}");
     }
 
     // ---- Loop Over Items ---------------------------------------------------

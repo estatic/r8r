@@ -2257,7 +2257,9 @@ async fn credential_types_lists_all_known_schemas() {
     let bytes = response.into_body().collect().await.unwrap().to_bytes();
     let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
     let types = json.as_array().unwrap();
-    assert_eq!(types.len(), 6);
+    assert_eq!(types.len(), 7);
+    let firecrawl = types.iter().find(|t| t["credential_type"] == "firecrawlApi").expect("firecrawlApi should be listed");
+    assert_eq!(firecrawl["fields"][0]["name"], "api_key");
     let telegram = types.iter().find(|t| t["credential_type"] == "telegramApi").expect("telegramApi should be listed");
     assert_eq!(telegram["generic"], false);
     assert_eq!(telegram["fields"][0]["name"], "bot_token");

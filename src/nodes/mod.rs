@@ -1,6 +1,8 @@
 pub mod agent;
 pub mod code;
+pub mod conditions;
 pub mod filter;
+pub mod firecrawl;
 pub mod http_request;
 pub mod if_node;
 pub mod loop_node;
@@ -26,6 +28,7 @@ pub fn register_all(registry: &mut NodeRegistry) {
     registry.register(Box::new(switch::SwitchNode));
     registry.register(Box::new(merge::MergeNode));
     registry.register(Box::new(filter::FilterNode));
+    registry.register(Box::new(firecrawl::FirecrawlNode));
     registry.register(Box::new(http_request::HttpRequestNode));
     registry.register(Box::new(wait::WaitNode));
     registry.register(Box::new(noop::NoOpNode));
