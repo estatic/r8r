@@ -67,7 +67,19 @@ pub fn known_credential_types() -> &'static [CredentialTypeSchema] {
             fields: &[
                 CredentialField { name: "api_key", label: "API Key", field_type: FieldType::Password, required: true },
                 // A self-hosted Firecrawl; the key is sent only here.
-                CredentialField { name: "base_url", label: "Base URL (optional)", field_type: FieldType::Text, required: false },
+                CredentialField {
+                    name: "base_url",
+                    label: "Base URL (optional)",
+                    field_type: FieldType::Text,
+                    required: false,
+                },
+                // Every request with this key, from any node or agent tool, keeps to it.
+                CredentialField {
+                    name: "max_requests_per_minute",
+                    label: "Max requests per minute (optional)",
+                    field_type: FieldType::Text,
+                    required: false,
+                },
             ],
         },
         CredentialTypeSchema {

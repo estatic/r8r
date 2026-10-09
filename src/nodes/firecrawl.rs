@@ -71,8 +71,8 @@ fn fail(msg: impl std::fmt::Display) -> NodeError {
     NodeError::ExecutionFailed(format!("firecrawl: {msg}"))
 }
 
-/// The credential's key and the address it may be sent to.
-fn credential(ctx: &NodeExecutionContext) -> Result<(String, String), NodeError> {
+/// The credential's key, the address it may be sent to, and its rate limit.
+fn credential(ctx: &NodeExecutionContext) -> Result<(String, String, Option<u64>), NodeError> {
     let id = ctx
         .parameters
         .get("auth")
@@ -97,7 +97,19 @@ fn credential(ctx: &NodeExecutionContext) -> Result<(String, String), NodeError>
         .unwrap_or(DEFAULT_API_BASE_URL)
         .trim_end_matches('/')
         .to_string();
-    Ok((key.to_string(), base))
+    // Credential fields are text: "10", or empty for no limit.
+    let limit = match data.get("max_requests_per_minute") {
+        None | Some(Value::Null) => None,
+        Some(Value::String(t)) if t.trim().is_empty() => None,
+        Some(v) => Some(
+            v.as_u64()
+                .or_else(|| v.as_str().and_then(|t| t.trim().parse().ok()))
+                .ok_or_else(|| {
+                    fail("the credential's \"Max requests per minute\" must be a whole number")
+                })?,
+        ),
+    };
+    Ok((key.to_string(), base, limit))
 }
 
 fn text_param<'a>(p: &'a Value, key: &str) -> Option<&'a str> {
@@ -180,12 +192,13 @@ fn scrape_body(p: &Value) -> Result<Value, NodeError> {
     Ok(json!({"url": url, "formats": formats, "onlyMainContent": only_main}))
 }
 
-/// The limiter's key for an API key at an address; a hash, so the key
-/// itself isn't held in yet another place.
-fn limiter_key(base: &str, api_key: &str) -> String {
+/// The limiter's key for an API key: the key alone (Firecrawl limits per
+/// key, however its address is written); a hash, so the key itself isn't
+/// held in yet another place.
+fn limiter_key(api_key: &str) -> String {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    (base, api_key).hash(&mut h);
+    api_key.hash(&mut h);
     format!("firecrawl:{:x}", h.finish())
 }
 
@@ -209,13 +222,23 @@ async fn execute_with_client(client: &reqwest::Client, ctx: &NodeExecutionContex
         "scrape" => ("/v2/scrape", scrape_body(p)?),
         other => return Err(fail(format!("unknown operation \"{other}\" (expected \"search\" or \"scrape\")"))),
     };
-    let (key, base) = credential(ctx)?;
-    // Firecrawl limits requests per API key: with a limit set, every request
-    // with this key (any run, any agent tool call) waits for its turn.
-    if let Some(per_minute) = number_param(p, "max_requests_per_minute")? {
-        let interval = super::rate_limit::interval_for(per_minute).ok_or_else(|| fail("\"max_requests_per_minute\" must be between 1 and 6000"))?;
-        super::rate_limit::wait_turn(&limiter_key(&base, &key), interval).await.map_err(fail)?;
+    let (key, base, key_limit) = credential(ctx)?;
+    // Firecrawl limits requests per API key. The credential's limit covers
+    // every request with the key (any node, run or agent tool call); a
+    // node's own can only make it stricter. Every request with the key takes
+    // a turn, so one without a limit can't slip between limited ones.
+    let node_limit = number_param(p, "max_requests_per_minute")?;
+    let interval = |per_minute: u64| {
+        super::rate_limit::interval_for(per_minute)
+            .ok_or_else(|| fail("\"max_requests_per_minute\" must be between 1 and 6000"))
+    };
+    let mut spacing = Duration::ZERO;
+    for limit in [key_limit, node_limit].into_iter().flatten() {
+        spacing = spacing.max(interval(limit)?);
     }
+    super::rate_limit::wait_turn(&limiter_key(&key), spacing)
+        .await
+        .map_err(fail)?;
     // Errors never include the reqwest error or the request: the key is in it.
     let response = client
         .post(format!("{base}{path}"))
@@ -410,6 +433,37 @@ mod tests {
         assert!(started.elapsed() >= Duration::from_millis(200), "{:?}", started.elapsed());
         let err = run(&server, json!({"query": "q", "max_requests_per_minute": 0})).await.unwrap_err();
         assert!(err.to_string().contains("between 1 and 6000"), "{err}");
+    }
+
+    #[tokio::test]
+    async fn the_credentials_limit_covers_nodes_without_one() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v2/search"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"success": true, "data": {"web": []}})),
+            )
+            .mount(&server)
+            .await;
+        let id = uuid::Uuid::new_v4();
+        // A key of its own, so other tests' turns don't mix in.
+        let data = json!({"api_key": format!("fc-{id}"), "base_url": server.uri(), "max_requests_per_minute": "600"});
+        let ctx = NodeExecutionContext {
+            parameters: json!({"query": "q", "auth": {"credential_id": id.to_string()}}),
+            credentials: std::collections::HashMap::from([(id, data)]),
+            ..Default::default()
+        };
+        let client = reqwest::Client::new();
+        let started = std::time::Instant::now();
+        for _ in 0..3 {
+            execute_with_client(&client, &ctx).await.unwrap();
+        }
+        assert!(
+            started.elapsed() >= Duration::from_millis(200),
+            "{:?}",
+            started.elapsed()
+        );
     }
 
     #[tokio::test]

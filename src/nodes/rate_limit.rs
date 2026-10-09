@@ -7,8 +7,10 @@ use std::sync::Mutex;
 use std::time::Duration;
 use tokio::time::Instant;
 
-fn next_slots() -> &'static Mutex<HashMap<String, Instant>> {
-    static SLOTS: std::sync::OnceLock<Mutex<HashMap<String, Instant>>> = std::sync::OnceLock::new();
+/// Per key: when the next turn is free, and the spacing in effect.
+fn next_slots() -> &'static Mutex<HashMap<String, (Instant, Duration)>> {
+    static SLOTS: std::sync::OnceLock<Mutex<HashMap<String, (Instant, Duration)>>> =
+        std::sync::OnceLock::new();
     SLOTS.get_or_init(|| Mutex::new(HashMap::new()))
 }
 
@@ -20,9 +22,11 @@ pub const MAX_QUEUE: Duration = Duration::from_secs(600);
 /// Keys kept before idle ones are dropped.
 const MAX_KEYS: usize = 1024;
 
-/// Waits until this caller's turn: at least `interval` after the turn
-/// before it for the same `key`. Turns are handed out in arrival order.
-/// Errs at once when the turn would be more than `MAX_QUEUE` away.
+/// Waits until this caller's turn for `key`. Turns are handed out in
+/// arrival order; while the key's queue is busy they are spaced by the
+/// largest interval any caller asked for, so a caller with a looser limit
+/// (or none) can't squeeze turns in. Errs at once when the turn would be
+/// more than `MAX_QUEUE` away.
 pub async fn wait_turn(key: &str, interval: Duration) -> Result<(), String> {
     let slot = {
         let mut slots = next_slots().lock().unwrap_or_else(|e| e.into_inner());
@@ -30,16 +34,19 @@ pub async fn wait_turn(key: &str, interval: Duration) -> Result<(), String> {
         // Keys whose last turn has passed hold nothing; drop them once
         // there are many (one entry per API key in use is fine to keep).
         if slots.len() > MAX_KEYS {
-            slots.retain(|_, next| *next > now);
+            slots.retain(|_, (next, _)| *next > now);
         }
-        let slot = slots.get(key).copied().unwrap_or(now);
+        let (slot, spacing) = match slots.get(key) {
+            Some((next, kept)) if *next > now => (*next, interval.max(*kept)),
+            _ => (now, interval),
+        };
         if slot - now > MAX_QUEUE {
             return Err(format!(
                 "the rate limit's queue for this API key is full (the next free turn is {} s away); lower the number of items or raise the limit",
                 (slot - now).as_secs()
             ));
         }
-        slots.insert(key.to_string(), slot + interval);
+        slots.insert(key.to_string(), (slot + spacing, spacing));
         slot
     };
     tokio::time::sleep_until(slot).await;
@@ -101,6 +108,18 @@ mod tests {
         for w in waits {
             w.abort();
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn a_caller_with_a_looser_limit_cant_tighten_the_spacing() {
+        let start = Instant::now();
+        let key = "test-mixed";
+        let slow = Duration::from_secs(6);
+        wait_turn(key, slow).await.unwrap(); // t=0, next at 6 s
+        wait_turn(key, Duration::ZERO).await.unwrap(); // no limit of its own: still waits for 6 s
+        assert_eq!(Instant::now() - start, Duration::from_secs(6));
+        wait_turn(key, Duration::from_millis(10)).await.unwrap(); // spacing stays 6 s while busy
+        assert_eq!(Instant::now() - start, Duration::from_secs(12));
     }
 
     #[test]
