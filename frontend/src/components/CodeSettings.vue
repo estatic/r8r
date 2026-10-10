@@ -23,7 +23,7 @@ const filteredSources = computed(() => {
     .filter((s) => s.fields.length > 0)
 })
 function pick(source: UpstreamSource, segments: (string | number)[]) {
-  editor.value?.insert(codeReference(model.value.language, source.direct, source.nodeId, segments))
+  editor.value?.insert(codeReference(model.value.language, source.direct, source.name, segments))
   picking.value = false
 }
 
@@ -52,11 +52,11 @@ const hint = computed(() => {
   if (eachItem.value) {
     return py
       ? '_json: this item\'s data; _node["id"]["json"]: an earlier node\'s output. Runs once for each input item; return one dict, the item to pass on.'
-      : '$json: this item\'s data; $node["id"].json: an earlier node\'s output. Runs once for each input item; return one object, the item to pass on.'
+      : '$json: this item\'s data; $("Node name").json: an earlier node\'s output (.first(), .last(), .all() for its items). Runs once for each input item; return one object, the item to pass on.'
   }
   return py
     ? 'items: the input items (item.json). _json: the first item reaching this node; _node["id"]["json"]: an earlier node\'s output. Return the items to pass on.'
-    : 'items: the input items (item.json). $json: the first item reaching this node; $node["id"].json: an earlier node\'s output. Return the items to pass on.'
+    : 'items: the input items (item.json). $json: the first item reaching this node; $("Node name").json: an earlier node\'s output (.first(), .last(), .all() for its items). Return the items to pass on.'
 })
 </script>
 
@@ -125,7 +125,7 @@ const hint = computed(() => {
               :key="f.path"
               type="button"
               class="w-full text-left px-2 py-0.5 hover:bg-blue-50 flex justify-between gap-2"
-              :title="codeReference(model.language, s.direct, s.nodeId, f.segments)"
+              :title="codeReference(model.language, s.direct, s.name, f.segments)"
               @click="pick(s, f.segments)"
             >
               <span class="font-mono text-xs text-gray-800 truncate">{{ f.path.replace(/^\./, '') }}</span>

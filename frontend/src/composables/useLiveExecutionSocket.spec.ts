@@ -14,7 +14,12 @@ class MockWebSocket {
   send(data: string) {
     this.sent.push(data)
   }
-  close() {}
+  close() {
+    this.listeners['close']?.forEach((cb) => cb({}))
+  }
+  drop() {
+    this.listeners['close']?.forEach((cb) => cb({}))
+  }
   emitOpen() {
     this.listeners['open']?.forEach((cb) => cb({}))
   }
@@ -147,6 +152,52 @@ describe('useLiveExecutionSocket', () => {
 
     expect(execution.value?.id).toBe('e1')
     expect(historical.node_outputs).toEqual({ old: [{ json: { keep: true }, binary: {} }] })
+  })
+
+  it('joining a run midway fills in the nodes that ran before from the server', async () => {
+    const earlier = { status: 'success', counts: { '0': 1 }, outputs: [[{ json: { text: 'hi' }, binary: {} }]] }
+    vi.stubGlobal('fetch', vi.fn(async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        id: 'e1', workflow_id: 'wf-1', status: 'Running', mode: 'Trigger', started_at: 's', finished_at: null,
+        node_outputs: { trigger: [{ json: { text: 'hi' }, binary: {} }], agent: [] },
+        node_runs: { trigger: earlier, agent: { status: 'success', counts: {} } },
+      }),
+    })))
+    const { execution, connect } = useLiveExecutionSocket('wf-1')
+    connect()
+    const ws = MockWebSocket.instances[0]
+    ws.emitMessage({ type: 'node_started', execution_id: 'e1', workflow_id: 'wf-1', node_id: 'agent' })
+    await vi.waitFor(() => expect(execution.value?.node_runs?.trigger).toEqual(earlier))
+    expect(execution.value?.node_outputs.trigger).toEqual([{ json: { text: 'hi' }, binary: {} }])
+    // What the socket saw is newer than the server's copy: kept.
+    expect(execution.value?.node_runs?.agent.status).toBe('running')
+    expect(execution.value?.mode).toBe('Trigger')
+    vi.unstubAllGlobals()
+  })
+
+  it('shows the server\'s final copy once a run finishes', async () => {
+    const final = { id: 'e1', workflow_id: 'wf-1', status: 'Success', mode: 'Trigger', started_at: 's', finished_at: 'f', node_outputs: { a: [], b: [] } }
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, status: 200, json: async () => final })))
+    const { execution, connect } = useLiveExecutionSocket('wf-1')
+    connect()
+    MockWebSocket.instances[0].emitMessage({ type: 'execution_finished', execution_id: 'e1', workflow_id: 'wf-1', status: 'Success' })
+    await vi.waitFor(() => expect(execution.value).toEqual(final))
+    vi.unstubAllGlobals()
+  })
+
+  it('reconnects a dropped socket, but not one it closed itself', () => {
+    vi.useFakeTimers()
+    const { connect, disconnect } = useLiveExecutionSocket('wf-1')
+    connect()
+    MockWebSocket.instances[0].drop()
+    vi.advanceTimersByTime(2000)
+    expect(MockWebSocket.instances).toHaveLength(2)
+    disconnect()
+    vi.advanceTimersByTime(5000)
+    expect(MockWebSocket.instances).toHaveLength(2)
+    vi.useRealTimers()
   })
 
   it('does not connect when there is no stored token', () => {

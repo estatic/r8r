@@ -450,6 +450,7 @@ mod tests {
             nodes: vec![NodeInstance {
                 id: "n1".into(),
                 node_type: "core.manualTrigger".into(),
+                name: None,
                 position: (0.0, 0.0),
                 parameters: serde_json::json!({}),
                 disabled: false,

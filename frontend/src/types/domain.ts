@@ -26,6 +26,8 @@ export interface NodeSettings {
 export interface NodeInstance {
   id: string
   node_type: string
+  /** Unique in the workflow; expressions read the node as `$("name")`. The server names nodes saved without one. */
+  name?: string
   position: [number, number]
   parameters: Record<string, unknown>
   disabled: boolean

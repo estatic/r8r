@@ -182,6 +182,12 @@ impl NodeRegistry {
         self.nodes.get(type_name).map(|b| b.as_ref())
     }
 
+    /// Gives every node of `workflow` a unique name, an unnamed one its
+    /// type's display name (see [`Workflow::name_nodes`]).
+    pub fn name_nodes(&self, workflow: &mut crate::domain::Workflow) {
+        workflow.name_nodes(|t| self.get(t).map_or_else(|| t.to_string(), |n| n.display_name().to_string()));
+    }
+
     /// All registered node type names, sorted for a stable, predictable
     /// order in any UI listing them (e.g. an "add node" picker).
     pub fn type_names(&self) -> Vec<&'static str> {

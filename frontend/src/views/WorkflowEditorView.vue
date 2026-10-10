@@ -16,6 +16,7 @@ import ExecutionResultsPanel from '../components/ExecutionResultsPanel.vue'
 import NodeDetailsView from '../components/NodeDetailsView.vue'
 import { insertNodeIntoConnection, removeConnection, removeNode } from '../canvas/edit'
 import { upstreamSources } from '../canvas/inputData'
+import { renameNode, uniqueName } from '../canvas/nodeNames'
 import { useNodeTypesStore } from '../stores/nodeTypes'
 
 const route = useRoute()
@@ -30,7 +31,8 @@ const loadingHistory = ref(false)
 const live = useLiveExecutionSocket(workflowId)
 const execution = live.execution
 const run = useWorkflowRun(workflowId, execution)
-const executing = run.executing
+// A run is on screen and going: started here, or by the trigger (Telegram, schedule, webhook).
+const executing = computed(() => run.executing.value || execution.value?.status === 'Running')
 const loadError = ref('')
 const actionError = ref('')
 
@@ -89,10 +91,21 @@ const nodeLabels = computed<Record<string, string>>(() =>
   Object.fromEntries(
     (workflow.value?.nodes ?? []).map((n) => {
       const meta = nodeTypesStore.types.find((t) => t.type_name === n.node_type)
-      return [n.id, meta ? `${meta.icon} ${meta.display_name}` : n.node_type]
+      const name = n.name ?? meta?.display_name ?? n.node_type
+      return [n.id, meta ? `${meta.icon} ${name}` : name]
     }),
   ),
 )
+
+/** A new node's name: its type's, numbered if another node has it. */
+function nameFor(nodeType: string): string {
+  const base = nodeTypesStore.types.find((t) => t.type_name === nodeType)?.display_name ?? nodeType
+  return workflow.value ? uniqueName(workflow.value, base) : base
+}
+
+function onNodeRename(nodeId: string, name: string) {
+  if (workflow.value) renameNode(workflow.value, nodeId, name)
+}
 
 function deleteNode(nodeId: string) {
   if (!workflow.value) return
@@ -131,7 +144,7 @@ function onEdgeInsert(connection: Connection) {
 
 function onInsertNode(nodeType: string) {
   if (!workflow.value || !insertInto.value) return
-  const node: NodeInstance = { id: newNodeId(), node_type: nodeType, position: [0, 0], parameters: {}, disabled: false }
+  const node: NodeInstance = { id: newNodeId(), node_type: nodeType, name: nameFor(nodeType), position: [0, 0], parameters: {}, disabled: false }
   insertNodeIntoConnection(workflow.value, insertInto.value, node)
   insertInto.value = null
   selectedNodeId.value = node.id
@@ -182,6 +195,7 @@ function onAddNode(nodeType: string) {
   workflow.value.nodes.push({
     id: newNodeId(),
     node_type: nodeType,
+    name: nameFor(nodeType),
     // In the middle of what is on screen, clear of the nodes already there.
     position: canvas.value?.freeSpot() ?? [100 + workflow.value.nodes.length * 240, 100],
     parameters: {},
@@ -397,7 +411,7 @@ async function showHistory() {
           :focus="panelFocus"
           :input-sources="inputSources"
           :node-labels="nodeLabels"
-          @update="onNodeUpdate" @delete="deleteNode" @close="closePanel" />
+          @update="onNodeUpdate" @rename="onNodeRename" @delete="deleteNode" @close="closePanel" />
       </NodeDetailsView>
       <div v-if="insertInto" data-testid="insert-menu" class="absolute top-4 left-1/2 -translate-x-1/2 z-20">
         <p class="text-xs text-gray-600 bg-white border rounded px-2 py-1 mb-1 shadow">Choose the node to put into this connection</p>

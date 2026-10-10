@@ -84,6 +84,7 @@ fn workflow(name: &str, second_node_type: &str) -> Workflow {
     let node = |id: &str, node_type: &str, parameters: serde_json::Value| NodeInstance {
         id: id.into(),
         node_type: node_type.into(),
+        name: None,
         position: (0.0, 0.0),
         parameters,
         disabled: false,

@@ -309,7 +309,7 @@ pub(crate) async fn run_agent_loop(
                         let eval_ctx = crate::expr::EvalContext {
                             json: serde_json::json!({}),
                             items: &no_items,
-                            node_json: &no_nodes,
+                            node_items: &no_nodes,
                             workflow_name: "",
                             args: Some(&call.arguments),
                         };

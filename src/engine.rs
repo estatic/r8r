@@ -177,8 +177,11 @@ pub async fn execute_workflow_reusing(
     let order = topological_order(workflow)?;
     let back = back_edges(workflow);
     let owner = loop_owners(workflow, &back);
+    let mut named = workflow.clone();
+    registry.name_nodes(&mut named);
     let run = Run {
         workflow,
+        names: named.node_names(),
         registry,
         resources,
         observer,
@@ -223,6 +226,8 @@ pub async fn execute_workflow_reusing(
 /// One run's state: what each node produced so far, and the loop layout.
 struct Run<'a> {
     workflow: &'a Workflow,
+    /// Node id -> name, so expressions can say `$("Send reply")`.
+    names: HashMap<String, String>,
     registry: &'a std::sync::Arc<NodeRegistry>,
     resources: &'a crate::credentials::RunResources,
     observer: &'a dyn ExecutionObserver,
@@ -569,29 +574,20 @@ impl<'a> Run<'a> {
         };
         let items_json: Vec<serde_json::Value> =
             batches.iter().flatten().map(|i| i.json.clone()).collect();
-        let (node_json, upstream) = {
+        // What every node that ran sent (its first output), by id and by
+        // name: `$node[...]` / `$(...)` in expressions and Code nodes.
+        let upstream: HashMap<String, Vec<serde_json::Value>> = {
             let st = self.st();
-            let node_json: HashMap<String, serde_json::Value> = st
-                .produced
-                .iter()
-                .filter_map(|(id, ports)| {
-                    let first_item_json = ports
-                        .first()
-                        .and_then(|p| p.first())
-                        .map(|item| item.json.clone());
-                    first_item_json.map(|j| (id.clone(), j))
-                })
-                .collect();
-            let upstream: HashMap<String, Vec<serde_json::Value>> = st
-                .produced
-                .iter()
-                .filter_map(|(id, ports)| {
-                    ports
-                        .first()
-                        .map(|items| (id.clone(), items.iter().map(|i| i.json.clone()).collect()))
-                })
-                .collect();
-            (node_json, upstream)
+            let mut upstream = HashMap::new();
+            for (id, ports) in &st.produced {
+                let Some(items) = ports.first() else { continue };
+                let jsons: Vec<serde_json::Value> = items.iter().map(|i| i.json.clone()).collect();
+                if let Some(name) = self.names.get(id) {
+                    upstream.insert(name.clone(), jsons.clone());
+                }
+                upstream.insert(id.clone(), jsons);
+            }
+            upstream
         };
         let has_error_route = self
             .workflow
@@ -614,7 +610,7 @@ impl<'a> Run<'a> {
                 let eval_ctx = crate::expr::EvalContext {
                     json: batch.first().map(|i| i.json.clone()).unwrap_or_else(|| serde_json::json!({})),
                     items: &items_json,
-                    node_json: &node_json,
+                    node_items: &upstream,
                     workflow_name: &self.workflow.name,
                     args: None,
                 };
@@ -980,6 +976,7 @@ mod tests {
                 NodeInstance {
                     id: "trigger".into(),
                     node_type: "core.manualTrigger".into(),
+                    name: None,
                     position: (0.0, 0.0),
                     parameters: serde_json::json!({}),
                     disabled: false,
@@ -988,6 +985,7 @@ mod tests {
                 NodeInstance {
                     id: "set1".into(),
                     node_type: "core.set".into(),
+                    name: None,
                     position: (1.0, 0.0),
                     parameters: serde_json::json!({"fields": {"greeting": "hi"}}),
                     disabled: false,
@@ -1061,6 +1059,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "set2".into(),
             node_type: "core.set".into(),
+            name: None,
             position: (2.0, 0.0),
             parameters: serde_json::json!({}),
             disabled: false,
@@ -1086,6 +1085,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "c".into(),
             node_type: "core.set".into(),
+            name: None,
             position: (2.0, 0.0),
             parameters: serde_json::json!({}),
             disabled: false,
@@ -1114,6 +1114,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "trigger2".into(),
             node_type: "core.manualTrigger".into(),
+            name: None,
             position: (0.0, 1.0),
             parameters: serde_json::json!({}),
             disabled: false,
@@ -1245,19 +1246,45 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn expressions_and_code_reach_earlier_nodes_by_name() {
+        // trigger (unnamed: "Manual Trigger") -> "Get user" (Set) -> set2 -> code.
+        let mut wf = linear_workflow();
+        wf.nodes[1].name = Some("Get user".into());
+        wf.nodes[1].parameters = serde_json::json!({"fields": {"user": "ada"}});
+        let node = |id: &str, node_type: &str, parameters: serde_json::Value| NodeInstance {
+            id: id.into(),
+            node_type: node_type.into(),
+            name: None,
+            position: (1.0, 0.0),
+            parameters,
+            disabled: false,
+            settings: Default::default(),
+        };
+        wf.nodes.push(node("set2", "core.set", serde_json::json!({"fields": {"said": "{{ $(\"Get user\").json.user }}"}})));
+        wf.nodes.push(node("code", "core.code", serde_json::json!({"script": "return [{json: {u: $('Get user').first().json.user, n: $node['Manual Trigger'].all().length}}]"})));
+        let conn = |from: &str, to: &str| Connection { from_node: from.into(), from_output: 0, to_node: to.into(), to_input: 0, error: false };
+        wf.connections.push(conn("set1", "set2"));
+        wf.connections.push(conn("set2", "code"));
+        let outputs = execute_workflow(&wf, &registry()).await.unwrap();
+        assert_eq!(outputs["set2"][0].json["said"], "ada");
+        assert_eq!(outputs["code"][0].json, serde_json::json!({"u": "ada", "n": 1}));
+    }
+
+    #[tokio::test]
     async fn merge_gets_each_inputs_items_apart_and_appends_input_1_first() {
         // trigger -> a (Set) -> merge input 1; trigger -> b (Set) -> merge input 0.
         let mut wf = linear_workflow();
         let set = |id: &str, field: &str| NodeInstance {
             id: id.into(),
             node_type: "core.set".into(),
+            name: None,
             position: (1.0, 0.0),
             parameters: serde_json::json!({"fields": {field: true}}),
             disabled: false,
             settings: Default::default(),
         };
         wf.nodes = vec![wf.nodes[0].clone(), set("a", "from_a"), set("b", "from_b")];
-        wf.nodes.push(NodeInstance { id: "merge".into(), node_type: "core.merge".into(), parameters: serde_json::json!({"mode": "append"}), ..set("merge", "x") });
+        wf.nodes.push(NodeInstance { id: "merge".into(), node_type: "core.merge".into(), name: None, parameters: serde_json::json!({"mode": "append"}), ..set("merge", "x") });
         let conn = |from: &str, to: &str, to_input: usize| Connection { from_node: from.into(), from_output: 0, to_node: to.into(), to_input, error: false };
         wf.connections = vec![conn("trigger", "a", 0), conn("trigger", "b", 0), conn("a", "merge", 1), conn("b", "merge", 0)];
         let outputs = execute_workflow(&wf, &registry()).await.unwrap();
@@ -1287,6 +1314,7 @@ mod tests {
         let node = |id: &str, node_type: &str, parameters: serde_json::Value| NodeInstance {
             id: id.into(),
             node_type: node_type.into(),
+            name: None,
             position: (1.0, 0.0),
             parameters,
             disabled: false,
@@ -1323,6 +1351,7 @@ mod tests {
         let node = |id: &str, node_type: &str, parameters: serde_json::Value| NodeInstance {
             id: id.into(),
             node_type: node_type.into(),
+            name: None,
             position: (1.0, 0.0),
             parameters,
             disabled: false,
@@ -1422,7 +1451,7 @@ mod tests {
     }
 
     fn node(id: &str, node_type: &str, parameters: serde_json::Value) -> NodeInstance {
-        NodeInstance { id: id.into(), node_type: node_type.into(), position: (0.0, 0.0), parameters, disabled: false, settings: Default::default() }
+        NodeInstance { id: id.into(), node_type: node_type.into(), name: None, position: (0.0, 0.0), parameters, disabled: false, settings: Default::default() }
     }
 
     fn link(from: &str, from_output: usize, to: &str) -> Connection {
@@ -1571,6 +1600,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "set2".into(),
             node_type: "core.set".into(),
+            name: None,
             position: (2.0, 0.0),
             parameters: serde_json::json!({"fields": {"other": "value"}}),
             disabled: false,
@@ -1597,6 +1627,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "set2".into(),
             node_type: "core.set".into(),
+            name: None,
             position: (2.0, 0.0),
             parameters: serde_json::json!({"fields": {"other": "value"}}),
             disabled: false,
@@ -1605,6 +1636,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "set3".into(),
             node_type: "core.set".into(),
+            name: None,
             position: (3.0, 0.0),
             parameters: serde_json::json!({}),
             disabled: false,
@@ -1634,6 +1666,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "trigger2".into(),
             node_type: "core.manualTrigger".into(),
+            name: None,
             position: (0.0, 1.0),
             parameters: serde_json::json!({}),
             disabled: false,
@@ -1642,6 +1675,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "set2".into(),
             node_type: "core.set".into(),
+            name: None,
             position: (1.0, 1.0),
             parameters: serde_json::json!({"fields": {"other": "value"}}),
             disabled: false,
@@ -1669,6 +1703,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "c".into(),
             node_type: "core.set".into(),
+            name: None,
             position: (2.0, 0.0),
             parameters: serde_json::json!({}),
             disabled: false,
@@ -1744,6 +1779,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "set_final".into(),
             node_type: "core.set".into(),
+            name: None,
             position: (2.0, 0.0),
             parameters: serde_json::json!({"fields": {"final": "yes"}}),
             disabled: false,
@@ -1874,6 +1910,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "after".into(),
             node_type: "core.noop".into(),
+            name: None,
             position: (2.0, 0.0),
             parameters: serde_json::json!({}),
             disabled: false,
@@ -1959,6 +1996,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "error_handler".into(),
             node_type: "core.set".into(),
+            name: None,
             position: (2.0, 1.0),
             parameters: serde_json::json!({"fields": {"handled": true}}),
             disabled: false,
@@ -2015,6 +2053,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "error_handler".into(),
             node_type: "core.set".into(),
+            name: None,
             position: (2.0, 0.0),
             parameters: serde_json::json!({"fields": {"handled": true}}),
             disabled: false,
@@ -2075,6 +2114,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "set_final".into(),
             node_type: "core.set".into(),
+            name: None,
             position: (2.0, 0.0),
             parameters: serde_json::json!({"fields": {"final": "yes"}}),
             disabled: false,
@@ -2111,6 +2151,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "error_handler".into(),
             node_type: "core.set".into(),
+            name: None,
             position: (2.0, 0.0),
             parameters: serde_json::json!({"fields": {"handled": true}}),
             disabled: false,

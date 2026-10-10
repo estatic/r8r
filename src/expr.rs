@@ -17,8 +17,11 @@ pub struct EvalContext<'a> {
     /// Bound as `$items()`: all input items for the current node, each
     /// wrapped as `{ json: <item> }`.
     pub items: &'a [serde_json::Value],
-    /// Bound as `$node`: a map of node name to `{ json: <output> }`.
-    pub node_json: &'a HashMap<String, serde_json::Value>,
+    /// What each earlier node sent (its first output's items), by id and
+    /// by name. Bound as `$node["name"]` and `$("name")`, each with
+    /// `.json` (the first item's data), `.item`, `.first()`, `.last()` and
+    /// `.all()`, as in n8n.
+    pub node_items: &'a HashMap<String, Vec<serde_json::Value>>,
     /// Bound as `$workflow.name`.
     pub workflow_name: &'a str,
     /// Bound as `$args`: a tool call's arguments (library tools only).
@@ -55,6 +58,19 @@ pub enum ExprError {
     #[error("script execution timed out")]
     Timeout,
 }
+
+/// `$node` and `$()` over `__r8r_node_items` (node -> its items' data).
+const NODE_ACCESS: &str = r#"
+var $node = {};
+for (const name of Object.keys(__r8r_node_items)) {
+  const its = __r8r_node_items[name].map((json) => ({ json }));
+  $node[name] = { json: its.length ? its[0].json : {}, item: its[0], first: () => its[0], last: () => its[its.length - 1], all: () => its };
+}
+function $(name) {
+  if (!Object.prototype.hasOwnProperty.call($node, name)) throw new Error(`No node "${name}" ran before this one`);
+  return $node[name];
+}
+"#;
 
 /// Evaluates `script` as JavaScript in a fresh QuickJS context, with
 /// `$json`, `$items`, `$node`, `$now`, and `$workflow` bound as globals from
@@ -97,16 +113,13 @@ pub fn eval_js(script: &str, ctx: &EvalContext) -> Result<serde_json::Value, Exp
             .set("$items", items_fn)
             .map_err(|e| ExprError::Runtime(e.to_string()))?;
 
-        let node_json = serde_json::Value::Object(
-            ctx.node_json
-                .iter()
-                .map(|(name, output)| (name.clone(), serde_json::json!({"json": output})))
-                .collect(),
-        );
-        let node_val = json_to_js(&js, &node_json)?;
+        let node_items = serde_json::to_value(ctx.node_items).map_err(|e| ExprError::Conversion(e.to_string()))?;
+        let node_items = json_to_js(&js, &node_items)?;
         globals
-            .set("$node", node_val)
+            .set("__r8r_node_items", node_items)
             .map_err(|e| ExprError::Runtime(e.to_string()))?;
+        js.eval::<(), _>(NODE_ACCESS)
+            .map_err(|e| ExprError::Runtime(format!("could not set up $node: {e}")))?;
 
         globals
             .set("$now", chrono::Utc::now().to_rfc3339())
@@ -388,7 +401,7 @@ mod tests {
         EvalContext {
             json: serde_json::json!({}),
             items: &[],
-            node_json: Box::leak(Box::new(HashMap::new())),
+            node_items: Box::leak(Box::new(HashMap::new())),
             workflow_name: "test-workflow",
             args: None,
         }
@@ -489,14 +502,37 @@ mod tests {
 
     #[test]
     fn reads_node_json_global() {
-        let mut node_json = HashMap::new();
-        node_json.insert("Trigger".to_string(), serde_json::json!({"x": 42}));
+        let mut node_items = HashMap::new();
+        node_items.insert("Trigger".to_string(), vec![serde_json::json!({"x": 42})]);
         let ctx = EvalContext {
-            node_json: Box::leak(Box::new(node_json)),
+            node_items: Box::leak(Box::new(node_items)),
             ..empty_ctx()
         };
         let result = eval_js(r#"$node["Trigger"].json.x"#, &ctx).unwrap();
         assert_eq!(result, serde_json::json!(42));
+    }
+
+    #[test]
+    fn reads_an_earlier_node_by_name_like_n8n() {
+        let mut node_items = HashMap::new();
+        node_items.insert("Get users".to_string(), vec![serde_json::json!({"n": 1}), serde_json::json!({"n": 2})]);
+        let ctx = EvalContext { node_items: Box::leak(Box::new(node_items)), ..empty_ctx() };
+        for (script, want) in [
+            (r#"$("Get users").item.json.n"#, serde_json::json!(1)),
+            (r#"$("Get users").first().json.n"#, serde_json::json!(1)),
+            (r#"$("Get users").last().json.n"#, serde_json::json!(2)),
+            (r#"$("Get users").all().length"#, serde_json::json!(2)),
+            (r#"$('Get users').json.n"#, serde_json::json!(1)),
+            (r#"$node["Get users"].last().json.n"#, serde_json::json!(2)),
+        ] {
+            assert_eq!(eval_js(script, &ctx).unwrap(), want, "{script}");
+        }
+        let resolved = resolve_parameters(&serde_json::json!("n = {{ $(\"Get users\").first().json.n }}"), &ctx).unwrap();
+        assert_eq!(resolved, serde_json::json!("n = 1"));
+        match eval_js(r#"$("Nope").json"#, &ctx) {
+            Err(ExprError::Thrown { message, .. }) => assert!(message.contains(r#"No node "Nope" ran before this one"#), "{message}"),
+            other => panic!("expected a thrown error, got {other:?}"),
+        }
     }
 
     #[test]

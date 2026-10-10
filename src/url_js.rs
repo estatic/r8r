@@ -121,7 +121,7 @@ mod tests {
         let ctx = EvalContext {
             json: json!({}),
             items: &items,
-            node_json: &nodes,
+            node_items: &nodes,
             workflow_name: "",
             args: None,
         };

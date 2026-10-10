@@ -26,11 +26,13 @@ describe('upstreamSources', () => {
   const w = wf([n('tg', 'telegram.trigger'), n('agent', 'ai.agent'), n('set')], [c('tg', 'agent'), c('agent', 'set')])
   const e = exec({ tg: [{ message: { chat: { id: 7 } } }], agent: [{ response: 'ok', message: { chat: { id: 7 } } }] })
 
-  it('offers the connected node as $json and earlier nodes by $node, nearest first', () => {
+  it('offers the connected node as $json and earlier nodes by name, nearest first', () => {
     const sources = upstreamSources(w, 'set', e)
     expect(sources.map((s) => [s.nodeId, s.direct])).toEqual([['agent', true], ['tg', false]])
     expect(sources[0].fields.map((f) => f.expression)).toEqual(['{{ $json.response }}', '{{ $json.message.chat.id }}'])
-    expect(sources[1].fields.map((f) => f.expression)).toEqual(['{{ $node["tg"].json.message.chat.id }}'])
+    expect(sources[1].fields.map((f) => f.expression)).toEqual(['{{ $("tg").json.message.chat.id }}'])
+    const named = { ...w, nodes: w.nodes.map((x) => (x.id === 'tg' ? { ...x, name: 'Telegram Trigger' } : x)) }
+    expect(upstreamSources(named, 'set', e)[1].fields[0].expression).toBe('{{ $("Telegram Trigger").json.message.chat.id }}')
   })
 
   it('lists a node that has not run yet with no fields', () => {
@@ -47,7 +49,7 @@ describe('codeReference', () => {
   const segments = ['message', 'chat', 'id']
   it('writes JavaScript references, for the input and for an earlier node', () => {
     expect(codeReference('javaScript', true, 'agent', segments)).toBe('$json.message.chat.id')
-    expect(codeReference('javaScript', false, 'tg', segments)).toBe('$node["tg"].json.message.chat.id')
+    expect(codeReference('javaScript', false, 'Telegram Trigger', segments)).toBe('$("Telegram Trigger").json.message.chat.id')
     expect(codeReference('javaScript', true, 'a', ['odd key', 0, 'x'])).toBe('$json["odd key"][0].x')
   })
   it('writes Python references with subscripts', () => {

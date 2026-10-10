@@ -83,7 +83,7 @@ pub async fn create_workflow(
         return (StatusCode::BAD_REQUEST, msg).into_response();
     }
     let now = chrono::Utc::now();
-    let workflow = Workflow {
+    let mut workflow = Workflow {
         id: Uuid::new_v4(),
         name: payload.name,
         active: false,
@@ -92,6 +92,7 @@ pub async fn create_workflow(
         created_at: now,
         updated_at: now,
     };
+    state.registry.name_nodes(&mut workflow);
     match state.storage.create_workflow(&workflow).await {
         Ok(()) => (StatusCode::CREATED, Json(workflow)).into_response(),
         Err(e) => {
@@ -107,7 +108,11 @@ pub async fn get_workflow(
     Path(id): Path<Uuid>,
 ) -> impl IntoResponse {
     match state.storage.get_workflow(id).await {
-        Ok(Some(wf)) => Json(wf).into_response(),
+        Ok(Some(mut wf)) => {
+            // Saved before nodes had names: they get them here (and keep them on the next save).
+            state.registry.name_nodes(&mut wf);
+            Json(wf).into_response()
+        }
         Ok(None) => StatusCode::NOT_FOUND.into_response(),
         Err(e) => {
             tracing::error!(error = %e, "failed to fetch workflow");
@@ -342,6 +347,7 @@ pub async fn update_workflow(
     workflow.nodes = payload.nodes;
     workflow.connections = payload.connections;
     workflow.updated_at = chrono::Utc::now();
+    state.registry.name_nodes(&mut workflow);
     match state.storage.update_workflow(&workflow).await {
         Ok(()) => Json(workflow).into_response(),
         Err(e) => {
@@ -389,6 +395,7 @@ mod tests {
         NodeInstance {
             id: "n1".into(),
             node_type: "core.set".into(),
+            name: None,
             position: (0.0, 0.0),
             parameters: serde_json::json!({}),
             disabled: false,

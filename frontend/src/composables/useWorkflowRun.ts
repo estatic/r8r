@@ -26,25 +26,12 @@ export function useWorkflowRun(workflowId: string, execution: Ref<Execution | nu
     }
   }
 
-  // The socket finished the run, but it may have missed node events (e.g.
-  // the results panel was closed mid-run): show the server's final copy.
-  function finishFromSocket(id: string) {
-    stop()
-    api
-      .get<Execution>(`/rest/r8r/executions/${id}`)
-      .then((latest) => {
-        if (!disposed && latest.status !== 'Running' && execution.value?.id === id) execution.value = latest
-      })
-      .catch(() => {
-        // Keep the socket's copy.
-      })
-  }
-
   // The socket mutates the execution object in place, hence deep.
   watch(
     execution,
     (e) => {
-      if (startedId && e?.id === startedId && e.status !== 'Running') finishFromSocket(startedId)
+      // The socket then swaps in the server's final copy itself.
+      if (startedId && e?.id === startedId && e.status !== 'Running') stop()
     },
     { deep: true },
   )
@@ -73,7 +60,7 @@ export function useWorkflowRun(workflowId: string, execution: Ref<Execution | nu
     // Socket events for this run may have landed first: keep that richer copy.
     if (execution.value?.id !== started.id) execution.value = started
     if (execution.value!.status !== 'Running') {
-      finishFromSocket(started.id)
+      stop()
       return
     }
     startedId = started.id
@@ -93,12 +80,14 @@ export function useWorkflowRun(workflowId: string, execution: Ref<Execution | nu
 
   /**
    * Stops the run: a started one on the server (it then ends as Canceled
-   * over the socket or the poll), or the execute request still waiting
-   * for the run to start.
+   * over the socket or the poll), the execute request still waiting for
+   * the run to start, or a run on screen that something else started
+   * (a trigger).
    */
   async function cancel() {
-    if (startedId) {
-      await api.post(`/rest/r8r/executions/${startedId}/stop`)
+    const running = execution.value?.status === 'Running' ? execution.value.id : null
+    if (startedId ?? running) {
+      await api.post(`/rest/r8r/executions/${startedId ?? running}/stop`)
     } else if (starting) {
       starting.abort()
     }

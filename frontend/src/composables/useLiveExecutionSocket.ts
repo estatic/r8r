@@ -1,5 +1,5 @@
 import { ref, type Ref } from 'vue'
-import { getToken } from '../api/client'
+import { api, getToken } from '../api/client'
 import type { Execution, ExecutionStatus, Item } from '../types/domain'
 
 export type LiveExecutionEvent = { execution_id: string; workflow_id: string } & (
@@ -16,10 +16,45 @@ export interface LiveExecutionSocket {
   disconnect: () => void
 }
 
+/** How long to wait before reconnecting a dropped socket (e.g. the server restarted). */
+const RECONNECT_MS = 2000
+
 export function useLiveExecutionSocket(workflowId: string): LiveExecutionSocket {
   const execution = ref<Execution | null>(null)
   let socket: WebSocket | null = null
+  let wanted = false
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null
   const supersededExecutionIds = new Set<string>()
+
+  /**
+   * Fills in what the socket didn't see from the server's copy: nodes that
+   * ran before it joined the run (a trigger started it, the editor was
+   * opened mid-run) or events it dropped. A finished run is shown as the
+   * server has it; a running one only gets the nodes it's missing.
+   */
+  async function catchUp(id: string) {
+    let server: Execution
+    try {
+      server = await api.get<Execution>(`/rest/r8r/executions/${id}`)
+    } catch {
+      return // keep what the socket has
+    }
+    const current = execution.value
+    if (!current || current.id !== id) return
+    if (server.status !== 'Running') {
+      execution.value = server
+      return
+    }
+    current.mode = server.mode
+    current.started_at = server.started_at
+    const runs = (current.node_runs ??= {})
+    for (const [nodeId, run] of Object.entries(server.node_runs ?? {})) {
+      if (!(nodeId in runs)) runs[nodeId] = run
+    }
+    for (const [nodeId, items] of Object.entries(server.node_outputs)) {
+      if (!(nodeId in current.node_outputs)) current.node_outputs[nodeId] = items
+    }
+  }
 
   function applyEvent(event: LiveExecutionEvent) {
     if (supersededExecutionIds.has(event.execution_id)) return
@@ -36,6 +71,7 @@ export function useLiveExecutionSocket(workflowId: string): LiveExecutionSocket 
         started_at: new Date().toISOString(),
         finished_at: null,
       }
+      if (event.type !== 'execution_finished') void catchUp(event.execution_id)
     }
 
     const updated = execution.value!
@@ -58,6 +94,7 @@ export function useLiveExecutionSocket(workflowId: string): LiveExecutionSocket 
       case 'execution_finished':
         updated.status = event.status
         updated.finished_at = new Date().toISOString()
+        void catchUp(event.execution_id)
         break
       case 'node_started':
         runs[event.node_id] = { status: 'running', counts: {} }
@@ -68,10 +105,22 @@ export function useLiveExecutionSocket(workflowId: string): LiveExecutionSocket 
   function connect() {
     const token = getToken()
     if (!token) return
+    wanted = true
     const protocol = location.protocol === 'https:' ? 'wss:' : 'ws:'
-    socket = new WebSocket(`${protocol}//${location.host}/ws/workflows/${workflowId}/executions`)
-    socket.addEventListener('open', () => socket?.send(JSON.stringify({ token })))
-    socket.addEventListener('message', (e) => {
+    const ws = new WebSocket(`${protocol}//${location.host}/ws/workflows/${workflowId}/executions`)
+    socket = ws
+    ws.addEventListener('open', () => ws.send(JSON.stringify({ token })))
+    // Dropped (server restarted, network blip): reconnect, or later runs
+    // never show. A run in progress then catches up on its next event.
+    ws.addEventListener('close', () => {
+      if (!wanted || socket !== ws) return
+      socket = null
+      reconnectTimer = setTimeout(() => {
+        reconnectTimer = null
+        if (wanted) connect()
+      }, RECONNECT_MS)
+    })
+    ws.addEventListener('message', (e) => {
       try {
         applyEvent(JSON.parse((e as MessageEvent).data as string) as LiveExecutionEvent)
       } catch {
@@ -82,6 +131,11 @@ export function useLiveExecutionSocket(workflowId: string): LiveExecutionSocket 
   }
 
   function disconnect() {
+    wanted = false
+    if (reconnectTimer) {
+      clearTimeout(reconnectTimer)
+      reconnectTimer = null
+    }
     socket?.close()
     socket = null
   }

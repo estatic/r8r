@@ -139,9 +139,14 @@ function metaFor(nodeType: string) {
   return nodeTypesStore.types.find((t) => t.type_name === nodeType)
 }
 
-function labelFor(nodeType: string): string {
-  const meta = metaFor(nodeType)
-  return meta ? `${meta.icon} ${meta.display_name}` : nodeType
+/** What the canvas calls a node: its name, else its type's. */
+function nameOf(n: NodeInstance): string {
+  return n.name ?? metaFor(n.node_type)?.display_name ?? n.node_type
+}
+
+function labelFor(n: NodeInstance): string {
+  const meta = metaFor(n.node_type)
+  return meta ? `${meta.icon} ${nameOf(n)}` : nameOf(n)
 }
 
 /** The AI Agent's tools (picked in its panel), shown hanging below it. */
@@ -185,11 +190,12 @@ const flowNodes = computed<FlowNode[]>(() =>
   props.nodes.map((n) => ({
     id: n.id,
     position: { x: n.position[0], y: n.position[1] },
-    label: labelFor(n.node_type),
+    label: labelFor(n),
     data: {
       nodeType: n.node_type,
+      typeName: metaFor(n.node_type)?.display_name ?? n.node_type,
       icon: metaFor(n.node_type)?.icon ?? '',
-      name: metaFor(n.node_type)?.display_name ?? n.node_type,
+      name: nameOf(n),
       // Nodes with ports below them stay boxes, so the ports have an edge to hang from.
       shape: n.node_type === 'ai.agent' ? 'box' : nodeShape(n.id, metaFor(n.node_type)?.category, props.connections),
       aux: auxPorts(n),
@@ -279,7 +285,7 @@ function outputTop(shape: string, index: number, total: number): string {
           :class="{ 'opacity-50': data.disabled }"
           :data-shape="data.shape"
           :data-run="data.run ?? undefined"
-          :title="data.nodeType"
+          :title="data.name === data.typeName ? data.nodeType : `${data.typeName} (${data.nodeType})`"
         >
           <!-- One handle per input; a node with several (Merge) labels them. -->
           <template v-if="data.shape !== 'start'">

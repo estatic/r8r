@@ -263,6 +263,7 @@ mod tests {
         NodeInstance {
             id: "hook".into(),
             node_type: "core.webhook".into(),
+            name: None,
             position: (0.0, 0.0),
             parameters: serde_json::json!({"path": path, "method": method}),
             disabled: false,

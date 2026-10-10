@@ -120,17 +120,24 @@ describe('useWorkflowRun', () => {
     expect(run.executing.value).toBe(false)
   })
 
-  it('replaces the socket copy with the server copy once the socket finishes the run', async () => {
-    const serverCopy = exec('e1', 'Success', { set1: [{ json: { full: true }, binary: {} }], set2: [] })
-    stubFetch(exec('e1', 'Running'), [serverCopy])
+  it('stops tracking once the socket finishes the run (the socket fetches the final copy)', async () => {
+    const fetchMock = stubFetch(exec('e1', 'Running'))
     const execution = ref<Execution | null>(null)
     const run = useWorkflowRun('wf', execution)
     await run.execute()
-    // Socket finishes the run but missed some node events (e.g. panel closed mid-run).
     execution.value!.status = 'Success'
     await nextTick()
-    await vi.advanceTimersByTimeAsync(0)
-    expect(execution.value).toEqual(serverCopy)
+    expect(run.executing.value).toBe(false)
+    await vi.advanceTimersByTimeAsync(6000)
+    expect(fetchMock.mock.calls.length).toBe(1) // only the POST: no polling left
+  })
+
+  it('stops a run on screen that a trigger started', async () => {
+    const fetchMock = vi.fn((_url: string, _options?: RequestInit) => Promise.resolve({ ok: true, status: 204 }))
+    vi.stubGlobal('fetch', fetchMock)
+    const execution = ref<Execution | null>(exec('t1', 'Running'))
+    await useWorkflowRun('wf', execution).cancel()
+    expect(fetchMock.mock.calls.some(([url, o]) => url === '/rest/r8r/executions/t1/stop' && o?.method === 'POST')).toBe(true)
   })
 
   it('stopping while the run is still being started (e.g. waiting for a Telegram message) abandons the request quietly', async () => {

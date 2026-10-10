@@ -2,7 +2,6 @@ use crate::domain::Item;
 use crate::expr::{eval_js, EvalContext, ExprError};
 use crate::node::{Node, NodeError, NodeExecutionContext, NodeOutput};
 use async_trait::async_trait;
-use std::collections::HashMap;
 
 /// A backstop, not the primary deadline: `eval_js` (`src/expr.rs`) enforces
 /// its own 2s timeout via QuickJS's interrupt handler, which reliably
@@ -146,7 +145,7 @@ impl CodeNode {
             ctx.input_items.iter().map(|i| i.json.clone()).collect();
         let first_json = ctx.input_items.first().map(|i| i.json.clone()).unwrap_or_else(|| serde_json::json!({}));
         // The n8n helpers go on the wrapper's line, so the user's lines keep their numbers.
-        let prefix = format!("{JS_PREFIX}{} ", n8n_helpers(&ctx.upstream));
+        let prefix = format!("{JS_PREFIX}{N8N_HELPERS} ");
         let wrapped_script = format!("{prefix}{script} }})($items())");
         let prefix_len = prefix.len();
         let script_text = script.clone();
@@ -160,7 +159,7 @@ impl CodeNode {
         // Instead, run `eval_js` on tokio's blocking thread pool via
         // `spawn_blocking`, and race the resulting `JoinHandle` (a genuine
         // `.await` point backed by a separate OS thread) against the timeout.
-        // Everything the closure needs (`items_json`, `node_json`,
+        // Everything the closure needs (`items_json`, `node_items`,
         // `first_json`, `wrapped_script`) is already owned data local to this
         // function, so it can move into the `'static` closure without
         // borrowing from `ctx`; `EvalContext` is constructed entirely inside
@@ -179,16 +178,12 @@ impl CodeNode {
         // blocking-pool thread after this outer timeout fires.
         // A library tool call's arguments, exposed to the script as `$args`.
         let tool_args = ctx.tool_args.clone();
-        let node_json: HashMap<String, serde_json::Value> = ctx
-            .upstream
-            .iter()
-            .map(|(id, items)| (id.clone(), items.first().cloned().unwrap_or_else(|| serde_json::json!({}))))
-            .collect();
+        let node_items = ctx.upstream.clone();
         let handle = tokio::task::spawn_blocking(move || {
             let eval_ctx = EvalContext {
                 json: first_json,
                 items: &items_json,
-                node_json: &node_json,
+                node_items: &node_items,
                 workflow_name: "",
                 args: tool_args.as_ref(),
             };
@@ -210,18 +205,10 @@ impl CodeNode {
 /// Where the user's code is wrapped: `(function(items) { <helpers> <script> })(...)`.
 const JS_PREFIX: &str = "(function(items) { ";
 
-/// n8n's ways to reach data, on one line: `$node["id"]` (`.json`,
-/// `.item`, `.first()`, `.last()`, `.all()`), `$("id")`, and `$input`.
-fn n8n_helpers(upstream: &HashMap<String, Vec<serde_json::Value>>) -> String {
-    let all = serde_json::to_string(upstream).unwrap_or_else(|_| "{}".into());
-    format!(
-        "const __r8r_all = {all}; \
-         for (const __id of Object.keys(__r8r_all)) {{ const __its = __r8r_all[__id].map((j) => ({{ json: j }})); \
-         $node[__id] = {{ json: __its.length ? __its[0].json : {{}}, item: __its[0], first: () => __its[0], last: () => __its[__its.length - 1], all: () => __its }}; }} \
-         const $ = (id) => {{ if (!(id in $node)) throw new Error(`No node \"${{id}}\" ran before this one`); return $node[id]; }}; \
-         const $input = {{ item: items[0], first: () => items[0], last: () => items[items.length - 1], all: () => items }};"
-    )
-}
+/// n8n's `$input`, on one line. `$node["name"]` and `$("name")` come
+/// from `eval_js`.
+const N8N_HELPERS: &str =
+    "const $input = { item: items[0], first: () => items[0], last: () => items[items.length - 1], all: () => items };";
 
 /// What a call at `column` (1-based) of `line` calls: the expression right
 /// before the next "(" (`images.slice` in `const c = images.slice(0, 30);`).
@@ -305,6 +292,7 @@ fn python_trace(script: &str, message: &str, trace: &[(u64, String)]) -> String 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     fn ctx_with(parameters: serde_json::Value, inputs: Vec<serde_json::Value>) -> NodeExecutionContext {
         NodeExecutionContext {

@@ -7,6 +7,12 @@ use uuid::Uuid;
 pub struct NodeInstance {
     pub id: String,
     pub node_type: String,
+    /// What the user calls the node, unique in its workflow: shown on the
+    /// canvas and how expressions refer to it (`$("Send reply")`).
+    /// Workflows saved before names existed have none until
+    /// [`Workflow::name_nodes`] gives them one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     pub position: (f64, f64),
     pub parameters: serde_json::Value,
     #[serde(default)]
@@ -58,6 +64,38 @@ pub struct Workflow {
     pub connections: Vec<Connection>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+impl Workflow {
+    /// Gives every node a name no other node in the workflow has: an
+    /// unnamed node (saved before names existed) gets `default_name` of its
+    /// type, and a repeated name gets a number ("HTTP Request 2"), in node
+    /// order. The editor names its new nodes the same way.
+    pub fn name_nodes(&mut self, default_name: impl Fn(&str) -> String) {
+        let mut taken: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for node in &mut self.nodes {
+            let base = match node.name.as_deref().map(str::trim) {
+                Some(name) if !name.is_empty() => name.to_string(),
+                _ => default_name(&node.node_type),
+            };
+            let mut name = base.clone();
+            let mut n = 2;
+            while taken.contains(&name) {
+                name = format!("{base} {n}");
+                n += 1;
+            }
+            taken.insert(name.clone());
+            node.name = Some(name);
+        }
+    }
+
+    /// Node id -> name, for nodes that have one.
+    pub fn node_names(&self) -> HashMap<String, String> {
+        self.nodes
+            .iter()
+            .filter_map(|n| n.name.clone().map(|name| (n.id.clone(), name)))
+            .collect()
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Default)]
@@ -202,6 +240,46 @@ pub struct Tool {
 mod tests {
     use super::*;
 
+    fn named(id: &str, node_type: &str, name: Option<&str>) -> NodeInstance {
+        NodeInstance {
+            id: id.into(),
+            node_type: node_type.into(),
+            name: name.map(Into::into),
+            position: (0.0, 0.0),
+            parameters: serde_json::json!({}),
+            disabled: false,
+            settings: NodeSettings::default(),
+        }
+    }
+
+    #[test]
+    fn name_nodes_names_unnamed_nodes_after_their_type_and_keeps_names_unique() {
+        let mut wf = Workflow {
+            id: Uuid::nil(),
+            name: "w".into(),
+            active: false,
+            nodes: vec![
+                named("a", "http", None),
+                named("b", "http", None),
+                named("c", "set", Some("Reply")),
+                named("d", "set", Some("Reply")),
+                named("e", "set", Some("  ")),
+            ],
+            connections: vec![],
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+        wf.name_nodes(|t| if t == "http" { "HTTP Request".into() } else { "Set".into() });
+        let names: Vec<_> = wf.nodes.iter().map(|n| n.name.clone().unwrap()).collect();
+        assert_eq!(names, ["HTTP Request", "HTTP Request 2", "Reply", "Reply 2", "Set"]);
+    }
+
+    #[test]
+    fn a_node_without_a_name_saves_without_one() {
+        let json = serde_json::to_value(named("a", "set", None)).unwrap();
+        assert!(json.get("name").is_none());
+    }
+
     #[test]
     fn node_instance_without_settings_deserializes_to_defaults() {
         let json = r#"{"id":"n1","node_type":"core.set","position":[0.0,0.0],"parameters":{}}"#;
@@ -233,6 +311,7 @@ mod tests {
             nodes: vec![NodeInstance {
                 id: "n1".into(),
                 node_type: "core.manualTrigger".into(),
+                name: None,
                 position: (0.0, 0.0),
                 parameters: serde_json::json!({}),
                 disabled: false,

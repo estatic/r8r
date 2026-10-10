@@ -53,7 +53,25 @@ const props = withDefaults(
   }>(),
   { inputSources: () => [], nodeLabels: () => ({}) },
 )
-const emit = defineEmits<{ update: [node: NodeInstance]; close: []; delete: [nodeId: string] }>()
+const emit = defineEmits<{ update: [node: NodeInstance]; rename: [nodeId: string, name: string]; close: []; delete: [nodeId: string] }>()
+
+// The node's name, as typed; renamed on Enter or leaving the box (the
+// editor keeps it unique and updates the expressions that use it).
+const nameDraft = ref('')
+watch(
+  () => [props.node?.id, props.node?.name],
+  () => {
+    nameDraft.value = props.node?.name ?? ''
+  },
+  { immediate: true },
+)
+const renameHint = computed(() => `Rename. Expressions read this node as $(${JSON.stringify(props.node?.name ?? '')})`)
+function commitName() {
+  if (!props.node) return
+  const name = nameDraft.value.trim()
+  if (name && name !== props.node.name) emit('rename', props.node.id, name)
+  else nameDraft.value = props.node.name ?? ''
+}
 
 const paramsText = ref('')
 const error = ref('')
@@ -481,9 +499,16 @@ onBeforeUnmount(() => {
     :class="embedded ? 'relative h-full w-[28rem] shrink-0 border-x' : 'absolute top-0 right-0 bottom-0 w-96 border-l shadow-lg'"
   >
     <header class="px-4 py-3 border-b flex justify-between items-center">
-      <div>
+      <div class="min-w-0 flex-1 mr-2">
         <div class="text-xs text-gray-400">{{ node.node_type }}</div>
-        <div class="font-medium">{{ node.id }}</div>
+        <input
+          v-model="nameDraft"
+          data-testid="node-name"
+          class="font-medium w-full border border-transparent rounded px-1 -mx-1 hover:border-gray-300 focus:border-blue-400 outline-none"
+          :title="renameHint"
+          @keydown.enter="($event.target as HTMLInputElement).blur()"
+          @blur="commitName"
+        />
       </div>
       <button class="text-gray-400" @click="emit('close')">&times;</button>
     </header>

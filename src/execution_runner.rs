@@ -502,6 +502,7 @@ mod tests {
                 NodeInstance {
                     id: "trigger".into(),
                     node_type: "core.manualTrigger".into(),
+                    name: None,
                     position: (0.0, 0.0),
                     parameters: serde_json::json!({}),
                     disabled: false,
@@ -510,6 +511,7 @@ mod tests {
                 NodeInstance {
                     id: "set1".into(),
                     node_type: "core.set".into(),
+                    name: None,
                     position: (1.0, 0.0),
                     parameters: serde_json::json!({"fields": {"greeting": "hi"}}),
                     disabled: false,
@@ -635,6 +637,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "if1".into(),
             node_type: "core.if".into(),
+            name: None,
             position: (2.0, 0.0),
             parameters: serde_json::json!({"condition": false}),
             disabled: false,
@@ -643,6 +646,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "code1".into(),
             node_type: "core.code".into(),
+            name: None,
             position: (3.0, 0.0),
             parameters: serde_json::json!({"script": "throw new Error('boom')"}),
             disabled: false,
@@ -698,6 +702,7 @@ mod tests {
         wf.nodes.push(NodeInstance {
             id: "code1".into(),
             node_type: "core.code".into(),
+            name: None,
             position: (2.0, 0.0),
             parameters: serde_json::json!({"script": "throw new Error('boom')"}),
             disabled: false,
@@ -894,7 +899,7 @@ mod tests {
     async fn a_loop_bodys_output_and_counts_add_up_over_all_batches() {
         let storage = memory_storage().await;
         let (events, _rx) = tokio::sync::broadcast::channel(64);
-        let node = |id: &str, t: &str, p: serde_json::Value| NodeInstance { id: id.into(), node_type: t.into(), position: (0.0, 0.0), parameters: p, disabled: false, settings: Default::default() };
+        let node = |id: &str, t: &str, p: serde_json::Value| NodeInstance { id: id.into(), node_type: t.into(), name: None, position: (0.0, 0.0), parameters: p, disabled: false, settings: Default::default() };
         let link = |f: &str, o: usize, t: &str| Connection { from_node: f.into(), from_output: o, to_node: t.into(), to_input: 0, error: false };
         let mut wf = linear_workflow();
         wf.nodes = vec![

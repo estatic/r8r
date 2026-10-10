@@ -318,6 +318,7 @@ mod last_update_tests {
         let tg = |params: serde_json::Value| NodeInstance {
             id: "tg".into(),
             node_type: "telegram.trigger".into(),
+            name: None,
             position: (0.0, 0.0),
             parameters: params,
             disabled: false,
@@ -355,6 +356,7 @@ mod last_update_tests {
         let only_42 = NodeInstance {
             id: "tg".into(),
             node_type: "telegram.trigger".into(),
+            name: None,
             position: (0.0, 0.0),
             parameters: serde_json::json!({"restrict_chat_ids": "42"}),
             disabled: false,
@@ -375,6 +377,7 @@ mod update_type_tests {
         NodeInstance {
             id: "tg".into(),
             node_type: "telegram.trigger".into(),
+            name: None,
             position: (0.0, 0.0),
             parameters: params,
             disabled: false,
@@ -1055,6 +1058,7 @@ mod poller_tests {
                 NodeInstance {
                     id: "trigger".into(),
                     node_type: "telegram.trigger".into(),
+                    name: None,
                     position: (0.0, 0.0),
                     parameters: serde_json::json!({
                         "auth": {"credential_id": credential_id.to_string()},
@@ -1131,6 +1135,7 @@ mod poller_tests {
             NodeInstance {
                 id: "passthrough".into(),
                 node_type: "core.noop".into(),
+                name: None,
                 position: (1.0, 0.0),
                 parameters: serde_json::json!({}),
                 disabled: false,
@@ -1225,6 +1230,7 @@ mod poller_tests {
         let set = |tag: &str| NodeInstance {
             id: "set".into(),
             node_type: "core.set".into(),
+            name: None,
             position: (1.0, 0.0),
             parameters: serde_json::json!({"fields": {"tag": tag}}),
             disabled: false,
@@ -1302,6 +1308,7 @@ mod poller_tests {
             NodeInstance {
                 id: "passthrough".into(),
                 node_type: "core.noop".into(),
+                name: None,
                 position: (1.0, 0.0),
                 parameters: serde_json::json!({}),
                 disabled: false,
@@ -1391,8 +1398,8 @@ mod poller_tests {
             name: "queue".into(),
             active: true,
             nodes: vec![
-                NodeInstance { id: "trigger".into(), node_type: "core.manualTrigger".into(), position: (0.0, 0.0), parameters: serde_json::json!({}), disabled: false, settings: Default::default() },
-                NodeInstance { id: "rec".into(), node_type: "test.record".into(), position: (1.0, 0.0), parameters: serde_json::json!({}), disabled: false, settings: Default::default() },
+                NodeInstance { id: "trigger".into(), node_type: "core.manualTrigger".into(), name: None, position: (0.0, 0.0), parameters: serde_json::json!({}), disabled: false, settings: Default::default() },
+                NodeInstance { id: "rec".into(), node_type: "test.record".into(), name: None, position: (1.0, 0.0), parameters: serde_json::json!({}), disabled: false, settings: Default::default() },
             ],
             connections: vec![Connection { from_node: "trigger".into(), from_output: 0, to_node: "rec".into(), to_input: 0, error: false }],
             created_at: chrono::Utc::now(),
@@ -1509,6 +1516,7 @@ mod poller_tests {
         let noop = NodeInstance {
             id: "passthrough".into(),
             node_type: "core.noop".into(),
+            name: None,
             position: (1.0, 0.0),
             parameters: serde_json::json!({}),
             disabled: false,

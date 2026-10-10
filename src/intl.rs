@@ -477,19 +477,19 @@ mod tests {
     use std::collections::HashMap;
 
     fn js(script: &str) -> serde_json::Value {
-        let ctx = EvalContext { json: serde_json::json!({}), items: &[], node_json: &HashMap::new(), workflow_name: "t", args: None };
+        let ctx = EvalContext { json: serde_json::json!({}), items: &[], node_items: &HashMap::new(), workflow_name: "t", args: None };
         eval_js(script, &ctx).unwrap_or_else(|e| panic!("{script}: {e}"))
     }
 
     fn js_err(script: &str) -> String {
-        let ctx = EvalContext { json: serde_json::json!({}), items: &[], node_json: &HashMap::new(), workflow_name: "t", args: None };
+        let ctx = EvalContext { json: serde_json::json!({}), items: &[], node_items: &HashMap::new(), workflow_name: "t", args: None };
         eval_js(script, &ctx).unwrap_err().to_string()
     }
 
     #[test]
     #[ignore = "timing probe, run by hand"]
     fn cost_per_expression() {
-        let ctx = EvalContext { json: serde_json::json!({"a": 1}), items: &[], node_json: &HashMap::new(), workflow_name: "t", args: None };
+        let ctx = EvalContext { json: serde_json::json!({"a": 1}), items: &[], node_items: &HashMap::new(), workflow_name: "t", args: None };
         let start = std::time::Instant::now();
         for _ in 0..500 {
             eval_js("$json.a + 1", &ctx).unwrap();
@@ -507,7 +507,7 @@ mod tests {
     fn evaluate_cases_for_comparison() {
         let path = std::env::var("R8R_INTL_CASES").unwrap();
         let cases: Vec<String> = serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        let ctx = EvalContext { json: serde_json::json!({}), items: &[], node_json: &HashMap::new(), workflow_name: "t", args: None };
+        let ctx = EvalContext { json: serde_json::json!({}), items: &[], node_items: &HashMap::new(), workflow_name: "t", args: None };
         let out: Vec<serde_json::Value> = cases
             .iter()
             .map(|c| match eval_js(c, &ctx) {

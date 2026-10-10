@@ -185,6 +185,7 @@ mod tests {
         NodeInstance {
             id: "http1".into(),
             node_type: "core.httpRequest".into(),
+            name: None,
             position: (0.0, 0.0),
             parameters: serde_json::json!({"auth": {"type": "bearer", "credential_id": id.to_string()}}),
             disabled: false,
@@ -225,6 +226,7 @@ mod tests {
         let wf = workflow_with_nodes(vec![NodeInstance {
             id: "set1".into(),
             node_type: "core.set".into(),
+            name: None,
             position: (0.0, 0.0),
             parameters: serde_json::json!({}),
             disabled: false,
@@ -254,6 +256,7 @@ mod tests {
             nodes: vec![crate::domain::NodeInstance {
                 id: "n1".into(),
                 node_type: "core.httpRequest".into(),
+                name: None,
                 position: (0.0, 0.0),
                 parameters: params,
                 disabled: false,

@@ -196,6 +196,7 @@ mod tests {
                 NodeInstance {
                     id: "trigger".into(),
                     node_type: "core.schedule".into(),
+                    name: None,
                     position: (0.0, 0.0),
                     parameters: serde_json::json!({"cron": cron}),
                     disabled: false,
@@ -204,6 +205,7 @@ mod tests {
                 NodeInstance {
                     id: "set1".into(),
                     node_type: "core.set".into(),
+                    name: None,
                     position: (1.0, 0.0),
                     parameters: serde_json::json!({"fields": {"fired": true}}),
                     disabled: false,
@@ -237,6 +239,7 @@ mod tests {
             nodes: vec![NodeInstance {
                 id: "trigger".into(),
                 node_type: "core.manualTrigger".into(),
+                name: None,
                 position: (0.0, 0.0),
                 parameters: serde_json::json!({}),
                 disabled: false,
@@ -339,6 +342,7 @@ mod tests {
                 NodeInstance {
                     id: "trigger".into(),
                     node_type: "telegram.trigger".into(),
+                    name: None,
                     position: (0.0, 0.0),
                     parameters: serde_json::json!({
                         "auth": {"credential_id": credential_id.to_string()},
@@ -349,6 +353,7 @@ mod tests {
                 NodeInstance {
                     id: "set1".into(),
                     node_type: "core.set".into(),
+                    name: None,
                     position: (1.0, 0.0),
                     parameters: serde_json::json!({"fields": {"fired": true}}),
                     disabled: false,

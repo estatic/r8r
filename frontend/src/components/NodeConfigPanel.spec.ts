@@ -92,8 +92,8 @@ describe('NodeConfigPanel', () => {
   describe('Set node fields', () => {
     const setNode = (fields: Record<string, unknown>): NodeInstance => ({ ...node, node_type: 'core.set', parameters: { fields } })
     const sources = [
-      { nodeId: 'agent', direct: true, fields: [{ path: '.response', preview: '"hi"', segments: ['response'], expression: '{{ $json.response }}' }, { path: '.message.chat.id', preview: '42', segments: ['message', 'chat', 'id'], expression: '{{ $json.message.chat.id }}' }] },
-      { nodeId: 'tg', direct: false, fields: [{ path: '.update_id', preview: '9', segments: ['update_id'], expression: '{{ $node["tg"].json.update_id }}' }] },
+      { nodeId: 'agent', name: 'agent', direct: true, fields: [{ path: '.response', preview: '"hi"', segments: ['response'], expression: '{{ $json.response }}' }, { path: '.message.chat.id', preview: '42', segments: ['message', 'chat', 'id'], expression: '{{ $json.message.chat.id }}' }] },
+      { nodeId: 'tg', name: 'tg', direct: false, fields: [{ path: '.update_id', preview: '9', segments: ['update_id'], expression: '{{ $node["tg"].json.update_id }}' }] },
     ]
     const props = (fields: Record<string, unknown>) => ({ node: setNode(fields), inputSources: sources, nodeLabels: { agent: '🤖 AI Agent', tg: '📨 Telegram Trigger' } })
     const applied = (w: ReturnType<typeof mount>) => (w.emitted('update')![0][0] as NodeInstance).parameters.fields
@@ -132,7 +132,7 @@ describe('NodeConfigPanel', () => {
     })
 
     it('explains how to get data to pick from before a run', async () => {
-      const wrapper = mount(NodeConfigPanel, { props: { node: setNode({}), inputSources: [{ nodeId: 'tg', direct: true, fields: [] }], nodeLabels: {} } })
+      const wrapper = mount(NodeConfigPanel, { props: { node: setNode({}), inputSources: [{ nodeId: 'tg', name: 'tg', direct: true, fields: [] }], nodeLabels: {} } })
       await wrapper.find('[data-testid="add-field"]').trigger('click')
       await wrapper.find('[data-testid="pick-field"]').trigger('click')
       expect(wrapper.find('[data-testid="field-picker"]').text()).toContain('Run the workflow once')
@@ -213,7 +213,7 @@ describe('NodeConfigPanel', () => {
 
   describe('If / Filter conditions', () => {
     const ifNode = (parameters: Record<string, unknown>, node_type = 'core.if'): NodeInstance => ({ ...node, node_type, parameters })
-    const sources = [{ nodeId: 'code', direct: true, fields: [{ path: '.count', preview: '7', segments: ['count'], expression: '{{ $json.count }}' }] }]
+    const sources = [{ nodeId: 'code', name: 'code', direct: true, fields: [{ path: '.count', preview: '7', segments: ['count'], expression: '{{ $json.count }}' }] }]
     const applied = (w: ReturnType<typeof mount>) => (w.emitted('update')![0][0] as NodeInstance).parameters
 
     it('builds a rule from a picked field, an operator and a value', async () => {
@@ -582,8 +582,8 @@ describe('NodeConfigPanel', () => {
 
     it('inserts a field from the previous nodes at the cursor, in the code\'s language', async () => {
       const sources = [
-        { nodeId: 'agent', direct: true, fields: [{ path: '.message.chat.id', preview: '42', segments: ['message', 'chat', 'id'], expression: '' }] },
-        { nodeId: 'tg', direct: false, fields: [{ path: '.update_id', preview: '9', segments: ['update_id'], expression: '' }] },
+        { nodeId: 'agent', name: 'agent', direct: true, fields: [{ path: '.message.chat.id', preview: '42', segments: ['message', 'chat', 'id'], expression: '' }] },
+        { nodeId: 'tg', name: 'tg', direct: false, fields: [{ path: '.update_id', preview: '9', segments: ['update_id'], expression: '' }] },
       ]
       const wrapper = mount(NodeConfigPanel, { props: { node: codeNode({ script: 'const id = ;' }), inputSources: sources, nodeLabels: { agent: 'AI Agent', tg: 'Telegram Trigger' } }, attachTo: document.body })
       const el = code(wrapper).element as HTMLTextAreaElement
@@ -738,5 +738,19 @@ describe('NodeConfigPanel', () => {
     const spy = vi.spyOn(tools, 'fetchAll').mockResolvedValue()
     mount(NodeConfigPanel, { props: { node: agent({}) } })
     expect(spy).toHaveBeenCalled()
+  })
+
+  it('renames the node from its header on Enter or leaving the box', async () => {
+    const node: NodeInstance = { id: 'n1', node_type: 'core.noop', name: 'No Op', position: [0, 0], parameters: {}, disabled: false }
+    const wrapper = mount(NodeConfigPanel, { props: { node } })
+    const input = wrapper.get('[data-testid="node-name"]')
+    expect((input.element as HTMLInputElement).value).toBe('No Op')
+    await input.setValue('Pass along')
+    await input.trigger('blur')
+    expect(wrapper.emitted('rename')).toEqual([['n1', 'Pass along']])
+    await input.setValue('   ')
+    await input.trigger('blur')
+    expect(wrapper.emitted('rename')).toHaveLength(1)
+    expect((input.element as HTMLInputElement).value).toBe('No Op')
   })
 })
