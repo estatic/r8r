@@ -10,6 +10,9 @@ Feature: Migrating an existing n8n instance
   Background:
     Given the n8n database "n8n.sqlite" created from the fixture "n8n-2.35-sqlite.sql"
     And the environment variable "N8N_ENCRYPTION_KEY" is "migrate-key"
+    # The fixture's executions are from 2026-09-26: keep pruning (14 days
+    # by default) from deleting them as the fixture ages.
+    And the environment variable "EXECUTIONS_DATA_MAX_AGE" is "876000"
 
   Scenario: An imported instance serves its users, API clients and webhooks
     When I run "r8r migrate-from-n8n --db=sqlite:n8n.sqlite"
