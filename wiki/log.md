@@ -54,3 +54,5 @@ Operations:
 ## [2026-10-08] query | Plan 2.7: Supabase Vector Store (supabaseApi credential, PostgREST upsert + match_documents RPC, n8n/LangChain error texts); the four planned external vector stores are done; full suite 993/993, supabase feature 6/6 on r8r and n8n 2.35.7
 
 ## [2026-10-08] query | Plan 2.7: Reranker Cohere (cohereApi, CO_API_URL for tests), update mode for Pinecone/Supabase, Simple Vector Store ignores undeclared filter; n8n preload renamed to n8n-api-redirect.cjs; full suite 1001/1001, touched AI features 23/23 on r8r and n8n 2.35.7
+
+## [2026-10-08] compact | auto compaction (summary text unavailable)
